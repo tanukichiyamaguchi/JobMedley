@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -165,8 +166,12 @@ def blank_input_cell() -> str:
     return ""
 
 
-def assert_columns_disjoint() -> None:
-    """Fail loudly if display and input columns ever overlap (11.1).
+def check_columns_disjoint(columns: Sequence[Column]) -> None:
+    """The contract check itself, over any column list.
+
+    列一覧を引数で受けるのは、**検査が効いていることをテストできるように**
+    するため。実際の定義だけを見る検査は、通っているのか何も見ていないのかを
+    区別できない。
 
     ``assert`` 文ではなく例外で書く。``python -O`` では ``assert`` が消え、
     **本番でだけ検査が無効になる**。検査を無効にできる形で書かないこと。
@@ -174,8 +179,8 @@ def assert_columns_disjoint() -> None:
     キーだけでなくヘッダの重複も見る。シート上で人間が見分ける手がかりは
     ヘッダ文字列だけなので、同名ヘッダが2つあると入力先を間違える。
     """
-    display = display_keys()
-    inputs = input_keys()
+    display = [column.key for column in columns if column.role is ColumnRole.DISPLAY]
+    inputs = [column.key for column in columns if column.role is ColumnRole.INPUT]
     overlap = set(display) & set(inputs)
     if overlap:
         raise ConfigError(
@@ -184,16 +189,21 @@ def assert_columns_disjoint() -> None:
             "「手入力」として復活します。"
         )
 
-    keys = column_order()
+    keys = [column.key for column in columns]
     if len(set(keys)) != len(keys):
         raise ConfigError(f"列キーが重複しています: {keys}")
 
-    headers = header_row()
+    headers = [column.header for column in columns]
     if len(set(headers)) != len(headers):
         raise ConfigError(f"列ヘッダが重複しています: {headers}")
 
     if not display or not inputs:
         raise ConfigError("表示列・入力列はどちらも1列以上必要です (11.1)")
+
+
+def assert_columns_disjoint() -> None:
+    """Fail loudly if the declared display and input columns overlap (11.1)."""
+    check_columns_disjoint(ALL_COLUMNS)
 
 
 def assert_slot_columns_complete() -> None:

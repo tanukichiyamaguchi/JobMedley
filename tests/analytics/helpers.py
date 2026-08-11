@@ -17,9 +17,7 @@ from jobmedley_scout.models.send_record import (
 )
 
 
-def jst(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0
-) -> datetime:
+def jst(year: int, month: int, day: int, hour: int = 12, minute: int = 0) -> datetime:
     """A JST wall-clock instant, as the aware UTC datetime the system stores."""
     return datetime(year, month, day, hour, minute, tzinfo=JST).astimezone(UTC)
 

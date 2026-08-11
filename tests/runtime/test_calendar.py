@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -37,12 +37,13 @@ def _cfg(
 
 
 def _jst(year: int, month: int, day: int, hour: int) -> datetime:
-    """A UTC instant that is ``hour`` o'clock JST on the given JST date."""
-    # JST = UTC+9。テストが「JSTでこの時刻」と読めるように逆算して渡す。
-    return datetime(year, month, day, hour, tzinfo=UTC) - _NINE_HOURS
+    """A UTC instant that is ``hour`` o'clock JST on the given JST date.
 
+    本番と同じく **UTC の瞬間を渡す**。テストの読みやすさのために JST から逆算して
+    いるだけで、JST の datetime を直接渡してはいない (それでは変換が試されない)。
+    """
+    return datetime(year, month, day, hour, tzinfo=UTC) - timedelta(hours=9)
 
-_NINE_HOURS = datetime(2000, 1, 1, 9, tzinfo=UTC) - datetime(2000, 1, 1, 0, tzinfo=UTC)
 
 # 2026-08-11 は火曜、08-15 は土曜、08-16 は日曜、09-21 は月曜。
 TUESDAY = (2026, 8, 11)
