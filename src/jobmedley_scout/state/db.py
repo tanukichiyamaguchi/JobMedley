@@ -71,17 +71,16 @@ def migrate(connection: sqlite3.Connection, clock: Clock) -> tuple[int, ...]:
     for version, path in _sql_migrations():
         if version in applied:
             continue
-        connection.execute("BEGIN")
-        try:
-            connection.executescript(path.read_text(encoding="utf-8"))
-            connection.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, isoformat_utc(clock.now())),
-            )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
+        # ``executescript`` は実行前に暗黙のコミットを発行するため、明示的な
+        # BEGIN で囲むことができない (囲むと COMMIT 時に「トランザクションが
+        # 無い」と落ちる)。代わりに **スキーマ側を冪等に書いてある** --
+        # m0001 の DDL はすべて IF NOT EXISTS なので、途中で落ちても次回実行が
+        # 続きから適用して自己修復する。
+        connection.executescript(path.read_text(encoding="utf-8"))
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (version, isoformat_utc(clock.now())),
+        )
         newly_applied.append(version)
     return tuple(newly_applied)
 
