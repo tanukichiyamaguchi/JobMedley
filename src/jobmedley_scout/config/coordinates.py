@@ -373,19 +373,17 @@ COORDINATES_BY_KEY: dict[str, CoordinateSpec] = {spec.key: spec for spec in COOR
 #: 実際に動き、全部埋まるまで何もできない状態にはならない。
 REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
     # 偵察は段階1/2の座標だけで走る。送信系を要求したら鶏と卵になる。
-    "recon-login": frozenset(
-        {
-            "auth.login_url",
-            "auth.is_spa",
-            "auth.email_selector",
-            "auth.password_selector",
-            "auth.submit_selector",
-            "auth.success_marker_selector",
-        }
-    ),
+    #
+    # **段階1は「発見の工程」なので何も要求しない。** ここに auth.* を並べていた
+    # 時期があったが、それは循環だった -- 手動ログインにセレクタは要らない
+    # (人間が自分で入力する)。auth.email_selector 等は *自動* ログイン用であり、
+    # 段階1の **出力** であって入力ではない。要求してしまうと、ラダーの1歩目が
+    # 「1歩目の成果物が無い」という理由で始められなくなる。
+    "recon-login": frozenset(),
+    # 保存セッションで入るので auth.login_url は要らない。到達したい画面
+    # (nav.*) だけが本当に必要な前提。
     "recon-capture-send": frozenset(
         {
-            "auth.login_url",
             "auth.success_marker_selector",
             "nav.candidate_list_url",
             "nav.list_ready_selector",

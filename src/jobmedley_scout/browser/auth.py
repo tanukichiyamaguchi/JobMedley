@@ -81,7 +81,7 @@ def ensure_authenticated(
     if not secrets.has_password_login():
         raise PermanentAuthError(
             "保存セッションが無効で、メール/パスワードも未設定です。認証経路がありません。\n"
-            "ローカルで `scout recon login` をヘッドフル実行して手動ログインし、"
+            "ローカルで `scout recon login` を実行して手動ログインし (常にヘッドフルで開く)、"
             "`scout session export` の出力を CI シークレット "
             "JOBMEDLEY_STORAGE_STATE_B64 に登録してください。"
         )

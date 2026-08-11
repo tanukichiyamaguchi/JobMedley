@@ -16,12 +16,17 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jobmedley_scout.config.audit import assert_ready_for, render_audit
 from jobmedley_scout.config.loader import load_all
 from jobmedley_scout.config.secrets import load_secrets
 from jobmedley_scout.errors import KillSwitchEngaged, ScoutError
 from jobmedley_scout.runtime.exit_codes import ExitCode, exit_code_for
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from jobmedley_scout.config.schema import Config
+    from jobmedley_scout.config.site_coordinates import SiteCoordinates
 
 DEFAULT_CONFIG = Path("config/config.yaml")
 DEFAULT_COORDINATES = Path("config/site_coordinates.yaml")
@@ -53,8 +58,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     recon = sub.add_parser("recon", help="偵察コマンド (常設)")
     recon_sub = recon.add_subparsers(dest="recon_command", required=True)
-    recon_sub.add_parser("login", help="ヘッドフルで手動ログインしセッションを保存")
-    recon_sub.add_parser("verify-session", help="保存セッションで入り直して確認")
+    # ``login`` に --headful は無い。**常にヘッドフルで開く。** 人間が操作する
+    # コマンドなので選択肢にする意味がなく、選べる形にすると headless=true の
+    # 既定のまま実行して「何も起きない」事故が起きる。
+    recon_sub.add_parser("login", help="手動ログインしセッションを保存 (常にヘッドフル)")
+    verify = recon_sub.add_parser("verify-session", help="保存セッションで入り直して確認")
+    # こちらは機械判定なので既定はヘッドレスでよい。目で見たいときだけ開く。
+    verify.add_argument("--headful", action="store_true", help="画面を開いて目視でも確認する")
     recon_sub.add_parser("capture-send", help="送信を中断しつつ内部APIを特定")
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
     recon_sub.add_parser("inbox", help="受信箱の構造を観測")
@@ -149,22 +159,68 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
 
     if args.command == "recon":
-        recon_key = {
-            "login": "recon-login",
-            "verify-session": "recon-login",
-            "capture-send": "recon-capture-send",
-            "resume-keys": "recon-resume-keys",
-            "inbox": "recon-capture-send",
-        }[args.recon_command]
-        assert_ready_for(coordinates, recon_key)
-        raise NotImplementedError(
-            f"偵察コマンド '{args.recon_command}' はヘッドフル実行が前提です。"
-            f"docs/ladder.md 段階1から進めてください。"
-        )
+        return _dispatch_recon(args, config, coordinates)
 
     parser_error = f"未実装のコマンド: {args.command}"
     print(parser_error, file=sys.stderr)
     return int(ExitCode.USAGE)
+
+
+#: 偵察サブコマンドから必須座標集合への写像。``login`` と ``verify-session`` が
+#: ``recon-login`` (空集合) を指すのが要点である。**段階1は発見の工程なので、
+#: 段階1の座標を要求しない。** 要求すると1歩目が自分の成果物待ちで始められない。
+_RECON_COORDINATE_KEYS: dict[str, str] = {
+    "login": "recon-login",
+    "verify-session": "recon-login",
+    "capture-send": "recon-capture-send",
+    "resume-keys": "recon-resume-keys",
+    "inbox": "recon-capture-send",
+}
+
+
+def _dispatch_recon(
+    args: argparse.Namespace,
+    config: Config,
+    coordinates: SiteCoordinates,
+) -> int:
+    assert_ready_for(coordinates, _RECON_COORDINATE_KEYS[args.recon_command])
+
+    if args.recon_command == "login":
+        from jobmedley_scout.recon.manual_login import run_manual_login
+
+        observation = run_manual_login(config.browser, config.paths.credentials_dir)
+        print(observation.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "verify-session":
+        from jobmedley_scout.recon.verify_session import Verdict, verify_saved_session
+
+        browser = (
+            config.browser.model_copy(update={"headless": False})
+            if args.headful
+            else config.browser
+        )
+        result = verify_saved_session(
+            browser,
+            config.paths.credentials_dir,
+            coordinates.selector("auth.success_marker_selector"),
+        )
+        print(result.render())
+        if result.passed:
+            return int(ExitCode.OK)
+        if result.verdict is Verdict.NOT_RESTORED:
+            # 復元できなかった = 保存セッションが無効。認証切れの帯で終える (12.8)。
+            return int(ExitCode.AUTH_EXPIRED)
+        # 判定不能・セッション未作成。**認証切れだと断定しない** ので別の番号。
+        # 「点検で止めた」の帯が意味として一番近い。
+        return int(ExitCode.PREFLIGHT_FAILED)
+
+    raise NotImplementedError(
+        f"偵察コマンド '{args.recon_command}' は段階3以降の配線です。\n"
+        f"  先に段階1 (`scout recon login` → `scout recon verify-session`) と\n"
+        f"  段階2 (`scout preflight`) を通してください。\n"
+        f"  残りの座標の取得方法は `scout coordinates` と docs/ladder.md にあります。"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

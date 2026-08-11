@@ -60,6 +60,6 @@ def to_base64(credentials_dir: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(
             f"保存セッションがありません: {path}\n"
-            f"`scout recon login` をヘッドフルで実行し、手動でログインしてください。"
+            f"`scout recon login` を実行し、手動でログインしてください (常にヘッドフルで開きます)。"
         )
     return base64.b64encode(path.read_bytes()).decode("ascii")

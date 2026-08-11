@@ -97,8 +97,10 @@ python -m playwright install chromium
 ```bash
 scout coordinates         # 未確定の座標を段階別に一覧
 scout preflight           # 環境点検 + 安全弁の実効値を印字
-scout recon login         # 段階1: ヘッドフルで手動ログイン
-scout recon capture-send  # 段階3: 送信を中断しつつ内部APIを特定
+scout recon login          # 段階1: 手動ログイン (常にヘッドフルで開く)
+scout recon verify-session # 段階1の合格条件: 保存セッションで入り直せるか
+scout session export       # 合格したセッションを base64 で出力 (CIシークレット用)
+scout recon capture-send   # 段階3: 送信を中断しつつ内部APIを特定
 scout dryrun --limit 3    # 段階5: 送信直前まで通す
 scout send                # 段階6以降: 本番送信 (二重の明示操作が必要)
 ```
