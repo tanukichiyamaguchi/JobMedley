@@ -16,6 +16,7 @@ from jobmedley_scout.handover.curl_session import (
     storage_state_from_curl,
     summarize,
 )
+from jobmedley_scout.recon.known import is_platform_host
 
 # Chrome の「Copy as cURL (bash)」が出す形。
 CHROME_BASH = r"""curl 'https://customers.job-medley.com/api/v1/scouts' \
@@ -51,14 +52,14 @@ def test_windows_cmd_paste_is_understood() -> None:
 
 
 def test_curl_exe_prefix_is_accepted() -> None:
-    observation = parse_curl('curl.exe "https://example.invalid/x" -H "cookie: a=1"')
+    observation = parse_curl('curl.exe "https://customers.job-medley.com/x" -H "cookie: a=1"')
 
     assert observation.cookie_header == "a=1"
 
 
 def test_short_cookie_flag_is_accepted() -> None:
     """``-b`` 形式で出すブラウザ・拡張もある。"""
-    observation = parse_curl("curl https://example.invalid/x -b 'a=1; b=2'")
+    observation = parse_curl("curl https://customers.job-medley.com/x -b 'a=1; b=2'")
 
     assert observation.cookie_header == "a=1; b=2"
 
@@ -109,14 +110,14 @@ def test_cookies_are_scoped_to_the_observed_host_only() -> None:
 
 def test_cookie_values_containing_equals_survive_intact() -> None:
     """JWT や base64 の値には ``=`` が入る。最初の ``=`` だけで割ること。"""
-    cookies = cookies_from_header("t=eyJhbGc.ZXlKaGJHY2==", url="https://example.invalid/")
+    cookies = cookies_from_header("t=eyJhbGc.ZXlKaGJHY2==", url="https://customers.job-medley.com/")
 
     assert cookies[0].value == "eyJhbGc.ZXlKaGJHY2=="
 
 
 def test_duplicate_cookie_names_keep_the_first() -> None:
     """ブラウザは限定的なスコープのものを先に送る (RFC 6265)。"""
-    cookies = cookies_from_header("s=narrow; s=broad", url="https://example.invalid/")
+    cookies = cookies_from_header("s=narrow; s=broad", url="https://customers.job-medley.com/")
 
     assert [(c.name, c.value) for c in cookies] == [("s", "narrow")]
 
@@ -185,3 +186,40 @@ def test_summary_offers_the_user_agent_as_a_config_value() -> None:
 
     assert "browser.user_agent" in report
     assert "Chrome/140" in report
+
+
+# --- 計測タグを選んでしまう事故 (実際に起きた) --------------------------------
+
+# Google アナリティクスの collect。**クエリに閲覧中のページURLが載っている**ので、
+# 開発者ツールのフィルタに "customers.job-medley.com" と入れても消えない。
+ANALYTICS_BEACON = (
+    "curl 'https://www.google-analytics.com/g/collect?v=2&tid=G-XXXX"
+    "&dl=https%3A%2F%2Fcustomers.job-medley.com%2F' "
+    "-H 'cookie: _ga=GA1.2.3'"
+)
+
+
+def test_an_analytics_beacon_is_refused_even_though_it_mentions_the_platform() -> None:
+    """フィルタを通り抜けてくる形。**手順書の注意書きだけでは防げない。**"""
+    with pytest.raises(ConfigError, match="google-analytics.com"):
+        storage_state_from_curl(ANALYTICS_BEACON)
+
+
+def test_the_refusal_says_how_to_pick_the_right_row() -> None:
+    """止めるだけで代替を言わないと、運用者はそこで詰む。"""
+    with pytest.raises(ConfigError, match="Doc"):
+        storage_state_from_curl(ANALYTICS_BEACON)
+
+
+def test_platform_subdomains_are_allowed() -> None:
+    """認証が customers 以外に置かれている可能性を、観測せずに否定しない。"""
+    assert is_platform_host("customers.job-medley.com") is True
+    assert is_platform_host("job-medley.com") is True
+    assert is_platform_host("api.customers.job-medley.com") is True
+
+
+def test_lookalike_hosts_are_refused() -> None:
+    """末尾一致だけだと、塞いだつもりの穴が残る。"""
+    assert is_platform_host("job-medley.com.example.invalid") is False
+    assert is_platform_host("notjob-medley.com") is False
+    assert is_platform_host("www.google-analytics.com") is False

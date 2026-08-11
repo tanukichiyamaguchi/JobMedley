@@ -45,6 +45,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from jobmedley_scout.errors import ConfigError
+from jobmedley_scout.recon.known import is_platform_host
 
 #: 行継続の記法。bash の ``\`` は :func:`shlex.split` が解釈するので、
 #: ここで潰すのは cmd.exe の ``^`` と PowerShell の バッククォート のみ。
@@ -194,6 +195,21 @@ def cookies_from_header(cookie_header: str, *, url: str) -> tuple[Cookie, ...]:
     parts = urlsplit(url)
     if not parts.hostname:
         raise ConfigError(f"URL からホスト名を取り出せません: {url!r}")
+    if not is_platform_host(parts.hostname):
+        # **実際に起きた間違いを構造で塞ぐ。** 開発者ツールのフィルタは URL 全体への
+        # 部分一致なので、``customers.job-medley.com`` と入力しても計測ビーコンが残る --
+        # ビーコンは閲覧中のページURLを自分のクエリに載せて送るからである。
+        # 手順書の注意書きだけでは、読み飛ばした人が同じ所で落ちる。
+        raise ConfigError(
+            f"ジョブメドレー宛ての通信ではありません: {parts.hostname}\n"
+            f"  計測タグ (Google アナリティクス等) のリクエストを選んでいませんか。\n"
+            f"  開発者ツールのフィルタは URL 全体への部分一致なので、ドメイン名を\n"
+            f"  入力しても計測ビーコンが残ります (ビーコンは閲覧中のページURLを\n"
+            f"  自分のクエリに載せて送るため)。\n"
+            f"  Network タブで **Doc** ボタンを押し、F5 で再読み込みしてから、\n"
+            f"  Request URL が https://customers.job-medley.com/ で始まる行を\n"
+            f"  選び直してください。"
+        )
     domain = parts.hostname
     secure = parts.scheme.lower() == "https"
 
