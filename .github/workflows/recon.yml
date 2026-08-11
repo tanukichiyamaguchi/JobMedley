@@ -18,6 +18,7 @@ on:
         options:
           - session-check
           - verify-session
+          - observe-login
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
 # 開いたところで誰も見られない。選べる形にすると「目視で確認した」つもりの
@@ -69,6 +70,11 @@ jobs:
       - name: Verify session
         if: inputs.command == 'verify-session'
         run: scout recon verify-session
+
+      # 段階1の座標を観測する。**セレクタしか出力しない** ので、個人データは出ない。
+      - name: Observe login
+        if: inputs.command == 'observe-login'
+        run: scout recon observe-login
 
       # 13.2: ここで成果物を残さない。偵察の生データは個人データを含みうるため、
       # 判定結果 (ログに出る文字列) 以外は持ち出さない。

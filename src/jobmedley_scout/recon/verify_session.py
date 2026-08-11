@@ -140,12 +140,37 @@ class VerifyResult:
         lines.append("")
 
         if self.verdict is Verdict.RESTORED:
+            lines.append("結果: ログイン状態が復元されました。")
+            lines.append("")
+            # **次の一手は判定方法で変わる。** 代用判定で成功した時点では段階1は
+            # まだ閉じていないので、そこで「段階2へ」と言うと、厳密判定を通らないまま
+            # 先へ進むことになる。5.5 の判定はマーカーで行うと決めてある。
+            if self.method is VerifyMethod.MARKER:
+                lines.extend(
+                    [
+                        "**段階1は完了です。** 厳密判定で確認できました。",
+                        "",
+                        "次: 段階2 `scout preflight` (Actions からは Recon (manual) ではなく",
+                        "    docs/ladder.md 段階2の手順) へ進んでください。",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "ただし **段階1はまだ閉じていません。** 代用判定だからです。",
+                        "",
+                        "次: `scout recon observe-login` を実行してください。",
+                        "    段階1の座標を観測して、記入用の値を印字します",
+                        "    (auth.success_marker_selector を含む)。",
+                        "    記入後にもう一度この確認を実行すると厳密判定になります。",
+                    ]
+                )
             lines.extend(
                 [
-                    "結果: ログイン状態が復元されました。",
                     "",
-                    "次: `scout session export` の出力を CI のシークレット",
-                    "    JOBMEDLEY_STORAGE_STATE_B64 に登録してください (5.4 経路1)。",
+                    "補足: 手元にPython環境がある場合のみ、`scout session export` の出力を",
+                    "      シークレット JOBMEDLEY_STORAGE_STATE_B64 に登録できます。",
+                    "      クッキー持ち込み (JOBMEDLEY_SESSION_CURL) なら不要です。",
                 ]
             )
         elif self.verdict is Verdict.NOT_RESTORED:

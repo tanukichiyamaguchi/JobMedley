@@ -117,3 +117,47 @@ def test_missing_session_points_back_at_stage_one() -> None:
     ).render()
 
     assert "scout recon login" in report
+
+
+def test_heuristic_success_does_not_declare_stage_one_finished() -> None:
+    """代用判定で「段階2へ」と言うと、厳密判定を通らないまま先へ進むことになる。"""
+    report = VerifyResult(
+        verdict=Verdict.RESTORED,
+        method=VerifyMethod.LOGOUT_HEURISTIC,
+        landed_url="https://customers.job-medley.com/",
+        session_path=SESSION,
+        logout_hits=("ログアウト",),
+    ).render()
+
+    assert "まだ閉じていません" in report
+    assert "observe-login" in report
+    assert "preflight" not in report
+
+
+def test_strict_success_sends_the_operator_to_stage_two() -> None:
+    report = VerifyResult(
+        verdict=Verdict.RESTORED,
+        method=VerifyMethod.MARKER,
+        landed_url="https://customers.job-medley.com/",
+        session_path=SESSION,
+    ).render()
+
+    assert "段階1は完了です" in report
+    assert "preflight" in report
+
+
+def test_the_export_advice_is_marked_optional() -> None:
+    """クッキー持ち込みで運用している人に、実行不能な手順を必須として出さない。
+
+    実行環境は使い捨てで、そもそも手元にCLIが無いこともある。「次にこれをやれ」と
+    書かれた手順が実行できないと、そこで止まってしまう。
+    """
+    report = VerifyResult(
+        verdict=Verdict.RESTORED,
+        method=VerifyMethod.MARKER,
+        landed_url="https://customers.job-medley.com/",
+        session_path=SESSION,
+    ).render()
+
+    assert "補足:" in report
+    assert "手元にPython環境がある場合のみ" in report

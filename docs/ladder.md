@@ -158,30 +158,59 @@ https://www.google-analytics.com/g/collect?v=2&tid=G-XXXX&dl=https%3A%2F%2Fcusto
 > リポジトリのファイル、Issue、PR、チャットに貼らないこと。テキストエディタで確認した
 > 場合も保存しないこと（13.2）。
 
-### 経路A-2: 座標を開発者ツールから読む
+### 経路A-2: 座標を観測させる
 
-ログイン画面を開いた状態で、次を読み取って `config/site_coordinates.yaml` に記入する。
+**開発者ツールで1つずつ読む必要はない。** 段階1の座標8個のうち **7個は機械で観測できる**。
 
-| 座標 | 開発者ツールでの読み方 |
-|---|---|
-| `auth.login_url` | ログインフォームが実際に描画されているURL（アドレスバー） |
-| `auth.is_spa` | **Ctrl+U（ページのソースを表示）**でパスワード欄があるか。あれば `false`、無ければ `true` |
-| `auth.email_selector` | メール欄を右クリック → 検証 → `id` があれば `#その値` |
-| `auth.password_selector` | 同上（パスワード欄） |
-| `auth.submit_selector` | 同上（送信ボタン） |
-| `auth.submit_text_candidates` | 送信ボタンの表示文字（`["ログイン", "サインイン"]` のように複数可） |
-| `auth.success_marker_selector` | **ログイン後にのみ**存在する要素。「ログアウト」リンクなど |
-| `auth.twofa_kind` | 実際に出た2段階認証。`none` / `sms` / `totp` / `email_link` |
+**Actions → Recon (manual) → Run workflow → `observe-login`**
 
-`auth.is_spa` は**ページのソース**（Ctrl+U）で見ること。開発者ツールのElementsタブは
-JavaScript実行後のDOMなので、SPAでもフォームが見つかり、判定が常に `false` になる。
+このコマンドは1回の実行で2つのブラウザを開く。
 
-`auth.success_marker_selector` は特に重要。**遷移の完了やステータスコードで判定しては
-ならない**（5.5）。セレクタは `id` があればそれを使う。`css-1a2b3c4` のようなハッシュ的な
-クラス名は、ビルドのたびに変わるので書いた瞬間から壊れる予定のセレクタになる。
+- **未認証のブラウザ**でサインイン画面を開き、URL・素のHTML・フォーム要素を観測する
+- **認証済みのブラウザ**（保存セッション）でログアウト系の要素を観測する
 
-`auth.twofa_kind` が `email_link` の場合、CIで突破する手段が無いため、この持ち込み経路が
-必須になる（自動ログインへのフォールバックが使えない）。
+この2つが要るのは、**認証済みのままではログインフォームを観測できない**（ログイン済みだと
+追い出される）一方で、**未認証ではログアウトリンクが存在しない**ため。
+
+出力はそのまま `config/site_coordinates.yaml` に貼れる形で出る。
+
+```yaml
+  auth.login_url: "https://customers.job-medley.com/customers/sign_in/"
+  auth.is_spa: false
+    # 素のHTMLにパスワード欄あり = 旧来型のサーバレンダリング
+  auth.email_selector: "#customer_email"
+    # 別案: input[name="customer[email]"]
+    # 別案: input[type="email"]
+  auth.password_selector: "input[name=\"customer[password]\"]"
+  auth.submit_selector: "button[type=\"submit\"]"
+  auth.submit_text_candidates: ["ログイン"]
+
+  auth.success_marker_selector: "#logout"
+    # 「ログアウト」に一致します
+    # 別案: a:has-text("ログアウト")
+```
+
+`別案:` は捨てずに残してある。**選ぶのは人間**であり、上ほど画面変更に強い順
+（`id` > `name`属性 > `type`属性、マーカーは `id` > クラス > テキスト）に並んでいる。
+`css-1a2b3c4` のようなハッシュ的な名前は、ビルドのたびに変わるので候補から除外済み。
+
+観測できなかった項目は `UNRESOLVED` のまま出力される。**空欄を「無い」で埋めない**ので、
+未確定と確定済みの区別は保たれる。
+
+### `auth.twofa_kind` だけは自分で書く
+
+8個のうち1個だけ、機械では観測できない。
+
+```yaml
+  auth.twofa_kind: UNRESOLVED   # none / sms / totp / email_link
+```
+
+**実際に何が出たかは、その場でログインしたあなたしか知らない。** 観測できないものを
+観測したことにはしないので、ここは空欄で出力される。SMSが届いたなら `sms`、認証アプリの
+6桁コードなら `totp`、メールのリンクを踏んだなら `email_link`、何も無ければ `none`。
+
+`email_link` の場合、CIで突破する手段が無いため、いま使っているセッション持ち込みが
+恒久的に必須になる（自動ログインへのフォールバックが使えない）。
 
 ### 経路B: 手元にPython環境がある場合
 
@@ -219,6 +248,7 @@ scout session export    # base64 を標準出力へ
 |---|---|
 | `session-check` | シークレットの**形式**だけを確認する（媒体へは接続しない） |
 | `verify-session` | **合格条件そのもの**。実際に入り直せるかを判定する |
+| `observe-login` | 段階1の座標を観測して、記入用の値を印字する |
 | `coordinates` | 未確定の座標を段階別に一覧する |
 
 手元にPython環境がある場合は同じことをコマンドでもできる。
@@ -260,7 +290,26 @@ scout recon verify-session --headful    # 画面も開いて目視でも確認�
 2. **クッキーが別のサブドメインのもの** — 手順3で選んだリクエストの宛先を確認する。
    このシステムは**観測したホストにだけ**クッキーを紐づける（親ドメインへ広げるのは
    「観測していないホストへセッションを送る」ことなので、意図的にしていない）
-3. **セッションの有効期限切れ** — 取り直す
+3. **セッションの有効期限切れ** — 取り直す（下記）
+
+### セッションが切れたときの取り直し方（恒久的な保守作業）
+
+`Copy as cURL` から作ったクッキーは**セッションクッキー**として扱われる（有効期限は
+`Cookie` ヘッダに現れないので、知らないものを日付として書いていない）。媒体側の
+セッションが切れれば、当然このシステムも入れなくなる。
+
+そうなると `verify-session` が `復元されませんでした`（終了コード10）を返し、本番実行は
+認証切れとして**非0で停止する**。原則2のとおり、静かに0件にはならない。
+
+復旧手順は初回と同じである。
+
+1. 普段のブラウザで媒体にログインし直す
+2. **Doc** フィルタ → F5 → 一番上の行を右クリック → Copy as cURL (bash)
+3. シークレット `JOBMEDLEY_SESSION_CURL` を**上書き**する（Update secret）
+4. `session-check` → `verify-session` で確認する
+
+**切れる周期は媒体次第なので、ここには書かない**（観測していないため）。運用しながら
+実測して、このファイルに追記すること。
 
 ---
 
