@@ -56,9 +56,15 @@ class ChartSpec(BaseModel):
         if not self.y_columns:
             raise ValueError("グラフには1つ以上の系列が必要です")
         for key in (self.x_column, *self.y_columns):
-            # 未知のキーはここで落とす。column_index が ConfigError を投げるので
-            # 「グラフだけ静かに空になる」状態にはならない。
-            role_of(key)
+            # 未知のキーはここで落とす。「グラフだけ静かに空になる」状態にしない。
+            # role_of は設定読込の文脈で ConfigError を投げる関数なので、ここでは
+            # ValueError に翻訳して pydantic に包ませる -- 同じ「不正なグラフ定義」
+            # なのに、どの項目が悪いかで送出される例外型が変わると、呼び出し側が
+            # except を2つ書く羽目になる。
+            try:
+                role_of(key)
+            except ConfigError as exc:
+                raise ValueError(str(exc)) from exc
             if is_input_column(key):
                 # 11.1: 入力列をグラフに出すと、人間の手入力が自動出力の一部として
                 # 表示され、次に見た人がそれを自動判定だと読む。輪はここでも閉じる。
