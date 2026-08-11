@@ -204,6 +204,25 @@ class GenerationConfig(BaseModel):
     matching: MatchingConfig
 
 
+class ThinkingEffort(StrEnum):
+    """Thinking depth. Replaces the retired fixed-token budget.
+
+    **8.2 の事故がまさにこれ**: 「LLM APIの仕様変更で本番が静かに全滅しうる
+    (参照実装では拡張思考のパラメータ形式が廃止され、全件が生成失敗しました)」。
+
+    現行モデル (claude-sonnet-5 / claude-opus-5 等) では
+    ``thinking={"type": "enabled", "budget_tokens": N}`` は **400 で拒否される**。
+    正しくは ``thinking={"type": "adaptive"}`` + ``output_config={"effort": ...}``。
+    固定トークン予算という概念自体が無くなったので、設定項目もそれに合わせてある。
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
 class LlmConfig(BaseModel):
     """13.1: モデル名・最大トークン数・思考の深さを単一情報源に置き、
     コスト重視のモデルへ即座に切り替えられるようにする。"""
@@ -211,9 +230,11 @@ class LlmConfig(BaseModel):
     model_config = _STRICT
 
     model: str
+    #: 非ストリーミングは概ね16000が上限の目安 (それ以上はHTTPタイムアウトの危険)。
     max_tokens: int
     thinking_enabled: bool
-    thinking_budget_tokens: int
+    #: 思考の深さ。**budget_tokens は現行モデルで廃止されている** (上記参照)。
+    effort: ThinkingEffort
     max_retries: int
 
 

@@ -40,6 +40,12 @@ scout = "jobmedley_scout.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# PEP 561 marker. Without it, mypy resolves the installed copy as untyped and
+# silently downgrades every cross-module check to Any -- which would quietly
+# disable the Coord[T] enforcement this project relies on.
+[tool.setuptools.package-data]
+jobmedley_scout = ["py.typed", "state/migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

@@ -216,9 +216,13 @@ generation:
 llm:
   # 13.1: 単一情報源。コスト重視のモデルへ即座に切り替えられるようにする。
   model: "claude-sonnet-5"
+  # 非ストリーミングでの安全な上限の目安。これを大きく超えるならストリーミングが必要。
   max_tokens: 16000
   thinking_enabled: true
-  thinking_budget_tokens: 4000
+  # **budget_tokens ではない。** 現行モデルでは固定トークン予算は廃止されており、
+  # thinking={"type":"adaptive"} + output_config={"effort": ...} が正しい形式。
+  # 旧形式を送ると 400 で全件生成失敗する -- 8.2 の事故そのもの。
+  effort: "medium"
   max_retries: 3
 
 reply:
