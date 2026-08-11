@@ -130,9 +130,7 @@ def test_foreign_native_candidate_is_not_a_target() -> None:
 
 
 def test_is_english_dominant_needs_both_conditions() -> None:
-    english = (
-        "I am a native English speaker from Sydney with ten years of sales experience."
-    )
+    english = "I am a native English speaker from Sydney with ten years of sales experience."
     assert is_english_dominant(english, CFG) is True
     # 文字数は足りても日本語比率が高ければ偽。
     assert is_english_dominant(english + "私は日本語も話します。" * 6, CFG) is False

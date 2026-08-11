@@ -33,9 +33,7 @@ def test_allowlist_is_not_a_code_constant() -> None:
 
 def test_kanji_school_is_domestic() -> None:
     assert is_overseas_university("東京大学", ALLOWLIST) is Determination.NO_MATCH
-    assert is_overseas_university("ノートルダム清心女子大学", ALLOWLIST) is (
-        Determination.NO_MATCH
-    )
+    assert is_overseas_university("ノートルダム清心女子大学", ALLOWLIST) is (Determination.NO_MATCH)
 
 
 def test_unknown_or_empty_is_undeterminable() -> None:

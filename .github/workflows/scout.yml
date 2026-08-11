@@ -1,0 +1,132 @@
+name: Scout (main)
+
+# 12.3: マネージドなスケジューラは「指定時刻に必ず1回」を保証しない。
+# 参照実装では実測で1〜2.5時間の遅延があり、**毎時00分が最も混雑した**。
+# したがって:
+#   - 00分を避ける (:17 / :47)
+#   - 予備の実行を1本用意する (scout-backup.yml) -- ただし冪等性が本番で
+#     証明されてから足すこと (docs/ladder.md 段階7)
+#   - **走行中の実行をキャンセルしない** (キャンセルすると 12.1 の
+#     「状態保存だけ走らず送信記録が巻き戻る」事故を自ら誘発する)
+on:
+  schedule:
+    - cron: "17 23 * * 0-4" # JST 08:17 平日 (UTC-9)
+    - cron: "47 5 * * 1-5" # JST 14:47 平日
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry_run で実行する (false にすると本番送信)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: scout-main
+  # 12.1: **絶対に true にしないこと。** 走行中の実行をキャンセルすると、
+  # 送信後・状態保存前で落ちて送信記録が巻き戻る。参照実装はこれで56件失った。
+  cancel-in-progress: false
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    # 12.2: 実測の倍近くにする。参照実装は30分→50分へ引き上げた (実測最長28分)。
+    # 所要時間 = 起動 + 送信件数 × 平均送信間隔 + 返信スキャン + 分析同期
+    timeout-minutes: 50
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      JOBMEDLEY_STORAGE_STATE_B64: ${{ secrets.JOBMEDLEY_STORAGE_STATE_B64 }}
+      JOBMEDLEY_EMAIL: ${{ secrets.JOBMEDLEY_EMAIL }}
+      JOBMEDLEY_PASSWORD: ${{ secrets.JOBMEDLEY_PASSWORD }}
+      # 12.6: 安全弁は **明示的に環境へ渡す**。参照実装ではガードが環境変数に
+      # 渡っておらず、ドキュメントには手順があるのにCIでは常に無効だった。
+      # preflight がこの実効値と由来を印字するので、渡し忘れは目視で分かる。
+      SCOUT_DRY_RUN: ${{ inputs.dry_run == false && 'false' || 'true' }}
+      SCOUT_STATE_LOSS_GUARD: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          pip install -e '.'
+          python -m playwright install --with-deps chromium
+
+      # 12.7: **状態のみ** をキャッシュする。資格情報は別ディレクトリ
+      # (/tmp/jobmedley-credentials) にあり、ここには含まれない。
+      # 既定ブランチのキャッシュは他ブランチからも復元できるため、セッションを
+      # ここに入れるとリポジトリに書ける者が媒体アカウントを乗っ取れる。
+      - name: Restore state (NOT credentials)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: scout-state-${{ github.run_id }}
+          restore-keys: scout-state-
+
+      # 12.4: 業務ルールの判定はアプリ側。理由が文字列で返るのでログに残る。
+      # 判定が失敗した場合は休止指示が出ないので従来どおり送信される
+      # (設定エラーで業務を止めないフェイルセーフ)。
+      - name: Business calendar
+        id: calendar
+        run: |
+          DECISION=$(scout should-run || echo "RUN: 判定に失敗したためフェイルセーフで続行")
+          echo "$DECISION"
+          if [[ "$DECISION" == SKIP:* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 12.6: **continue-on-error を付けてはならない。**
+      # 参照実装では起動前チェックが「失敗しても続行」設定になっており、
+      # 失敗しても送信が続いた。このステップが落ちたら送信へは進まない。
+      - name: Preflight
+        if: steps.calendar.outputs.skip != 'true'
+        run: scout preflight
+
+      # 9.9 / 順序が仕様: **返信同期は追客より前**。
+      # 返信を取り込む前に追客を撃つと、返信済みの相手に追客が飛ぶ。
+      - name: Sync replies
+        if: steps.calendar.outputs.skip != 'true'
+        run: scout sync-replies
+
+      - name: Ingest and generate
+        if: steps.calendar.outputs.skip != 'true'
+        run: scout ingest && scout generate
+
+      - name: Send
+        if: steps.calendar.outputs.skip != 'true'
+        run: scout send
+
+      - name: Follow-up
+        if: steps.calendar.outputs.skip != 'true'
+        run: scout followup
+
+      - name: Analytics
+        # 9.5: 副次的な書き込みはクリティカルな書き込みを巻き添えにしない。
+        # 分析が落ちても送信記録は既にコミット済みなので、ここは続行してよい。
+        if: always() && steps.calendar.outputs.skip != 'true'
+        continue-on-error: true
+        run: scout analytics
+
+      # 12.8: 実行のたびに1行のサマリを出す。
+      - name: Run summary
+        if: always()
+        run: scout report --last-run >> "$GITHUB_STEP_SUMMARY"
+
+      # 13.2: 個人データの出口。保持期間を短くする。
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-run-${{ github.run_id }}
+          path: |
+            artifacts/analytics
+          retention-days: 14
+
+      # 12.8: 「送信0件」「対象0件」「認証失敗」は能動通知する。
+      # ジョブの実行結果画面だけでは気づけない。
+      - name: Notify on anomaly
+        if: failure()
+        run: scout notify --reason "scout main run failed (run ${{ github.run_id }})"

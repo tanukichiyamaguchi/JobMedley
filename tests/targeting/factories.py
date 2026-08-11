@@ -86,7 +86,9 @@ def make_passing_candidate(**resume_overrides: Any) -> Candidate:
         "age": 35,
         "employments": (
             Employment(company="株式会社エー", occupation="営業", tenure_years=8.0),
-            Employment(company="株式会社ビー", occupation="営業", tenure_years=3.0, is_current=True),
+            Employment(
+                company="株式会社ビー", occupation="営業", tenure_years=3.0, is_current=True
+            ),
         ),
         "educations": (Education(school="東京大学", raw_level="大学卒", faculty="法学部"),),
         "membership_status": "スカウト受付中",

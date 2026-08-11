@@ -88,15 +88,22 @@ def test_membership_without_qualifying_values_is_undeterminable() -> None:
 def test_membership_matches_only_declared_values() -> None:
     cfg = make_targeting_config()
     qualifying = ("スカウト受付中",)
-    assert rule_membership_status(
-        make_candidate(membership_status="スカウト受付中"), cfg, qualifying=qualifying
-    ).determination is Determination.MATCH
-    assert rule_membership_status(
-        make_candidate(membership_status="退会済み"), cfg, qualifying=qualifying
-    ).determination is Determination.NO_MATCH
-    assert rule_membership_status(
-        make_candidate(), cfg, qualifying=qualifying
-    ).determination is Determination.UNDETERMINABLE
+    assert (
+        rule_membership_status(
+            make_candidate(membership_status="スカウト受付中"), cfg, qualifying=qualifying
+        ).determination
+        is Determination.MATCH
+    )
+    assert (
+        rule_membership_status(
+            make_candidate(membership_status="退会済み"), cfg, qualifying=qualifying
+        ).determination
+        is Determination.NO_MATCH
+    )
+    assert (
+        rule_membership_status(make_candidate(), cfg, qualifying=qualifying).determination
+        is Determination.UNDETERMINABLE
+    )
 
 
 def test_membership_presents_the_raw_status_it_matched() -> None:

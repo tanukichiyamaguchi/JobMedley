@@ -1,4 +1,8 @@
-"""既定値なしを構造で強制する (7.1)。宣言と実装は両方向で検査する。"""
+"""The registry contract: no rule may run without a declared policy.
+
+7.1: 既定値なしを構造で強制する。宣言 (YAML) と実装 (ALL_RULES) は独立に
+編集されるので、両方向のずれを検査する。
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,8 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
 
 
 def test_complete_policies_pass() -> None:
-    assert_policies_complete(make_targeting_config()) is None
+    # 例外を出さないことが仕様。戻り値は無い。
+    assert_policies_complete(make_targeting_config())
 
 
 def test_missing_policy_is_a_config_error() -> None:

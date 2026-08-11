@@ -109,13 +109,15 @@ def detect_foreign_native_detail(
         max_distance=cfg.proximity_max_distance,
     )
     marker_label = _marker_label(markers, attribution)
+    # 両側の距離を必ず evidence に出す。同点だったのか大差だったのかが分からないと、
+    # 「なぜこの候補者は除外されなかったのか」を運用者が再現できない。
+    foreign_side = _side_label(attribution.foreign_token, attribution.foreign_distance)
+    japanese_side = _side_label(attribution.japanese_token, attribution.japanese_distance)
     if attribution.attributed_to_foreign:
         return ForeignNativeDetection(
             determination=Determination.MATCH,
             evidence=(
-                f"「{marker_label}」の最近傍が外国語 "
-                f"「{attribution.foreign_token}」(距離{attribution.foreign_distance}) "
-                f"日本語側は{_side_label(attribution.japanese_token, attribution.japanese_distance)}"
+                f"「{marker_label}」の最近傍が外国語 {foreign_side} / 日本語側={japanese_side}"
             ),
             marker=marker_label,
             attribution=attribution,
@@ -124,8 +126,7 @@ def detect_foreign_native_detail(
         determination=Determination.NO_MATCH,
         evidence=(
             f"「{marker_label}」は外国語に帰属しない "
-            f"(日本語側={_side_label(attribution.japanese_token, attribution.japanese_distance)} / "
-            f"外国語側={_side_label(attribution.foreign_token, attribution.foreign_distance)})"
+            f"(日本語側={japanese_side} / 外国語側={foreign_side})"
         ),
         marker=marker_label,
         attribution=attribution,

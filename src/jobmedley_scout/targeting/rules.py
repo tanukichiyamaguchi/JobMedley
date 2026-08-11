@@ -15,11 +15,15 @@ from __future__ import annotations
 
 from typing import Final
 
-from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.config.schema import TargetingConfig
+from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.models.candidate import Candidate, Education
-from jobmedley_scout.models.enums import EDUCATION_MATCH_ORDER, EDUCATION_RANK, EducationLevel
-from jobmedley_scout.models.enums import meets_minimum_education
+from jobmedley_scout.models.enums import (
+    EDUCATION_MATCH_ORDER,
+    EDUCATION_RANK,
+    EducationLevel,
+    meets_minimum_education,
+)
 from jobmedley_scout.models.text_norm import normalize_identifier
 from jobmedley_scout.targeting.dedupe import count_job_changes, dedupe_employers
 from jobmedley_scout.targeting.determination import (
@@ -119,19 +123,20 @@ def rule_longest_tenure(candidate: Candidate, cfg: TargetingConfig) -> RuleOutco
     known = tuple(e for e in employments if e.tenure_years is not None)
     if not known:
         return undeterminable(RULE_LONGEST_TENURE, evidence="在籍年数が1件も取得できていない")
+    known_max = max(e.tenure_years or 0.0 for e in known)
     if len(known) < len(employments):
         # 既知の最大が閾値未満でも、未知の職歴が閾値を超えている可能性が残る。
         # ここを NO_MATCH に畳むと「取れなかった」が「満たさない」に化ける (7.1)。
         return undeterminable(
             RULE_LONGEST_TENURE,
             evidence=(
-                f"既知の最長勤続{max(e.tenure_years or 0.0 for e in known)}年は{threshold}年未満だが、"
+                f"既知の最長勤続{known_max}年は{threshold}年未満だが、"
                 f"在籍年数不明の職歴が{len(employments) - len(known)}件ある"
             ),
         )
     return not_matched(
         RULE_LONGEST_TENURE,
-        evidence=f"最長勤続{max(e.tenure_years or 0.0 for e in known)}年 < {threshold}年",
+        evidence=f"最長勤続{known_max}年 < {threshold}年",
     )
 
 

@@ -128,7 +128,9 @@ def build_subject(
             f"候補者 {candidate.candidate_id} の氏名が空です。件名を組み立てられません。"
         )
 
-    core_subject = _clean_part(core.subject)[:MAX_CORE_SUBJECT_CHARS]
+    # 切り詰めた位置が語の途中や空白だと末尾に空白が残る。正規化キーには影響
+    # しないが、送信される件名に見えるので落としておく。
+    core_subject = _clean_part(core.subject)[:MAX_CORE_SUBJECT_CHARS].strip()
     if not core_subject:
         raise GenerationError(f"候補者 {candidate.candidate_id} の件名が生成されていません。")
 
