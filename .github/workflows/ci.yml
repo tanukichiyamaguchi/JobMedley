@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true # CI は副作用が無いのでキャンセルしてよい (scout.yml とは違う)
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 13.5: 言語バージョンを1つに統一する。設定の対象バージョンと実行環境が
+          # ずれていると静的検査の前提が食い違う。
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      # 13.5: ツールチェーンは pyproject で上限つきに固定してある。
+      # `python -m` で起動するのは、ツール管理系が入れた別環境の実行ファイルが
+      # PATH で優先されると pydantic が見えず、mypy が全モデルを Any に落として
+      # 検査が静かに無効化されるため。
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Typecheck
+        run: python -m mypy
+
+      - name: Test
+        run: python -m pytest -q --cov=jobmedley_scout --cov-report=term-missing
+
+      # ガードレールはソース走査で規約を守らせるもの。落ちたら規約違反が入った合図。
+      - name: Guardrails
+        run: python -m pytest tests/guardrails -v
+
+      # 未確定座標の一覧を毎回出す。ラダーの進捗が PR の Actions ログで追える。
+      - name: Coordinate audit
+        run: python -m jobmedley_scout.cli coordinates

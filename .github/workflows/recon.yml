@@ -1,0 +1,74 @@
+name: Recon (manual)
+
+# 段階1〜3の偵察を **クラウドで** 実行するための手動ワークフロー。
+#
+# なぜ必要か: 段階1の合格条件「保存セッションで入り直せる」の判定には、媒体へ
+# 到達できる実行環境が要る。開発をクラウドで行う運用では、手元に実行環境が無い。
+# このワークフローが、その判定を行える唯一の場所になる。
+#
+# **送信系のコマンドはここに置かない。** 偵察は常設だが (3章)、送信と同じ
+# ワークフローに同居させると、偵察のつもりで送信ステップを踏む事故が起きる。
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "実行する偵察コマンド"
+        type: choice
+        default: verify-session
+        options:
+          - session-check
+          - verify-session
+          - coordinates
+# ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
+# 開いたところで誰も見られない。選べる形にすると「目視で確認した」つもりの
+# 実行が積み重なる。
+
+concurrency:
+  group: scout-recon
+  # 偵察は送信しないのでキャンセルしても状態は壊れない。とはいえ待たせるほどの
+  # 実行時間でもないので、走行中は素直に待たせる。
+  cancel-in-progress: false
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      JOBMEDLEY_STORAGE_STATE_B64: ${{ secrets.JOBMEDLEY_STORAGE_STATE_B64 }}
+      JOBMEDLEY_SESSION_CURL: ${{ secrets.JOBMEDLEY_SESSION_CURL }}
+      # 13.6: 偵察であっても安全弁は明示的に渡す。**渡し忘れを既定値で救わない。**
+      SCOUT_DRY_RUN: "true"
+      SCOUT_STATE_LOSS_GUARD: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          pip install -e '.'
+          python -m playwright install --with-deps chromium
+
+      # 座標の一覧はブラウザも通信も要らない。何が足りないかを見るだけの用途。
+      - name: Coordinates
+        if: inputs.command == 'coordinates'
+        run: scout coordinates
+
+      # シークレットの形が正しいかだけを、媒体へ接続せずに確かめる。
+      # **これはログインできることの確認ではない。** 形式の確認である。
+      - name: Session check
+        if: inputs.command == 'session-check'
+        run: scout session check
+
+      # 段階1の合格条件そのもの。
+      # 終了コード: 0=復元された / 10=復元されなかった / 20=判定不能・未設定。
+      - name: Verify session
+        if: inputs.command == 'verify-session'
+        run: scout recon verify-session
+
+      # 13.2: ここで成果物を残さない。偵察の生データは個人データを含みうるため、
+      # 判定結果 (ログに出る文字列) 以外は持ち出さない。

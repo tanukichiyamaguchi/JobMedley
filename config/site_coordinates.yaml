@@ -1,0 +1,251 @@
+# 媒体座標 — ジョブメドレー
+#
+# **このファイルの UNRESOLVED は未完成ではなく、方針である。**
+#
+# 指示書の一貫した方針は「推測で埋めないこと」(原則3・6.4・8.3・16章)。
+# ここに並んでいるのは、実際にログインして観測しない限り知りようがない値
+# ばかりであり、推測で埋めるとその推測がそのまま送信内容と対象判定に出る。
+#
+# 埋め方:
+#   1. `scout coordinates` で未確定の一覧と取得方法を表示する
+#   2. docs/ladder.md の該当段階の手順を実施する
+#   3. 観測できた値をここに転記する (偵察コマンドの出力は座標キー名付きで出る)
+#
+# 記法:
+#   UNRESOLVED  … まだ確認していない (既定)
+#   null        … 確認した結果、存在しなかった (nullable な座標のみ)
+#
+# この2つは意味が違う。null は確定した答えであり、UNRESOLVED は未確定である。
+# 全キーが必須。省略すると打鍵ミスと同じく検証エラーになる (7.6)。
+
+
+# ========================================================================
+# 段階1: ログインセッションの取得
+# ========================================================================
+
+# https://customers.job-medley.com/customers/sign_in/ を開き、実際にフォームが描画されるURL (リダイレクト後) をアドレスバーから転記する。
+auth.login_url: UNRESOLVED
+
+# ログイン画面で右クリック→ページのソースを表示。
+# フォーム要素がHTMLに含まれていれば false (旧来型)、空の div だけなら true (SPA)。
+# true の場合、送信ボタンのクリックに Enter キーのフォールバックは効かない (5.5)。
+auth.is_spa: UNRESOLVED
+
+# ログインフォームのメールアドレス入力欄。
+# 開発者ツールで要素を検査し、name/id 属性ベースの安定したセレクタを選ぶ。
+auth.email_selector: UNRESOLVED
+
+# ログインフォームのパスワード入力欄。
+auth.password_selector: UNRESOLVED
+
+# ログインの送信ボタン。
+# SPAの場合は複数のテキスト候補で探す方式にするため、auth.submit_text_candidates も併せて埋めること (5.5)。
+auth.submit_selector: UNRESOLVED
+
+# 送信ボタンの表示文字列の候補 (例: ['ログイン', 'サインイン'])。
+# セレクタが効かなかったときのフォールバック。
+auth.submit_text_candidates: UNRESOLVED
+
+# **ログイン後にのみ存在する要素**のセレクタ (「ログアウト」リンクなど)。
+# 遷移の完了やステータスコードで判定してはならない (5.5)。
+# 手動ログイン後に開発者ツールで探すのが確実。
+auth.success_marker_selector: UNRESOLVED
+
+# 2段階認証の種別: none / sms / totp / email_link のいずれか。
+# email_link の場合、CI側で突破する手段が無いため手動ログイン＋セッション持ち込みがほぼ必須になる (4章・5.4)。
+auth.twofa_kind: UNRESOLVED
+
+# ========================================================================
+# 段階2: 起動前チェック
+# ========================================================================
+
+# 手動ログイン直後に候補者一覧のURLへ直接遷移してデータが返るかを試す。
+# 返らなければグループ/拠点/求人アカウントの選択ステップが挟まっている (4章)。
+# その場合 true にし、context.selector を埋める。
+context.selection_required: UNRESOLVED
+
+# グループ/拠点の選択コントロール。
+# 選択が不要なら null。
+# (存在しないことが確認できた場合は null と書いてよい)
+context.selector: UNRESOLVED
+
+# ログイン後のトップ/マイページのURL。
+nav.mypage_url: UNRESOLVED
+
+# 候補者一覧 (検索結果) の画面URL。
+nav.candidate_list_url: UNRESOLVED
+
+# 候補者一覧の描画完了を表す要素。
+# **「通信の静止」を待ってはならない** (5.3) ので、この要素の出現を待つ。
+# 行そのものではなく行のコンテナを選ぶと空結果でも待てる。
+nav.list_ready_selector: UNRESOLVED
+
+# 候補者ドロワー/モーダルを閉じるコントロールの候補を、**実画面で確認した順**に。
+# 総当たりして駄目ならEscape、それでも消えなければ一覧へ再遷移する (5.7)。
+nav.drawer_close_selectors: UNRESOLVED
+
+# ========================================================================
+# 段階3: 偵察 (内部APIの特定)
+# ========================================================================
+
+# 内部APIのオリジン。
+# `scout recon capture-send` の出力から。
+api.base_url: UNRESOLVED
+
+# 候補者一覧取得APIのURL (ページング付き)。
+# 偵察中の応答インデックスから特定する。
+api.candidate_list.url_pattern: UNRESOLVED
+
+# 候補者レジュメ取得APIのURL。
+api.resume.url_pattern: UNRESOLVED
+
+# 送信前チェック (既送信・対象外の除外) API。
+# 無ければ null。
+# (存在しないことが確認できた場合は null と書いてよい)
+api.precheck.url_pattern: UNRESOLVED
+
+# 送信枠の残数照会API。
+# 無ければ null。
+# (存在しないことが確認できた場合は null と書いてよい)
+api.quota.url_pattern: UNRESOLVED
+
+# 冪等キーを載せるヘッダ名。
+# 媒体に受け口が無ければ null (その場合は再試行前に送信済み一覧を照会する手順で代替する、9.2)。
+# (存在しないことが確認できた場合は null と書いてよい)
+api.idempotency_header: UNRESOLVED
+
+# 有料枠の送信API。
+# `scout recon capture-send --slot paid` が記録した中断済みPOSTのURL。
+api.send.paid.url_pattern: UNRESOLVED
+
+# **成功とみなすHTTPステータスの集合。
+# ** エンドポイントごとに違う (参照実装では 200 と 201 が混在した、6.2)。
+# 段階4のdryRun検証で実測する。
+api.send.paid.success_statuses: UNRESOLVED
+
+# 有料枠のpayload形状。
+# IDが配列か単数か、トークンが必要かが枠ごとに違う。
+# 偵察が記録した実リクエストボディをそのまま雛形にする。
+api.send.paid.payload_template: UNRESOLVED
+
+# 無料枠の送信API。
+# 無ければ null。
+# (存在しないことが確認できた場合は null と書いてよい)
+api.send.free.url_pattern: UNRESOLVED
+
+# 無料枠の成功ステータス集合。
+# 無料枠が無ければ null。
+# (存在しないことが確認できた場合は null と書いてよい)
+api.send.free.success_statuses: UNRESOLVED
+
+# 無料枠のpayload形状。
+# 無ければ null。
+# (存在しないことが確認できた場合は null と書いてよい)
+api.send.free.payload_template: UNRESOLVED
+
+# **媒体固有の失効応答フォーマット** (6.6)。
+# 403 に添えられる認証系エラーコードを実測して列挙する。
+# 汎用の401判定だけでは 403＋独自コードを取り逃す。
+# セッションを意図的に失効させて1回叩けば分かる。
+api.auth_failure_codes: UNRESOLVED
+
+# **経験してきた**業界のキーパス。
+# 希望条件配下の同名キーと取り違えないこと -- 参照実装の「ご希望の◯◯業界」という虚偽はこの取り違えが原因 (6.4)。
+resume.fields.experienced_industries: UNRESOLVED
+
+# **経験してきた**職種のキーパス。
+resume.fields.experienced_occupations: UNRESOLVED
+
+# **希望する**業界のキーパス。
+resume.fields.desired_industries: UNRESOLVED
+
+# **希望する**職種のキーパス。
+resume.fields.desired_occupations: UNRESOLVED
+
+# 職歴リストのキーパス。
+resume.fields.employments: UNRESOLVED
+
+# 学歴リストのキーパス。
+resume.fields.educations: UNRESOLVED
+
+# 語学欄のキーパス。
+# 外国語ネイティブ判定は**この欄にのみ**適用する (7.2)。
+# 範囲を絞る以上、この欄が実際に取れているかの確認が新たな前提になるので、抽出実装とログ確認をセットで行うこと。
+resume.fields.language_text: UNRESOLVED
+
+# 年齢のキーパス。
+resume.fields.age: UNRESOLVED
+
+# 会員ステータスのキーパス。
+resume.fields.membership_status: UNRESOLVED
+
+# 専門/得意領域のキーパス。
+resume.fields.specialty: UNRESOLVED
+
+# 職務要約のキーパス。
+resume.fields.summary: UNRESOLVED
+
+# 学歴の生値→EducationLevel の完全一致マップ。
+# 実データで観測した値だけを書く。
+# 網羅は不可能なので、漏れはキーワード推定と UNKNOWN が受ける (3段構え)。
+enums.education.exact_map: UNRESOLVED
+
+# 対象とする会員ステータスの生値 (参照実装では5種類)。
+# 無料枠の経路では適用しない。
+enums.membership.qualifying_values: UNRESOLVED
+
+# マイページから受信箱へ遷移するリンク。
+# **直接URL遷移では一覧の通信が発火しない** (10.3) ため、クリックで辿る導線が必要。
+inbox.entry_link_selector: UNRESOLVED
+
+# 受信箱一覧を返す非同期通信のURLパターン。
+# DOMではなく**この応答本文**に対して照合する (10.3)。
+inbox.list_response_url_pattern: UNRESOLVED
+
+# 応答本文の中で件名が入っている位置。
+# 返信行は 'Re: 送信した件名' になる (10.2)。
+inbox.subject_json_path: UNRESOLVED
+
+# 次ページへ進める操作。
+# **終了判定には使わない** -- 終了は内容の署名で行う (10.5)。
+# DOMにページャが無い前提で書くこと。
+inbox.next_page_control: UNRESOLVED
+
+# 媒体標準の追客(リマインド)機能があるか。
+# あれば自前再送と二重にならないよう設定でどちらか一方に決める (9.8)。
+followup.native_supported: UNRESOLVED
+
+# 媒体標準の追客を指定する送信payloadのパラメータ名。
+# 無ければ null。
+# **オプショナルなネスト構造なら入口でガードすること** (6.7)。
+# (存在しないことが確認できた場合は null と書いてよい)
+followup.param_name: UNRESOLVED
+
+# 追客日数として媒体が受け付ける値 (参照実装は3日・5日・10日の3値のみ)。
+# 想定外の値は既定値に丸める。
+# 無ければ null。
+# (存在しないことが確認できた場合は null と書いてよい)
+followup.allowed_days: UNRESOLVED
+
+# ========================================================================
+# 段階4: dryRun付きの送信検証
+# ========================================================================
+
+# **画面に出ているIDと、送信APIが要求するIDが同じか** (4章)。
+# 違えば true。
+# 歴史のある媒体は新旧サブシステムが同居してID体系が分断されていることがある。
+id.bridge_required: UNRESOLVED
+
+# ========================================================================
+# 段階6: 少件数での本番送信
+# ========================================================================
+
+# APIで橋が架からない場合に、UIから正しいIDを拾う要素 (コピー用URL要素など)。
+# id.bridge_required が false なら null。
+# (存在しないことが確認できた場合は null と書いてよい)
+id.bridge_attribute_selector: UNRESOLVED
+
+# 上記要素の属性値からIDを抜く正規表現 (捕捉グループ1がID)。
+# 不要なら null。
+# (存在しないことが確認できた場合は null と書いてよい)
+id.bridge_extract_pattern: UNRESOLVED
