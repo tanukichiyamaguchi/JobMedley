@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets & credentials — MUST NOT be committed (see 12.7).
+# Credentials live in a separate persistence unit from state (12.7).
+.env
+*.secret
+credentials/
+state/session*.json
+state/storage_state*.json
+*.pem
+*.key
+
+# Runtime state DB and local state directory (12.7: separate from credentials)
+state/*.db
+state/*.sqlite3
+
+# Reconnaissance raw dumps — personal data, short retention only (13.2).
+# Never commit raw resume HTML/JSON or full-page screenshots.
+recon_dumps/
+*.recon.html
+*.recon.json
+*.recon.png
+
+# Kill switch marker (local experimentation)
+STOP_SENDING

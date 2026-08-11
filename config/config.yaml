@@ -1,0 +1,276 @@
+# 求人スカウト自動化システム — 挙動設定
+#
+# 15章の初期値を採用している。**すべて仮置きであり、運用後に実測して更新する。**
+# 運用開始後30日で実測すべき値は docs/ladder.md の末尾を参照。
+#
+# このファイルには既定値が一切効かない。全キーが必須であり、未知のキーは
+# エラーになる (7.6)。キーを書き間違えると「未知のキーがある」と「必須キーが
+# 無い」の2つの独立した失敗になる。
+#
+# 認証情報はここには書かない。環境変数からのみ読む (12.7 / config/secrets.py)。
+
+# 4章・13.6 の記録欄。利用者が確認済みである旨を残す。
+compliance_note: >-
+  対象媒体(ジョブメドレー)の利用規約および自動化ポリシーは、
+  運用者が確認済み。確認日・確認者・確認したポリシーのURLは
+  docs/compliance.md に記録する。媒体側の規約改定時は再確認すること。
+
+safety:
+  # 既定で有効。本番送信は明示操作でのみ解除する (9.1)。
+  dry_run: true
+  # 送信履歴が空のまま実送信しようとしたら中断する (12.1 の巻き戻り事故)。
+  state_loss_guard: true
+  kill_switch_path: "STOP_SENDING"
+  # 取り込み上限。送信上限とは別物 (9.7)。
+  ingest_cap: 200
+  # 13.1: リトライ×フォールバック×修正リトライで最大12まで膨らみうるので、
+  # 構造でコストの上振れを止める。
+  max_llm_requests_per_message: 6
+
+send:
+  # 枠ごとの上限 (9.7)。無料枠が有料枠の上限に食われないよう別建てにする。
+  per_run_cap_paid: 20
+  per_run_cap_free: 50
+  # 送信間隔。dry_run 時にも適用する (5.2)。
+  interval:
+    min_seconds: 20.0
+    max_seconds: 60.0
+
+browser:
+  # ハードコードしない (5.1)。古くなりすぎるとかえって不自然になる。
+  user_agent: >-
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
+    Chrome/131.0.0.0 Safari/537.36
+  locale: "ja-JP"
+  timezone: "Asia/Tokyo"
+  viewport_width: 1366
+  viewport_height: 900
+  accept_language: "ja-JP,ja;q=0.9,en;q=0.8"
+  headless: true
+  # 5.3: 通信の静止は待たない。これは切り上げるための短いタイムアウトであり、
+  # 例外は握りつぶす。成否はマーカー要素の存在で判定する。
+  navigation_timeout_ms: 10000
+  selector_timeout_ms: 15000
+
+waits:
+  between_actions:
+    min_seconds: 0.8
+    max_seconds: 2.5
+  login_form_fields:
+    min_seconds: 0.3
+    max_seconds: 0.9
+  list_paging:
+    min_seconds: 1.0
+    max_seconds: 2.5
+  after_mypage:
+    min_seconds: 2.0
+    max_seconds: 3.5
+  inbox_paging:
+    min_seconds: 2.0
+    max_seconds: 3.0
+
+targeting:
+  age_min: 27
+  age_max: 42
+  # 当初3年。実データで2.8年の候補者が落ちたため緩和した (15章)。
+  min_longest_tenure_years: 2.5
+  # 未満は「直近1年以内の転職」として除外する。
+  min_current_tenure_years: 1.0
+  # その回数**以上**で除外。
+  job_change_threshold_under_30: 3
+  job_change_threshold_30s: 5
+  job_change_threshold_40_plus: 6
+  minimum_education: "university"
+
+  # 7.1: ルールごとの判定不能時の方針。**既定値は無い。**
+  # 未宣言のルールがあると起動時に例外になる (registry の完全性検査)。
+  # 学歴だけ include なのは「大学卒以上を取りこぼさない」を最優先にした
+  # 業務判断 (6.5)。非対称であることが YAML の diff で見えるようにしてある。
+  undeterminable_policy:
+    age: exclude
+    longest_tenure: exclude
+    current_tenure: exclude
+    job_change_count: exclude
+    education: include
+    membership_status: exclude
+    foreign_native: include
+    domestic_university: include
+
+  foreign_language:
+    # 7.3: 上限が無いと長文で必ず何かに当たる。
+    proximity_max_distance: 10
+    latin_min_chars: 50
+    japanese_ratio_threshold: 0.15
+    foreign_languages:
+      - 英語
+      - 中国語
+      - 韓国語
+      - 朝鮮語
+      - フランス語
+      - ドイツ語
+      - スペイン語
+      - ポルトガル語
+      - イタリア語
+      - ロシア語
+      - タイ語
+      - ベトナム語
+      - インドネシア語
+      - マレー語
+      - タガログ語
+      - ヒンディー語
+      - アラビア語
+      - トルコ語
+      - オランダ語
+      - スウェーデン語
+      - ネパール語
+    japanese_tokens:
+      - 日本語
+      - 国語
+      - Japanese
+    native_markers:
+      - ネイティブ
+      - ネイティヴ
+      - native
+      - 母語
+      - 母国語
+      - ネイティブレベル
+      - ネイティブ級
+      - 現地語
+
+  # 7.4: 核までカタカナの国内大学を吸収する許可リスト。
+  # **設定ファイルに置く** (コード内定数だと追加のたびにデプロイが必要になる)。
+  domestic_katakana_universities:
+    - ノートルダム清心女子大学
+    - フェリス女学院大学
+    - ルーテル学院大学
+    - サイバー大学
+    - デジタルハリウッド大学
+    - ビジネス・ブレークスルー大学
+    - キリスト教大学
+    - プール学院大学
+    - ノースアジア大学
+
+generation:
+  max_introductions: 3
+  min_introductions: 1
+  followup_introductions: 1
+  max_exclamation_marks: 2
+  # 8.3 対策4: 共通点がない相手にこれらが出たら修正リトライ。
+  assertive_terms:
+    - 同じ
+    - 同様に
+    - 同期
+    - 同じく
+    - 共通点
+    - 同郷
+    - 同窓
+  # 断定しないラベルは許容する。
+  allowed_soft_terms:
+    - 近い
+    - 近しい
+  # 8.7: 本文に書いてよいドメイン。バリデータで機械的に検証する。
+  url_allowlist:
+    - job-medley.com
+    - customers.job-medley.com
+
+  matching:
+    # 8.3: 既定を順方向のみにする。双方向は「トヨタ自動車」と
+    # 「トヨタ自動車直系の販売会社」を一致させた。
+    bidirectional_substring: false
+    # 3文字未満は後方一致の対象外 ("営業" が12名の "法人営業" に一致した)。
+    min_token_length_for_suffix_match: 3
+    # 業種の総称。企業名一致の根拠から除外する
+    # ("サービス業" と "株式会社サービスプロダクト" が一致した)。
+    industry_generic_terms:
+      - サービス業
+      - 製造業
+      - 小売業
+      - 卸売業
+      - 建設業
+      - 運輸業
+      - 情報通信業
+      - 医療
+      - 介護
+      - 福祉
+      - 教育
+      - 金融
+    # 役職。職種の共通点の根拠から除外する ("課長" の一致で共通点になった)。
+    job_title_stopwords:
+      - 課長
+      - 部長
+      - 係長
+      - 主任
+      - 店長
+      - 支店長
+      - 本部長
+      - 室長
+      - 所長
+      - 局長
+      - 次長
+      - 統括
+      - 主査
+      - 主幹
+      - 顧問
+      - 参与
+
+llm:
+  # 13.1: 単一情報源。コスト重視のモデルへ即座に切り替えられるようにする。
+  model: "claude-sonnet-5"
+  max_tokens: 16000
+  thinking_enabled: true
+  thinking_budget_tokens: 4000
+  max_retries: 3
+
+reply:
+  # 10.2 のガード。
+  subject_min_length: 12
+  subject_prefix_length: 35
+  page_size: 100
+  max_pages: 20
+  response_capture_char_cap: 400000
+  # 9.6: ローテーション付きの再確認バッチ。
+  recheck_batch_size: 60
+  recheck_window_days: 45
+
+followup:
+  # 9.8: どちらが真実かを設定で1つに決める。使わない側は明示的に閉じる。
+  # 媒体標準の追客があるかは段階3の偵察で確定する座標
+  # (followup.native_supported)。確定するまでは自前再送も媒体追客も
+  # 走らせないため disabled にしてある。
+  mode: "disabled"
+  days_after_first: 5
+  # 参照実装では3日・5日・10日の3値のみだった。想定外の値は先頭に丸める。
+  allowed_days: [3, 5, 10]
+
+calendar:
+  # 12.4: 判定はアプリ側に置き、休止の理由を文字列で返す。
+  skip_weekends: true
+  holidays: []
+  send_window_start_hour_jst: 9
+  send_window_end_hour_jst: 19
+
+analytics:
+  # 出力先は差し替え可能。既定はローカル (CSV/Markdown)。
+  sink: "local"
+  weekly_periods: 26
+  monthly_periods: 12
+  trend_weeks: 8
+  trend_months: 6
+  trend_min_sample: 10
+  output_dir: "artifacts/analytics"
+  spreadsheet_id: null
+
+paths:
+  # 12.7: 状態と資格情報は別の永続化単位。
+  # state_dir はキャッシュしてよい。credentials_dir は **してはならない**。
+  state_dir: "state"
+  credentials_dir: "/tmp/jobmedley-credentials"
+  recon_dump_dir: "artifacts/recon"
+  # 13.2: 偵察の生ダンプは保持期間を通常より短くする。
+  recon_dump_retention_days: 3
+
+ids:
+  # 9.3 の2点目: 畳むのは**観測されたパターンのみ**。
+  # ジョブメドレーではまだ表記ゆれを観測していないので空。
+  # 推測で足さないこと -- 別人を1件に merge するほうが表記ゆれより深刻。
+  observed_patterns: []
