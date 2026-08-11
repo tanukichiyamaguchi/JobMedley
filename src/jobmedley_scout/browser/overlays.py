@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -79,10 +80,8 @@ def close_overlay(
             return CloseOutcome(CloseMethod.CONTROL, f"セレクタ {selector} で閉じた")
 
     # 2. どれも押せなければ Escape。
-    try:
+    with contextlib.suppress(Exception):
         page.keyboard.press("Escape")
-    except Exception:
-        pass
     if _confirm_gone(page, overlay_selector):
         return CloseOutcome(CloseMethod.ESCAPE, "Escapeで閉じた")
 

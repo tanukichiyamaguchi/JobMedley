@@ -74,10 +74,9 @@ def discover_key_paths(payload: object, *, max_depth: int = 4) -> tuple[KeyPath,
                 kind, size = _kind_of(value)
                 found.append(KeyPath(path=path, value_kind=kind, size=size))
                 _walk(value, path, depth + 1)
-        elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
-            # 配列は先頭要素の形だけ見る。全要素を辿っても同じ形が並ぶだけ。
-            if node:
-                _walk(node[0], f"{prefix}[]", depth + 1)
+        # 配列は先頭要素の形だけ見る。全要素を辿っても同じ形が並ぶだけ。
+        elif isinstance(node, Sequence) and not isinstance(node, str | bytes) and node:
+            _walk(node[0], f"{prefix}[]", depth + 1)
 
     _walk(payload, "", 0)
     return tuple(found)

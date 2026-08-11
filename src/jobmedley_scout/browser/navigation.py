@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from jobmedley_scout.config.schema import BrowserConfig
@@ -35,12 +36,10 @@ def goto(page: Any, url: str, config: BrowserConfig) -> None:
     読み込み完了イベントを待ちはするが、**来なくても構わない**。本当に見たいのは
     目的の要素であって、通信が静まることではない。
     """
-    try:
+    # 5.3: 短いタイムアウトを付けて例外は握りつぶす。成否は要素で判定する。
+    # ここで落とすと、計測タグが1本刺さっているだけで全処理が止まる。
+    with contextlib.suppress(Exception):
         page.goto(url, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
-    except Exception:
-        # 5.3: 短いタイムアウトを付けて例外は握りつぶす。成否は要素で判定する。
-        # ここで落とすと、計測タグが1本刺さっているだけで全処理が止まる。
-        pass
 
 
 def wait_for_marker(page: Any, selector: str, config: BrowserConfig) -> bool:
