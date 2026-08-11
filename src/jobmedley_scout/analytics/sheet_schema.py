@@ -146,6 +146,14 @@ def column_index(key: str) -> int:
     raise ConfigError(f"未知の列キーです: {key!r}")
 
 
+def header_of(key: str) -> str:
+    """The human-facing header for a column key."""
+    for column in ALL_COLUMNS:
+        if column.key == key:
+            return column.header
+    raise ConfigError(f"未知の列キーです: {key!r}")
+
+
 def role_of(key: str) -> ColumnRole:
     for column in ALL_COLUMNS:
         if column.key == key:

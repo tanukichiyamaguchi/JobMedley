@@ -34,6 +34,7 @@ from jobmedley_scout.analytics.sheet_schema import (
     INPUT_COLUMNS,
     ROW_KEY_COLUMN,
     blank_input_cell,
+    header_of,
     header_row,
     input_keys,
 )
@@ -194,7 +195,11 @@ class LocalSink:
         with path.open(mode, encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, lineterminator=_LINE_TERMINATOR)
             if mode == "w":
-                writer.writerow([ROW_KEY_COLUMN, *(column.header for column in INPUT_COLUMNS)])
+                # 見出しは人間が読む側に合わせる。キー ("cohort") と表示ヘッダが
+                # 混在すると、どの行のことか分からないまま記入されて突合が外れる。
+                writer.writerow(
+                    [header_of(ROW_KEY_COLUMN), *(column.header for column in INPUT_COLUMNS)]
+                )
             for key in missing:
                 writer.writerow([key, *(blank_input_cell() for _ in INPUT_COLUMNS)])
 

@@ -99,6 +99,10 @@ class FirstSend:
 class CohortRow:
     """One period's reply rate, with the per-slot breakdown."""
 
+    #: バケット内の代表値。**``granularity`` と対応する側のフィールドだけが
+    #: 意味を持つ。** 週は月をまたぐ (2026-W31 は7/27〜8/2) ので、週次の行で
+    #: ``cohort.month`` を読むと、その週のどの送信を代表に選んだかで値が変わる。
+    #: 行を識別する値が要るときは常に :attr:`key` を使うこと。
     cohort: Cohort
     key: str
     granularity: Granularity
