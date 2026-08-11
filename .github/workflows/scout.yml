@@ -9,9 +9,15 @@ name: Scout (main)
 #   - **走行中の実行をキャンセルしない** (キャンセルすると 12.1 の
 #     「状態保存だけ走らず送信記録が巻き戻る」事故を自ら誘発する)
 on:
-  schedule:
-    - cron: "17 23 * * 0-4" # JST 08:17 平日 (UTC-9)
-    - cron: "47 5 * * 1-5" # JST 14:47 平日
+  # **段階5を通過するまでコメントアウトしておくこと。** 定時実行を先に有効にすると、
+  # 座標が未確定のまま毎朝ジョブが落ち、通知だけが積み上がる。ラダーの順序を
+  # 飛ばすのと同じことで、「赤いのが普通」に慣れると本物の異常を見落とす。
+  #
+  # 有効化の目安: 段階5 (dry_run=true での全体実行) が通り、preflight が緑になってから。
+  # 12.3 に従い、00分を避けた時刻にしてある。
+  # schedule:
+  #   - cron: "17 23 * * 0-4" # JST 08:17 平日 (UTC-9)
+  #   - cron: "47 5 * * 1-5" # JST 14:47 平日
   workflow_dispatch:
     inputs:
       dry_run:
@@ -43,7 +49,21 @@ jobs:
       # 12.6: 安全弁は **明示的に環境へ渡す**。参照実装ではガードが環境変数に
       # 渡っておらず、ドキュメントには手順があるのにCIでは常に無効だった。
       # preflight がこの実効値と由来を印字するので、渡し忘れは目視で分かる。
-      SCOUT_DRY_RUN: ${{ inputs.dry_run == false && 'false' || 'true' }}
+      #
+      # **event_name の判定を外さないこと。** ここは一度壊していた:
+      #   ${{ inputs.dry_run == false && 'false' || 'true' }}
+      # スケジュール実行では inputs.dry_run が null になる。GitHub の式は型が違う
+      # 比較を **数値に変換して** 行うので、null も false も 0 になり、
+      # `null == false` が **true** になる。つまり定時実行のたびに安全弁が
+      # 外れていた -- 手で外した覚えが無いのに外れている、という 13.6 が禁じている
+      # 形そのものである。
+      #
+      # 13.6: dry_run の解除は **二重に明示的な操作** を要する。手動起動であること
+      # (github.event_name) と、その起動でチェックを外したこと (inputs.dry_run) の
+      # 両方が揃ったときだけ 'false' になる。
+      SCOUT_DRY_RUN: >-
+        ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+            && 'false' || 'true' }}
       SCOUT_STATE_LOSS_GUARD: "true"
 
     steps:
