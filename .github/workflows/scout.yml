@@ -35,6 +35,9 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       JOBMEDLEY_STORAGE_STATE_B64: ${{ secrets.JOBMEDLEY_STORAGE_STATE_B64 }}
+      # 普通のブラウザの Copy as cURL をそのまま入れる欄。ローカルに何も
+      # インストールできない運用のための持ち込み経路 (handover/curl_session.py)。
+      JOBMEDLEY_SESSION_CURL: ${{ secrets.JOBMEDLEY_SESSION_CURL }}
       JOBMEDLEY_EMAIL: ${{ secrets.JOBMEDLEY_EMAIL }}
       JOBMEDLEY_PASSWORD: ${{ secrets.JOBMEDLEY_PASSWORD }}
       # 12.6: 安全弁は **明示的に環境へ渡す**。参照実装ではガードが環境変数に

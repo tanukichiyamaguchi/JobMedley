@@ -80,12 +80,19 @@ pip install -e '.[dev]'
 python -m playwright install chromium
 ```
 
+**手元に何もインストールできない運用にも対応している。** 段階1で人間の操作が要るのは
+ログインそのものだけで、それは普段のブラウザでできる。開発者ツールの
+「Copy as cURL」をシークレット `JOBMEDLEY_SESSION_CURL` に入れれば、残りは
+GitHub Actions 側で完結する (`.github/workflows/recon.yml`)。手順は
+`docs/ladder.md` 段階1の経路A。
+
 環境変数 (**設定ファイルには決して書かない**, 12.7):
 
 | 変数 | 用途 |
 |---|---|
 | `ANTHROPIC_API_KEY` | 文面生成 |
-| `JOBMEDLEY_STORAGE_STATE_B64` | 保存セッション (推奨経路) |
+| `JOBMEDLEY_STORAGE_STATE_B64` | 保存セッション (情報量が多いので優先される) |
+| `JOBMEDLEY_SESSION_CURL` | 普通のブラウザの Copy as cURL。**手元に何も入れずに済む経路** |
 | `JOBMEDLEY_EMAIL` / `JOBMEDLEY_PASSWORD` | 自動ログイン (フォールバック) |
 | `SCOUT_DRY_RUN` | 安全弁の上書き。**preflight が実効値と由来を印字する** |
 | `SCOUT_STATE_LOSS_GUARD` | 同上 |
@@ -97,7 +104,9 @@ python -m playwright install chromium
 ```bash
 scout coordinates         # 未確定の座標を段階別に一覧
 scout preflight           # 環境点検 + 安全弁の実効値を印字
-scout recon login          # 段階1: 手動ログイン (常にヘッドフルで開く)
+scout session import       # 段階1: ブラウザの Copy as cURL からセッションを作る (標準入力)
+scout session check        # シークレットの形式だけを確認する (媒体へ接続しない)
+scout recon login          # 段階1の別経路: 手元で手動ログイン (常にヘッドフル)
 scout recon verify-session # 段階1の合格条件: 保存セッションで入り直せるか
 scout session export       # 合格したセッションを base64 で出力 (CIシークレット用)
 scout recon capture-send   # 段階3: 送信を中断しつつ内部APIを特定

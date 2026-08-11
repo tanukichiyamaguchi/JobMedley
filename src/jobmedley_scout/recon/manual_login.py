@@ -21,7 +21,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +32,7 @@ from typing import Any
 from jobmedley_scout.browser import session_store
 from jobmedley_scout.browser.context import browser_context
 from jobmedley_scout.config.schema import BrowserConfig
+from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.recon.known import LOGOUT_TEXT_HINTS, PUBLIC_SIGN_IN_URL
 
 _PASSWORD_INPUT = re.compile(r"""<input[^>]*type\s*=\s*["']?password["']?""", re.IGNORECASE)
@@ -77,6 +81,32 @@ def marker_selector_candidates(
     if stripped:
         candidates.append(f'{tag}:has-text("{stripped}")')
     return tuple(dict.fromkeys(candidates))
+
+
+def headful_display_available(platform: str, env: Mapping[str, str]) -> bool:
+    """Whether a human could actually see a browser window here.
+
+    クラウドの実行環境でこのコマンドを呼ぶと、Playwright の起動失敗という
+    **原因の分かりにくい形** で落ちる。画面が無いことは事前に分かるので、
+    先に判定して「代わりに何をすればよいか」を言う。
+
+    macOS と Windows には ``DISPLAY`` の概念が無いので、Linux のときだけ見る。
+    無い環境で無条件に止めると、手元のPCで実行できるはずの人まで止めてしまう。
+    """
+    if not platform.startswith("linux"):
+        return True
+    return bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
+
+
+NO_DISPLAY_MESSAGE = (
+    "画面が無い環境では手動ログインできません (ブラウザを開いても見る人がいません)。\n"
+    "  クラウドで作業している場合は、普通のブラウザから持ち込む経路を使ってください:\n"
+    "    1. 普段のブラウザで媒体にログインする (何もインストールしません)\n"
+    "    2. 開発者ツール → Network → 認証済みリクエストを右クリック → Copy as cURL\n"
+    "    3. その文字列を GitHub のシークレット JOBMEDLEY_SESSION_CURL に登録する\n"
+    "    4. Actions の 'Recon (manual)' から verify-session を実行する\n"
+    "  手順の全文は docs/ladder.md 段階1にあります。"
+)
 
 
 @dataclass(frozen=True)
@@ -193,6 +223,11 @@ def run_manual_login(
     (ブラウザごとテストできないので) 非対話環境で誤って起動したときに
     ハングさせないため。
     """
+    # 画面が無いなら、ブラウザを起動する前に止める。起動してから Playwright の
+    # エラーで落ちると、原因が「画面が無いこと」だと分からない。
+    if not headful_display_available(sys.platform, os.environ):
+        raise ConfigError(NO_DISPLAY_MESSAGE)
+
     # ヘッドフルで開く。設定は headless=true が既定なので、ここだけ上書きする。
     # 人間が操作するので、これは譲れない。
     headful = config.model_copy(update={"headless": False})

@@ -9,8 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from jobmedley_scout.recon.manual_login import (
+    NO_DISPLAY_MESSAGE,
     LoginObservation,
     MarkerCandidate,
+    headful_display_available,
     login_form_present_in_html,
     marker_selector_candidates,
 )
@@ -129,3 +131,25 @@ def test_report_says_what_to_do_when_no_marker_was_found() -> None:
 
     assert "候補が見つかりませんでした" in report
     assert "開発者ツール" in report
+
+
+def test_headless_linux_is_recognised_as_having_no_display() -> None:
+    """クラウドの実行環境。ここで手動ログインを始めさせない。"""
+    assert headful_display_available("linux", {}) is False
+
+
+def test_linux_with_a_display_is_fine() -> None:
+    assert headful_display_available("linux", {"DISPLAY": ":0"}) is True
+    assert headful_display_available("linux", {"WAYLAND_DISPLAY": "wayland-0"}) is True
+
+
+def test_macos_and_windows_are_never_blocked() -> None:
+    """DISPLAY の概念が無いだけで、画面はある。ここで止めると手元でも動かない。"""
+    assert headful_display_available("darwin", {}) is True
+    assert headful_display_available("win32", {}) is True
+
+
+def test_the_no_display_message_points_at_the_cloud_route() -> None:
+    """止めるだけで代替を言わないと、運用者はそこで詰む。"""
+    assert "JOBMEDLEY_SESSION_CURL" in NO_DISPLAY_MESSAGE
+    assert "Copy as cURL" in NO_DISPLAY_MESSAGE

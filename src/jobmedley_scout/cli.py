@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,7 +22,7 @@ from typing import TYPE_CHECKING
 from jobmedley_scout.config.audit import assert_ready_for, render_audit
 from jobmedley_scout.config.loader import load_all
 from jobmedley_scout.config.secrets import load_secrets
-from jobmedley_scout.errors import KillSwitchEngaged, ScoutError
+from jobmedley_scout.errors import ConfigError, KillSwitchEngaged, ScoutError
 from jobmedley_scout.runtime.exit_codes import ExitCode, exit_code_for
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -72,6 +73,10 @@ def _build_parser() -> argparse.ArgumentParser:
     session = sub.add_parser("session", help="セッション管理")
     session_sub = session.add_subparsers(dest="session_command", required=True)
     session_sub.add_parser("export", help="保存セッションをbase64で出力 (CIシークレット用)")
+    session_sub.add_parser(
+        "import", help="ブラウザの Copy as cURL を読み取ってセッションを作る (標準入力)"
+    )
+    session_sub.add_parser("check", help="シークレットからセッションを復元できるか確かめる")
 
     optout = sub.add_parser("optout", help="送信停止要求の管理")
     optout_sub = optout.add_subparsers(dest="optout_command", required=True)
@@ -134,10 +139,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         return int(ExitCode.OK)
 
     if args.command == "session":
-        from jobmedley_scout.browser.session_store import to_base64
-
-        print(to_base64(config.paths.credentials_dir))
-        return int(ExitCode.OK)
+        return _dispatch_session(args, config)
 
     # ここから先は媒体座標を要求する。足りなければ **明示的に停止する** --
     # 黙って0件で成功しないことが要件 (原則2)。
@@ -195,6 +197,10 @@ def _dispatch_recon(
     if args.recon_command == "verify-session":
         from jobmedley_scout.recon.verify_session import Verdict, verify_saved_session
 
+        # 12.7: **毎回シークレットから復元する。** 実行環境は使い捨てなので、
+        # 前回の実行が残したファイルを当てにできない。ここで復元しておかないと、
+        # クラウドでは常に「保存セッションがありません」で終わる。
+        _restore_session_from_secrets(config)
         browser = (
             config.browser.model_copy(update={"headless": False})
             if args.headful
@@ -221,6 +227,77 @@ def _dispatch_recon(
         f"  段階2 (`scout preflight`) を通してください。\n"
         f"  残りの座標の取得方法は `scout coordinates` と docs/ladder.md にあります。"
     )
+
+
+def _restore_session_from_secrets(config: Config) -> Path | None:
+    """Materialize the saved session from whichever secret is set.
+
+    12.7 の要求どおり、置き先は ``credentials_dir`` のみ (状態ディレクトリではない)。
+    """
+    from jobmedley_scout.browser.session_store import session_path
+    from jobmedley_scout.config.secrets import restore_storage_state
+
+    return restore_storage_state(load_secrets(), session_path(config.paths.credentials_dir))
+
+
+def _dispatch_session(args: argparse.Namespace, config: Config) -> int:
+    from jobmedley_scout.browser.session_store import session_path, to_base64
+
+    if args.session_command == "export":
+        print(to_base64(config.paths.credentials_dir))
+        return int(ExitCode.OK)
+
+    if args.session_command == "import":
+        from jobmedley_scout.handover.curl_session import (
+            parse_curl,
+            storage_state_from_curl,
+            summarize,
+            write_storage_state,
+        )
+
+        # **標準入力から読む。** 引数で受け取る形にすると、セッションクッキーが
+        # シェル履歴とプロセス一覧に残る。ファイル経由にすると、リポジトリの中に
+        # 置いてそのままコミットする事故が起きる。どちらも取り返しがつかない。
+        pasted = sys.stdin.read()
+        if not pasted.strip():
+            pasted = load_secrets().session_curl or ""
+        if not pasted.strip():
+            raise ConfigError(
+                "入力がありません。ブラウザの開発者ツール → Network で認証済みの\n"
+                "  リクエストを右クリックし「Copy as cURL」でコピーしたものを、\n"
+                "  標準入力から渡すか JOBMEDLEY_SESSION_CURL に設定してください。"
+            )
+
+        state = storage_state_from_curl(pasted)
+        destination = session_path(config.paths.credentials_dir)
+        write_storage_state(state, destination)
+        print(summarize(state, parse_curl(pasted).user_agent))
+        return int(ExitCode.OK)
+
+    if args.session_command == "check":
+        # シークレットが正しい形かどうかだけを、ブラウザも通信も使わずに確かめる。
+        # 媒体へ到達できない環境 (この開発コンテナもそう) でも実行できる。
+        restored = _restore_session_from_secrets(config)
+        if restored is None:
+            print(
+                "シークレットにセッションがありません。\n"
+                "  JOBMEDLEY_STORAGE_STATE_B64 または JOBMEDLEY_SESSION_CURL の\n"
+                "  どちらかを設定してください。",
+                file=sys.stderr,
+            )
+            return int(ExitCode.PREFLIGHT_FAILED)
+
+        from jobmedley_scout.handover.curl_session import summarize
+
+        state = json.loads(restored.read_text(encoding="utf-8"))
+        print(summarize(state))
+        # **これは「ログインできる」ことの確認ではない。** 形が正しいだけである。
+        print("\n注意: 形式の確認だけです。実際に入れるかは verify-session が判定します。")
+        return int(ExitCode.OK)
+
+    parser_error = f"未実装のサブコマンド: session {args.session_command}"
+    print(parser_error, file=sys.stderr)
+    return int(ExitCode.USAGE)
 
 
 if __name__ == "__main__":  # pragma: no cover
