@@ -21,39 +21,16 @@ from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.models.candidate import Candidate
 from jobmedley_scout.targeting.determination import RuleOutcome
 from jobmedley_scout.targeting.rules import (
-    RULE_AGE,
-    RULE_CURRENT_TENURE,
-    RULE_DOMESTIC_UNIVERSITY,
-    RULE_EDUCATION,
-    RULE_FOREIGN_NATIVE,
-    RULE_JOB_CHANGE_COUNT,
-    RULE_LONGEST_TENURE,
     RULE_MEMBERSHIP_STATUS,
-    rule_age,
-    rule_current_tenure,
-    rule_domestic_university,
-    rule_education,
-    rule_foreign_native,
-    rule_job_change_count,
-    rule_longest_tenure,
     rule_membership_status,
 )
 
 #: 3.11 なので ``type X = ...`` は使えない (TypeAlias で書く)。
 Rule: TypeAlias = Callable[[Candidate, TargetingConfig], RuleOutcome]
 
-#: 評価順。除外理由は全件集めるので順序は結果を変えないが、レポートの
-#: 読みやすさのために「安い判定から」並べてある。
-ALL_RULES: tuple[tuple[str, Rule], ...] = (
-    (RULE_AGE, rule_age),
-    (RULE_LONGEST_TENURE, rule_longest_tenure),
-    (RULE_CURRENT_TENURE, rule_current_tenure),
-    (RULE_JOB_CHANGE_COUNT, rule_job_change_count),
-    (RULE_EDUCATION, rule_education),
-    (RULE_MEMBERSHIP_STATUS, rule_membership_status),
-    (RULE_FOREIGN_NATIVE, rule_foreign_native),
-    (RULE_DOMESTIC_UNIVERSITY, rule_domestic_university),
-)
+#: 走っているルールの全部。**ここに並んでいない条件は存在しない。**
+#: 2026-08-12 にビズリーチ由来の6ルールを全廃した経緯は rules.py の冒頭にある。
+ALL_RULES: tuple[tuple[str, Rule], ...] = ((RULE_MEMBERSHIP_STATUS, rule_membership_status),)
 
 ALL_RULE_IDS: tuple[str, ...] = tuple(rule_id for rule_id, _ in ALL_RULES)
 

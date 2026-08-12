@@ -66,15 +66,7 @@ def test_no_module_reads_the_summary_field(path: Path) -> None:
             assert node.attr != "summary", f"{path.name}: resume.summary を参照している"
 
 
-def test_the_language_rule_reads_only_the_language_field() -> None:
-    tree = _tree(PACKAGE / "rules.py")
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "detect_foreign_native_detail"
-    ]
-    assert calls, "語学判定の呼び出しが見つからない"
-    for call in calls:
-        assert ast.unparse(call.args[0]) == "candidate.resume.language_text"
+# 7.2 の「語学判定は語学欄だけを見る」検査はここにあった。外国語ネイティブの
+# ルールごと 2026-08-12 に削除したので、検査対象が存在しない。**通るだけの
+# アサーションとして残さず消した** -- 意味を失った緑は、消えた赤より悪い。
+# 事故の記録と判定ロジックは docs/incidents.md と git に残っている。

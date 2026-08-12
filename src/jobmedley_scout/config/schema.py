@@ -131,44 +131,26 @@ class WaitsConfig(BaseModel):
     inbox_paging: WaitRange
 
 
-class ForeignLanguageConfig(BaseModel):
-    """7.2・7.3 の設定。適用範囲は語学欄のみで固定 (コードの不変条件)。"""
-
-    model_config = _STRICT
-
-    #: 「ネイティブ」表記と言語トークンの最大距離 (7.3)。上限が無いと長文で
-    #: 必ず何かに当たる。
-    proximity_max_distance: int
-    #: 英語優勢判定: ラテン文字がこの文字数以上、かつ日本語文字比率が閾値未満。
-    latin_min_chars: int
-    japanese_ratio_threshold: float
-    foreign_languages: tuple[str, ...]
-    japanese_tokens: tuple[str, ...]
-    native_markers: tuple[str, ...]
-
-
 class TargetingConfig(BaseModel):
+    """What the system filters on. **Deliberately almost empty.**
+
+    2026-08-12 に、指示書15章から持ち込んだビズリーチ参照実装の条件 (年齢・学歴・
+    勤続年数・転職回数・外国語ネイティブ・海外大学) を全廃した。経緯と、なぜ
+    「寛容な閾値で無効化する」形を採らなかったかは
+    :mod:`jobmedley_scout.targeting.rules` の冒頭にある。
+
+    対象の定義は媒体側の検索条件 (座標 ``nav.candidate_list_url``) が持つ。
+    ``extra="forbid"`` があるので、古い設定を持ち込むと ``min_longest_tenure_years``
+    等は **未知のキー** として読込時に落ちる。消えたフィールドが黙って復活する
+    経路は無い。
+    """
+
     model_config = _STRICT
 
-    age_min: int
-    age_max: int
-    #: 同一企業での最長勤続年数の下限 (参照実装は当初3年→実データで2.8年の
-    #: 候補者が落ちたため2.5年に緩和)。
-    min_longest_tenure_years: float
-    #: 現職の在籍年数の下限。未満は「直近1年以内の転職」として除外する。
-    min_current_tenure_years: float
-    #: 年齢帯ごとの転職回数の除外閾値 (この回数**以上**で除外)。
-    job_change_threshold_under_30: int
-    job_change_threshold_30s: int
-    job_change_threshold_40_plus: int
-    minimum_education: str
     #: **ルールIDごとの判定不能時の方針。既定値は無い** (7.1)。
-    #: 未宣言のルールがあれば起動時に例外になる (registry の完全性検査)。
+    #: ここに並ぶ行が、走っているルールの全部である。宣言と実装のどちらかにしか
+    #: 無いルールIDがあれば ConfigError になる (registry の両方向検査)。
     undeterminable_policy: dict[str, UndeterminablePolicy]
-    foreign_language: ForeignLanguageConfig
-    #: 7.4: 核までカタカナの国内大学を吸収する許可リスト。**設定ファイルに置く**
-    #: (コード内の定数にすると追加のたびにデプロイが必要になる)。
-    domestic_katakana_universities: tuple[str, ...]
 
 
 class MatchingConfig(BaseModel):

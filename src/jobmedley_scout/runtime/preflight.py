@@ -30,6 +30,7 @@ from jobmedley_scout.config.effective import SafetySettings, resolve_safety_sett
 from jobmedley_scout.config.schema import Config
 from jobmedley_scout.config.secrets import Secrets
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
+from jobmedley_scout.targeting.registry import ALL_RULE_IDS
 
 
 class CheckStatus(StrEnum):
@@ -159,6 +160,25 @@ def run_preflight(
         "設定の検証",
         CheckStatus.PASS,
         "型付き検証を通過 (未知キー・型不正は読込時に例外、7.6)",
+    )
+
+    # --- 対象条件 ---------------------------------------------------------
+    # **走っているルールを実行前に見せる。** これが無いと、対象条件は設定ファイルを
+    # 開いた人にしか見えない。2026-08-12 にビズリーチ由来の6ルールを全廃したが、
+    # 「消したつもりが残っている」「残したつもりが消えている」を運用面で検知する
+    # 手段が無かった。ここで毎回印字しておけば、実行ログが対象条件の記録になる。
+    #
+    # 添字参照なのは意図的である。宣言と実装がずれていれば KeyError で落ちる --
+    # assert_policies_complete は送信経路でしか呼ばれておらず、点検が素通りする。
+    report.add(
+        "対象条件ルール",
+        CheckStatus.PASS,
+        "有効: "
+        + ", ".join(
+            f"{rule_id}({config.targeting.undeterminable_policy[rule_id].value})"
+            for rule_id in ALL_RULE_IDS
+        )
+        + " — これが全部です (対象の絞り込み自体は媒体側の検索条件が持つ)",
     )
 
     # --- 生成モデル -------------------------------------------------------

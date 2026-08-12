@@ -33,15 +33,19 @@ def test_empty_resume_leaves_every_rule_undeterminable() -> None:
 
 
 def test_undeterminable_exclusions_are_reported_as_rejection_reasons() -> None:
+    """「判定不能で除外した」ことが理由として残らないと、7.1 の再発を検知できない。
+
+    以前は4ルール分をまとめて確認していたが、それらは削除された。
+    **消えた行を .get() などで生き延びさせず、走っているルールで書き直す。**
+    通っているだけの緑のアサーションは、消えたアサーションより悪い。
+    """
     result = apply_targeting(make_candidate(), make_targeting_config())
     reasons = "\n".join(result.rejection_reasons)
-    # 「判定不能で除外した」ことが理由として残らないと、7.1 の再発を検知できない。
-    for rule_id in ("age", "longest_tenure", "current_tenure", "job_change_count"):
-        assert rule_id in reasons
-        assert "判定不能" in reasons
-    # include 方針のルールは除外理由に出ない (通しているので)。
-    assert "foreign_native" not in reasons
-    assert "education" not in reasons
+
+    assert "membership_status" in reasons
+    assert "判定不能" in reasons
+    # 方針も理由文に出る (どちら向きの判断で落ちたのかが後から分かるように)。
+    assert "方針=exclude" in reasons
 
 
 def test_all_undeterminable_and_all_include_makes_a_target() -> None:
