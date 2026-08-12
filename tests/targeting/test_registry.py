@@ -27,11 +27,11 @@ def test_complete_policies_pass() -> None:
 
 def test_missing_policy_is_a_config_error() -> None:
     policies = dict(DEFAULT_POLICIES)
-    del policies["current_tenure"]
+    del policies["membership_status"]
     cfg = make_targeting_config(undeterminable_policy=policies)
     with pytest.raises(ConfigError) as excinfo:
         assert_policies_complete(cfg)
-    assert "current_tenure" in str(excinfo.value)
+    assert "membership_status" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("rule_id", ALL_RULE_IDS)
@@ -63,10 +63,16 @@ def test_shipped_config_declares_a_policy_for_every_rule() -> None:
     assert set(declared) == set(ALL_RULE_IDS)
 
 
-def test_shipped_config_keeps_education_on_the_include_side() -> None:
-    # 6.5: 大学卒以上を取りこぼさないという業務判断。非対称であることが仕様なので
-    # 「揃っていないのは間違いだ」と直されないようテストで固定する (8.5)。
+def test_the_shipped_policy_map_is_the_whole_rule_inventory() -> None:
+    """設定に並ぶ行が、走っているルールの全部であること。
+
+    ここには 6.5 の非対称 (学歴だけ include) を固定するテストがあった。8.5 に
+    従い「揃っていないのは間違いだ」と直されないよう置いていたもので、**学歴
+    ルールごと削除したので消えた**。方針が1本しか無い今、非対称性を実行可能な形で
+    示す場所はもう無い -- その事実は docs/incidents.md に残してある。
+    """
     raw: dict[str, Any] = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     declared = raw["targeting"]["undeterminable_policy"]
-    assert declared["education"] == "include"
-    assert declared["current_tenure"] == "exclude"
+
+    assert set(declared) == set(ALL_RULE_IDS)
+    assert declared["membership_status"] == "exclude"

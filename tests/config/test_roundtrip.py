@@ -22,6 +22,7 @@ import yaml
 from jobmedley_scout.config.coordinates import COORDINATES_BY_KEY
 from jobmedley_scout.config.loader import load_behavior_config, load_site_coordinates
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN, Unresolved
+from jobmedley_scout.config.schema import UndeterminablePolicy
 from jobmedley_scout.errors import ConfigError
 
 REPO = Path(__file__).resolve().parents[2]
@@ -96,24 +97,25 @@ def test_specific_targeting_thresholds_are_exactly_as_written() -> None:
 
     参照実装の事故は「**年齢上限が無言で消える**」だった。抽象的な往復比較だけで
     なく、実際に事故った種類の値を名指しで押さえておく。
+
+    その年齢上限を含む対象条件は 2026-08-12 に全廃した (経緯は
+    ``targeting/rules.py``)。**消えた値のアサーションを ``.get()`` で生き延び
+    させていない** -- 通るだけの緑は、消えた赤より悪い。いま名指しできるのは
+    方針表だけなので、それを押さえる。
+
+    「無言で消える」の防止そのものは
+    :func:`test_every_config_value_survives_validation_unchanged` と
+    ``targeting/registry.py`` の両方向検査が引き継いでいる。後者は、設定と実装の
+    どちらか片方にしか無いルールIDを起動時の例外にする。
     """
     raw = _raw_config()["targeting"]
     targeting = load_behavior_config(CONFIG_PATH).targeting
 
-    assert targeting.age_min == raw["age_min"]
-    assert targeting.age_max == raw["age_max"]
-    assert targeting.min_longest_tenure_years == raw["min_longest_tenure_years"]
-    assert targeting.min_current_tenure_years == raw["min_current_tenure_years"]
-    assert targeting.job_change_threshold_under_30 == raw["job_change_threshold_under_30"]
-    assert targeting.job_change_threshold_30s == raw["job_change_threshold_30s"]
-    assert targeting.job_change_threshold_40_plus == raw["job_change_threshold_40_plus"]
-    # リストは要素数まで一致すること (黙って切り詰められていないか)。
-    assert len(targeting.domestic_katakana_universities) == len(
-        raw["domestic_katakana_universities"]
-    )
-    assert len(targeting.foreign_language.foreign_languages) == len(
-        raw["foreign_language"]["foreign_languages"]
-    )
+    assert dict(targeting.undeterminable_policy) == {
+        key: UndeterminablePolicy(value) for key, value in raw["undeterminable_policy"].items()
+    }
+    # 方針表が空になると全候補者が素通りする。**空は設定ミスとしてしか起きない。**
+    assert targeting.undeterminable_policy
 
 
 def test_safety_values_are_exactly_as_written() -> None:

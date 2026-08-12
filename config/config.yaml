@@ -70,85 +70,19 @@ waits:
     max_seconds: 3.0
 
 targeting:
-  age_min: 27
-  age_max: 40
-  # 当初3年。実データで2.8年の候補者が落ちたため緩和した (15章)。
-  min_longest_tenure_years: 2.5
-  # 未満は「直近1年以内の転職」として除外する。
-  min_current_tenure_years: 1.0
-  # その回数**以上**で除外。
-  job_change_threshold_under_30: 3
-  job_change_threshold_30s: 5
-  job_change_threshold_40_plus: 6
-  minimum_education: "university"
+  # **ビズリーチ由来の対象条件は 2026-08-12 に全廃した。**
+  # 年齢・学歴・勤続年数・転職回数・外国語ネイティブ・海外大学の各条件は
+  # 「緩めた」のではなく「無い」。経緯は src/jobmedley_scout/targeting/rules.py。
+  #
+  # 対象の定義は媒体側の検索条件が持つ (座標 nav.candidate_list_url)。
+  # 年齢の上限も検索セットごとに変わるため、こちらでは絞らない。
+  # **情報源を1つにするための削除であり、二重管理のズレを構造的に無くしている。**
 
   # 7.1: ルールごとの判定不能時の方針。**既定値は無い。**
-  # 未宣言のルールがあると起動時に例外になる (registry の完全性検査)。
-  # 学歴だけ include なのは「大学卒以上を取りこぼさない」を最優先にした
-  # 業務判断 (6.5)。非対称であることが YAML の diff で見えるようにしてある。
+  # ここに並んでいる行が、走っているルールの全部である。
+  # 過不足はどちらも ConfigError になる (registry の両方向検査)。
   undeterminable_policy:
-    age: exclude
-    longest_tenure: exclude
-    current_tenure: exclude
-    job_change_count: exclude
-    education: include
     membership_status: exclude
-    foreign_native: include
-    domestic_university: include
-
-  foreign_language:
-    # 7.3: 上限が無いと長文で必ず何かに当たる。
-    proximity_max_distance: 10
-    latin_min_chars: 50
-    japanese_ratio_threshold: 0.15
-    foreign_languages:
-      - 英語
-      - 中国語
-      - 韓国語
-      - 朝鮮語
-      - フランス語
-      - ドイツ語
-      - スペイン語
-      - ポルトガル語
-      - イタリア語
-      - ロシア語
-      - タイ語
-      - ベトナム語
-      - インドネシア語
-      - マレー語
-      - タガログ語
-      - ヒンディー語
-      - アラビア語
-      - トルコ語
-      - オランダ語
-      - スウェーデン語
-      - ネパール語
-    japanese_tokens:
-      - 日本語
-      - 国語
-      - Japanese
-    native_markers:
-      - ネイティブ
-      - ネイティヴ
-      - native
-      - 母語
-      - 母国語
-      - ネイティブレベル
-      - ネイティブ級
-      - 現地語
-
-  # 7.4: 核までカタカナの国内大学を吸収する許可リスト。
-  # **設定ファイルに置く** (コード内定数だと追加のたびにデプロイが必要になる)。
-  domestic_katakana_universities:
-    - ノートルダム清心女子大学
-    - フェリス女学院大学
-    - ルーテル学院大学
-    - サイバー大学
-    - デジタルハリウッド大学
-    - ビジネス・ブレークスルー大学
-    - キリスト教大学
-    - プール学院大学
-    - ノースアジア大学
 
 generation:
   max_introductions: 3
