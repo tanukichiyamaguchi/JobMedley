@@ -83,6 +83,34 @@ def marker_selector_candidates(
     return tuple(dict.fromkeys(candidates))
 
 
+def form_field_selector_candidates(
+    tag: str, element_id: str | None, name: str | None, type_attr: str | None
+) -> tuple[str, ...]:
+    """Candidate selectors for one login-form field, most stable first.
+
+    座標 ``auth.email_selector`` / ``auth.password_selector`` /
+    ``auth.submit_selector`` の記入を助ける。
+
+    ``id`` > ``name`` 属性 > ``type`` 属性 の順。``name`` を ``type`` より上に
+    置くのは、``type`` がフォーム内で一意とは限らないから (``input[type="text"]``
+    がメール欄と検索欄の両方に一致する画面は珍しくない)。``name`` はサーバへ送る
+    キーそのものなので、画面の作り替えより変わりにくい。
+
+    :func:`marker_selector_candidates` と同じく、ハッシュめいた ``id`` は捨てる --
+    ビルドのたびに変わるので、書いた瞬間から壊れる予定のセレクタになる。
+    """
+    candidates: list[str] = []
+    if element_id and _STABLE_CLASS.match(element_id) and not _HASHY.search(element_id):
+        candidates.append(f"#{element_id}")
+    if name:
+        # 属性値は引用符で囲む。``customer[email]`` のような角括弧を含む name が
+        # 珍しくなく、囲まないとCSSセレクタとして壊れる。
+        candidates.append(f'{tag}[name="{name}"]')
+    if type_attr:
+        candidates.append(f'{tag}[type="{type_attr}"]')
+    return tuple(dict.fromkeys(candidates))
+
+
 def headful_display_available(platform: str, env: Mapping[str, str]) -> bool:
     """Whether a human could actually see a browser window here.
 
@@ -186,7 +214,7 @@ class LoginObservation:
 # --- ブラウザ依存部 (私は検証できない。運用者の実機確認に委ねる) ----------------
 
 
-def _collect_marker_candidates(page: Any) -> tuple[MarkerCandidate, ...]:
+def collect_marker_candidates(page: Any) -> tuple[MarkerCandidate, ...]:
     found: list[MarkerCandidate] = []
     for tag in ("a", "button"):
         try:
@@ -256,7 +284,7 @@ def run_manual_login(
         wait_for_human()
 
         landed_url = page.url
-        candidates = _collect_marker_candidates(page)
+        candidates = collect_marker_candidates(page)
         # 5.4: **ログイン成功直後に保存する。** 終了時だけに任せると、途中で
         # 落ちたときに手動ログインをやり直す羽目になる。
         session_path = session_store.save(context, credentials_dir)

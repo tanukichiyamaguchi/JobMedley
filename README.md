@@ -108,6 +108,7 @@ scout session import       # 段階1: ブラウザの Copy as cURL からセッ�
 scout session check        # シークレットの形式だけを確認する (媒体へ接続しない)
 scout recon login          # 段階1の別経路: 手元で手動ログイン (常にヘッドフル)
 scout recon verify-session # 段階1の合格条件: 保存セッションで入り直せるか
+scout recon observe-login  # 段階1の座標を観測し、YAMLに貼れる形で印字
 scout session export       # 合格したセッションを base64 で出力 (CIシークレット用)
 scout recon capture-send   # 段階3: 送信を中断しつつ内部APIを特定
 scout dryrun --limit 3    # 段階5: 送信直前まで通す
