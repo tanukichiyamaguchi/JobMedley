@@ -80,6 +80,28 @@ def wait_for_interactive(page: Any, timeout_ms: int) -> bool:
     return True
 
 
+def page_title(page: Any) -> str:
+    """The page's title, or empty. Used as evidence of *which* page we were on."""
+    try:
+        return str(page.title() or "").strip()
+    except Exception:
+        return ""
+
+
+def one_line(text: str) -> str:
+    """Collapse a DOM string to a single line.
+
+    **改行を含んだまま持ち回らせない。** この文字列はセレクタ候補
+    (``a:has-text("...")``) と、貼り付け用YAMLのコメント行に埋め込まれる。改行が
+    残っていると、コメントの ``#`` が1行目にしか付かず、2行目以降が YAML の
+    行として解釈される -- 貼り付けた設定が壊れるか、意図しないキーが生える。
+
+    ボタンの表示文字は改行やタブを含むことが普通にある (``<button>ログ\\n
+    アウト</button>``) ので、これは想定外ではなく通常のケースである。
+    """
+    return " ".join(text.split())
+
+
 def clickables(page: Any) -> tuple[Clickable, ...]:
     """Every anchor and button on the page, read in a single round trip."""
     try:
@@ -91,10 +113,11 @@ def clickables(page: Any) -> tuple[Clickable, ...]:
         try:
             found.append(
                 Clickable(
-                    tag=str(item.get("tag", "")),
-                    element_id=item.get("id") or None,
-                    class_names=tuple(str(name) for name in item.get("classes") or ()),
-                    text=str(item.get("text") or "").strip(),
+                    tag=one_line(str(item.get("tag", ""))),
+                    element_id=one_line(str(item.get("id") or "")) or None,
+                    class_names=tuple(one_line(str(name)) for name in item.get("classes") or ()),
+                    # **ここで1行に潰す。** 以降どこへ埋め込まれても改行は出ない。
+                    text=one_line(str(item.get("text") or "")),
                 )
             )
         except AttributeError:  # pragma: no cover - defensive

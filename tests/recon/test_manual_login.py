@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jobmedley_scout.browser.dom import Clickable
+from jobmedley_scout.browser.dom import Clickable, one_line
 from jobmedley_scout.recon.manual_login import (
     NO_DISPLAY_MESSAGE,
     LoginObservation,
@@ -18,6 +18,7 @@ from jobmedley_scout.recon.manual_login import (
     logout_texts_from,
     marker_candidates_from,
     marker_selector_candidates,
+    selector_match_count,
 )
 
 SERVER_RENDERED = """
@@ -174,8 +175,62 @@ def test_logout_elements_become_marker_candidates() -> None:
     ]
 
     assert marker_candidates_from(elements) == (
-        MarkerCandidate("ログアウト", ("#logout-link", "a.nav", 'a:has-text("ログアウト")')),
+        MarkerCandidate("ログアウト", ("#logout-link", 'a:has-text("ログアウト")', "a.nav")),
     )
+
+
+# --- 候補の並び順 (**ここを間違えるとマーカーが役目を失う**) --------------------
+
+
+def test_a_generic_class_never_outranks_a_specific_one() -> None:
+    """**実際に起きた形。**
+
+    ログアウトリンクのクラスは ``c-link`` / ``c-link--alert`` /
+    ``c-header-menu__logout-link`` の3つで、素朴に並べると汎用の ``a.c-link`` が
+    先頭に来た。それは画面中のリンクほぼ全てに一致するので、**ログイン前の画面でも
+    「マーカーあり」になる** -- 5.5 の判定が常に真を返し、認証切れを永久に検知
+    できなくなる。
+    """
+    page = [
+        _clickable("a", None, ("c-link",), "トップ"),
+        _clickable("a", None, ("c-link",), "スカウト"),
+        _clickable("a", None, ("c-link",), "メッセージ"),
+        _clickable(
+            "a", None, ("c-link", "c-link--alert", "c-header-menu__logout-link"), "ログアウト"
+        ),
+    ]
+
+    candidates = marker_candidates_from(page)
+
+    assert candidates[0].selectors[0] == "a.c-header-menu__logout-link"
+    # 汎用クラスは捨てないが、**最後に回す**。選択肢は奪わない。
+    assert candidates[0].selectors[-1] == "a.c-link"
+
+
+def test_a_label_beats_a_class_that_does_not_name_its_purpose() -> None:
+    """一致件数が同じなら、ログアウトという **文言** の方が安全側。
+
+    文言はログイン前の画面には出ない。無関係なクラス名は出うる。守りたいのは
+    「ログアウトしているのにマーカーが一致する」ことの防止なので、そちらを優先する。
+    """
+    page = [_clickable("a", None, ("u-mr8",), "ログアウト")]
+
+    assert marker_candidates_from(page)[0].selectors == (
+        'a:has-text("ログアウト")',
+        "a.u-mr8",
+    )
+
+
+def test_match_counts_come_from_the_page_not_from_a_guess() -> None:
+    page = [
+        _clickable("a", None, ("c-link",), "トップ"),
+        _clickable("a", None, ("c-link", "logout"), "ログアウト"),
+    ]
+
+    assert selector_match_count("a.c-link", page) == 2
+    assert selector_match_count("a.logout", page) == 1
+    assert selector_match_count('a:has-text("ログアウト")', page) == 1
+    assert selector_match_count("a.absent", page) == 0
 
 
 def test_the_two_scanners_agree_on_the_same_dom() -> None:
@@ -225,3 +280,25 @@ def test_unrelated_elements_are_ignored() -> None:
 
     assert marker_candidates_from(elements) == ()
     assert logout_texts_from(elements) == ()
+
+
+def test_multiline_labels_never_reach_a_selector() -> None:
+    """改行を含んだ文言が候補に混ざると、貼り付け用YAMLが壊れる。
+
+    コメント行の ``#`` は1行目にしか付かないので、2行目以降が YAML の行として
+    読まれる。``<button>ログ\\nアウト</button>`` のような改行入りの表示文字は
+    珍しくないので、これは想定外ではなく通常のケースである。
+    """
+    assert one_line("ログ\n  アウト") == "ログ アウト"
+    assert one_line("  \t 送信 \n") == "送信"
+
+    candidates = marker_candidates_from([Clickable("a", None, (), one_line("ログ\nアウト"))])
+
+    assert candidates == ()  # 「ログ アウト」は手掛かり語に一致しない
+
+
+def test_a_normalised_label_still_yields_a_single_line_selector() -> None:
+    candidates = marker_candidates_from([Clickable("a", None, (), one_line("  ログアウト \n "))])
+
+    assert candidates[0].selectors == ('a:has-text("ログアウト")',)
+    assert all("\n" not in selector for selector in candidates[0].selectors)

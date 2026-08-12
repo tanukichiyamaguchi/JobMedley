@@ -14,9 +14,15 @@ import textwrap
 
 import yaml
 
+from jobmedley_scout.browser.dom import Clickable
 from jobmedley_scout.config.coordinates import COORDINATES_BY_KEY
 from jobmedley_scout.config.placeholders import LadderStage
-from jobmedley_scout.recon.manual_login import MarkerCandidate, form_field_selector_candidates
+from jobmedley_scout.recon.manual_login import (
+    STRUCTURE_SAMPLE_LIMIT,
+    MarkerCandidate,
+    form_field_selector_candidates,
+    structure_sample,
+)
 from jobmedley_scout.recon.observe_login import ObservedLogin
 
 
@@ -194,7 +200,7 @@ def test_marker_is_unresolved_when_nothing_logout_like_was_found() -> None:
 
     assert "auth.success_marker_selector: UNRESOLVED" in report
     assert "アカウント名の表示" in report
-    assert "ログイン後の画面には居ますが" in report
+    assert "ログアウト系の要素が見つかりませんでした" in report
 
 
 def test_report_points_at_the_strict_verification() -> None:
@@ -203,3 +209,72 @@ def test_report_points_at_the_strict_verification() -> None:
 
     assert "verify-session" in report
     assert "厳密判定" in report
+
+
+def test_the_report_shows_what_was_on_the_page_not_only_what_was_missing() -> None:
+    """**「無かったもの」だけでは切り分けられない。**
+
+    到達URLがサインインURLのまま、ログアウトリンクもパスワード欄も無い、という
+    報告が実際に出た。3つとも「無い」ので、どの画面を見ていたのか誰にも
+    分からなかった。有ったものを出せば一目で分かる。
+    """
+    report = _observed(
+        marker_candidates=(),
+        authenticated_title="採用管理画面ログイン",
+        authenticated_structure=("a.c-link", "button.c-btn--primary"),
+    ).render()
+
+    assert "採用管理画面ログイン" in report
+    assert "button.c-btn--primary" in report
+    assert "2種" in report
+
+
+def test_the_report_never_prints_page_text():
+    """13.2: この走査は指定された画面を無差別に読む。文言は出さない。"""
+    report = _observed(
+        marker_candidates=(),
+        authenticated_structure=("a.c-card__name",),
+    ).render()
+
+    assert "文言は出しません" in report
+
+
+def test_an_empty_page_says_so_explicitly() -> None:
+    """リンクもボタンも無い = 描画前か真っ白。**黙って空にしない。**"""
+    report = _observed(marker_candidates=(), authenticated_structure=()).render()
+
+    assert "リンクもボタンもありませんでした" in report
+
+
+def test_the_expired_session_branch_also_shows_the_evidence() -> None:
+    report = _observed(
+        marker_candidates=(),
+        authenticated_login_form_visible=True,
+        authenticated_title="採用管理画面ログイン",
+        authenticated_structure=("a.c-link",),
+    ).render()
+
+    assert "セッションが効いていません" in report
+    assert "採用管理画面ログイン" in report
+
+
+def test_the_structure_sample_is_capped() -> None:
+    many = tuple(Clickable("a", None, (f"c-{i}",), f"リンク{i}") for i in range(60))
+
+    assert len(structure_sample(many)) == STRUCTURE_SAMPLE_LIMIT
+
+
+def test_the_structure_sample_carries_no_page_text() -> None:
+    """**個人データを実行ログへ流さない** (13.2)。クラス名は制作者の識別子。"""
+    elements = [Clickable("a", None, ("c-card__name",), "山田太郎 (会員番号 1234567)")]
+
+    sample = structure_sample(elements)
+
+    assert sample == ("a.c-card__name",)
+    assert not any("山田" in token for token in sample)
+
+
+def test_elements_without_classes_still_identify_the_page() -> None:
+    elements = [Clickable("button", None, (), "送信"), Clickable("a", None, ("c-link",), "トップ")]
+
+    assert structure_sample(elements) == ("button", "a.c-link")
