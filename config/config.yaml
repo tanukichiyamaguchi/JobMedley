@@ -71,7 +71,7 @@ waits:
 
 targeting:
   age_min: 27
-  age_max: 42
+  age_max: 40
   # 当初3年。実データで2.8年の候補者が落ちたため緩和した (15章)。
   min_longest_tenure_years: 2.5
   # 未満は「直近1年以内の転職」として除外する。
