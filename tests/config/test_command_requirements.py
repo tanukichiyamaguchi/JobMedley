@@ -17,9 +17,13 @@ from pathlib import Path
 import pytest
 
 from jobmedley_scout.config.audit import assert_ready_for
-from jobmedley_scout.config.coordinates import COORDINATES_BY_KEY, REQUIRED_BY_COMMAND
+from jobmedley_scout.config.coordinates import (
+    COORDINATES,
+    COORDINATES_BY_KEY,
+    REQUIRED_BY_COMMAND,
+)
 from jobmedley_scout.config.loader import load_site_coordinates
-from jobmedley_scout.config.placeholders import LadderStage
+from jobmedley_scout.config.placeholders import LadderStage, Unresolved
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
 from jobmedley_scout.errors import UnresolvedCoordinateError
 
@@ -38,14 +42,20 @@ def test_manual_login_requires_no_coordinates() -> None:
     assert REQUIRED_BY_COMMAND["recon-login"] == frozenset()
 
 
-def test_manual_login_runs_with_every_coordinate_unresolved(
-    shipped_coordinates: SiteCoordinates,
-) -> None:
-    """座標が1つも埋まっていない状態 = クローン直後でも、段階1は開始できる。"""
-    # 前提の確認: 本当に全件未確定か。ここが崩れるとテストが意味を失う。
-    assert shipped_coordinates.resolved_keys() == ()
+def test_manual_login_runs_with_every_coordinate_unresolved() -> None:
+    """座標が1つも埋まっていない状態 = クローン直後でも、段階1は開始できる。
 
-    assert_ready_for(shipped_coordinates, "recon-login")  # 例外が出ないこと
+    **リポジトリ内の座標ファイルを使わない。** 以前はそれを使い「全件未確定である
+    こと」を前提に確認していたが、その前提はラダーを1段登った瞬間に崩れ、テストは
+    「段階1が開始できるか」ではなく「まだ何も埋まっていないか」を検査するものに
+    成り下がっていた。検査したいのは前者なので、全件未確定の座標をここで組み立てる。
+    """
+    nothing_known = SiteCoordinates(
+        {spec.key: Unresolved(spec.key, spec.stage, spec.how_to_obtain) for spec in COORDINATES}
+    )
+
+    assert nothing_known.resolved_keys() == ()
+    assert_ready_for(nothing_known, "recon-login")  # 例外が出ないこと
 
 
 def test_stage_one_coordinates_are_never_required_by_recon_commands() -> None:
