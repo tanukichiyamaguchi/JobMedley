@@ -14,9 +14,16 @@ import textwrap
 
 import yaml
 
+from jobmedley_scout.browser.dom import Clickable
 from jobmedley_scout.config.coordinates import COORDINATES_BY_KEY
 from jobmedley_scout.config.placeholders import LadderStage
-from jobmedley_scout.recon.manual_login import MarkerCandidate, form_field_selector_candidates
+from jobmedley_scout.recon.manual_login import (
+    LABEL_LENGTH_LIMIT,
+    LABEL_SAMPLE_LIMIT,
+    MarkerCandidate,
+    form_field_selector_candidates,
+    label_sample,
+)
 from jobmedley_scout.recon.observe_login import ObservedLogin
 
 
@@ -194,7 +201,7 @@ def test_marker_is_unresolved_when_nothing_logout_like_was_found() -> None:
 
     assert "auth.success_marker_selector: UNRESOLVED" in report
     assert "アカウント名の表示" in report
-    assert "ログイン後の画面には居ますが" in report
+    assert "ログアウト系の要素が見つかりませんでした" in report
 
 
 def test_report_points_at_the_strict_verification() -> None:
@@ -203,3 +210,60 @@ def test_report_points_at_the_strict_verification() -> None:
 
     assert "verify-session" in report
     assert "厳密判定" in report
+
+
+def test_the_report_shows_what_was_on_the_page_not_only_what_was_missing() -> None:
+    """**「無かったもの」だけでは切り分けられない。**
+
+    到達URLがサインインURLのまま、ログアウトリンクもパスワード欄も無い、という
+    報告が実際に出た。3つとも「無い」ので、どの画面を見ていたのか誰にも
+    分からなかった。有ったものを出せば一目で分かる。
+    """
+    report = _observed(
+        marker_candidates=(),
+        authenticated_title="採用管理画面ログイン",
+        authenticated_labels=("ログイン", "求人掲載のお申し込み", "求職者ログイン"),
+    ).render()
+
+    assert "採用管理画面ログイン" in report
+    assert "求職者ログイン" in report
+    assert "3件" in report
+
+
+def test_an_empty_page_says_so_explicitly() -> None:
+    """リンクもボタンも無い = 描画前か真っ白。**黙って空にしない。**"""
+    report = _observed(marker_candidates=(), authenticated_labels=()).render()
+
+    assert "リンクもボタンもありませんでした" in report
+
+
+def test_the_expired_session_branch_also_shows_the_evidence() -> None:
+    report = _observed(
+        marker_candidates=(),
+        authenticated_login_form_visible=True,
+        authenticated_title="採用管理画面ログイン",
+        authenticated_labels=("ログイン",),
+    ).render()
+
+    assert "セッションが効いていません" in report
+    assert "採用管理画面ログイン" in report
+
+
+def test_labels_are_capped_in_count_and_length() -> None:
+    """13.2: 段階3以降では候補者名が並ぶ画面でも呼ばれうる。上限で切る。"""
+    many = tuple(Clickable("a", None, (), f"リンク{i}" + "あ" * 80) for i in range(60))
+    sample = label_sample(many)
+
+    assert len(sample) == LABEL_SAMPLE_LIMIT
+    assert all(len(label) <= LABEL_LENGTH_LIMIT for label in sample)
+
+
+def test_duplicate_and_blank_labels_are_dropped() -> None:
+    elements = [
+        Clickable("a", None, (), "トップ"),
+        Clickable("a", None, (), "   "),
+        Clickable("button", None, (), "トップ"),
+        Clickable("a", None, (), "スカウト"),
+    ]
+
+    assert label_sample(elements) == ("トップ", "スカウト")

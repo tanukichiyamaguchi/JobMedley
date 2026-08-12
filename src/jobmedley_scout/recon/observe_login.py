@@ -37,16 +37,23 @@ from typing import Any
 
 from jobmedley_scout.browser import session_store
 from jobmedley_scout.browser.context import browser_context
-from jobmedley_scout.browser.dom import PASSWORD_INPUT, login_form_visible
+from jobmedley_scout.browser.dom import (
+    PASSWORD_INPUT,
+    clickables,
+    login_form_visible,
+    page_title,
+    wait_for_interactive,
+)
 from jobmedley_scout.browser.navigation import goto, marker_present
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.known import PUBLIC_SIGN_IN_URL
 from jobmedley_scout.recon.manual_login import (
     MarkerCandidate,
-    collect_marker_candidates,
     form_field_selector_candidates,
+    label_sample,
     login_form_present_in_html,
+    marker_candidates_from,
 )
 
 #: 送信ボタンらしき要素を探す順。上ほど確実。
@@ -89,6 +96,11 @@ class ObservedLogin:
     authenticated_url: str
     #: その画面にパスワード欄があったか。**あるならセッションが効いていない。**
     authenticated_login_form_visible: bool
+    #: 認証済みの画面のタイトル。どの画面に居たのかの証拠。
+    authenticated_title: str = ""
+    #: その画面に実際にあったリンク/ボタンの見出し (上限あり)。
+    #: **無かったものではなく、有ったものを出す。**
+    authenticated_labels: tuple[str, ...] = ()
 
     @property
     def authenticated_observation(self) -> bool:
@@ -104,6 +116,25 @@ class ObservedLogin:
         「ログインしていない画面」である。
         """
         return self.session_present and not self.authenticated_login_form_visible
+
+    def _evidence_lines(self) -> list[str]:
+        """What was actually on the authenticated page.
+
+        **「無かったもの」だけでは切り分けられない。** 到達URLがサインインURLのまま、
+        ログアウトリンクもパスワード欄も無い、という報告が実際に出た。3つとも
+        「無い」ので、どの画面を見ていたのか誰にも分からなかった。有ったものを
+        出せば、ログイン画面なのか、ログイン後の画面なのか、空なのかが一目で分かる。
+        """
+        lines = [f"    # 到達URL  : {self.authenticated_url or '(記録なし)'}"]
+        if self.authenticated_title:
+            lines.append(f"    # ページ名 : {self.authenticated_title}")
+        if self.authenticated_labels:
+            lines.append(f"    # 画面にあったリンク/ボタン ({len(self.authenticated_labels)}件):")
+            lines.extend(f"    #   - {label}" for label in self.authenticated_labels)
+        else:
+            lines.append("    # 画面にリンクもボタンもありませんでした。")
+            lines.append("    #   描画前か、真っ白な画面に着いています。")
+        return lines
 
     def _yaml_line(self, key: str, candidates: tuple[str, ...]) -> list[str]:
         """One coordinate as a paste-ready line, with the alternatives beneath it.
@@ -164,8 +195,9 @@ class ObservedLogin:
                 [
                     f"  auth.success_marker_selector: {UNRESOLVED_TOKEN}",
                     "    # **セッションが効いていません。** 認証済みで開いたはずの画面に",
-                    f"    # パスワード欄がありました (到達URL: {self.authenticated_url})。",
+                    "    # パスワード欄がありました。",
                     "    # マーカーが存在しないのではなく、ログイン後の画面を見ていません。",
+                    *self._evidence_lines(),
                     "    # セッションを取り直してから、もう一度実行してください",
                     "    # (docs/ladder.md「セッションが切れたときの取り直し方」)。",
                 ]
@@ -186,10 +218,10 @@ class ObservedLogin:
             lines.extend(
                 [
                     f"  auth.success_marker_selector: {UNRESOLVED_TOKEN}",
-                    "    # ログイン後の画面には居ますが、ログアウト系の要素が",
-                    f"    # 見つかりませんでした (到達URL: {self.authenticated_url})。",
+                    "    # ログアウト系の要素が見つかりませんでした。",
+                    *self._evidence_lines(),
                     "    # ログアウトリンク以外でも構いません (アカウント名の表示など)。",
-                    "    # 開発者ツールで探して記入してください。",
+                    "    # 上の一覧に使えそうな見出しがあれば、それを教えてください。",
                 ]
             )
 
@@ -322,13 +354,19 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
     marker_candidates: tuple[MarkerCandidate, ...] = ()
     authenticated_url = ""
     authenticated_login_form = False
+    authenticated_title = ""
+    authenticated_labels: tuple[str, ...] = ()
     session_present = session.exists()
     if session_present:
         with browser_context(config, storage_state=session) as (_context, page):
             # 認証済みならサインインURLから追い出される。追い出された先に
             # ログアウトリンクがある、というのが verify-session で確認済みの動き。
             goto(page, PUBLIC_SIGN_IN_URL, config)
-            marker_candidates = collect_marker_candidates(page, config.selector_timeout_ms)
+            wait_for_interactive(page, config.selector_timeout_ms)
+            found = clickables(page)
+            marker_candidates = marker_candidates_from(found)
+            authenticated_title = page_title(page)
+            authenticated_labels = label_sample(found)
             # **どこに着いたのかを必ず記録する。** これを取らなかったせいで、
             # 「マーカーが無い」のか「そもそも認証済みの画面に居ない」のかが
             # 区別できない報告が出た。区別できない報告は、原則2の静かなゼロ件が
@@ -350,6 +388,8 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
         submit_selectors=submit_selectors,
         submit_texts=submit_texts,
         marker_candidates=marker_candidates,
+        authenticated_title=authenticated_title,
+        authenticated_labels=authenticated_labels,
         session_present=session_present,
         authenticated_url=authenticated_url,
         authenticated_login_form_visible=authenticated_login_form,

@@ -80,6 +80,14 @@ def wait_for_interactive(page: Any, timeout_ms: int) -> bool:
     return True
 
 
+def page_title(page: Any) -> str:
+    """The page's title, or empty. Used as evidence of *which* page we were on."""
+    try:
+        return str(page.title() or "").strip()
+    except Exception:
+        return ""
+
+
 def clickables(page: Any) -> tuple[Clickable, ...]:
     """Every anchor and button on the page, read in a single round trip."""
     try:

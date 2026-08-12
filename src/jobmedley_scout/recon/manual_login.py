@@ -250,6 +250,34 @@ def logout_texts_from(elements: Iterable[Clickable]) -> tuple[str, ...]:
     return tuple(texts)
 
 
+#: 証拠として印字するラベルの上限。全部出すと段階3以降で候補者名まで流れうるので、
+#: 件数と長さの両方を切る (13.2)。
+LABEL_SAMPLE_LIMIT = 25
+LABEL_LENGTH_LIMIT = 40
+
+
+def label_sample(elements: Iterable[Clickable]) -> tuple[str, ...]:
+    """A capped sample of what was actually on the page. **Pure.**
+
+    「見つからなかった」だけを印字すると、**どの画面を見て見つからなかったのか**
+    が分からない。ログイン画面なのか、ログイン後の画面なのか、真っ白なのかで
+    次の一手は全く違うのに、報告からは区別できない。
+
+    実際にこれで詰まった: 到達URLがサインインURLのまま、ログアウトリンクも
+    パスワード欄も無い、という報告が出た。3つとも「無い」ので、何を見たのかが
+    誰にも分からなかった。**無かったものではなく、有ったものを出す。**
+    """
+    seen: list[str] = []
+    for element in elements:
+        text = element.text.strip()
+        if not text or text in seen:
+            continue
+        seen.append(text[:LABEL_LENGTH_LIMIT])
+        if len(seen) >= LABEL_SAMPLE_LIMIT:
+            break
+    return tuple(seen)
+
+
 # --- ブラウザ依存部 (私は検証できない。運用者の実機確認に委ねる) ----------------
 
 
