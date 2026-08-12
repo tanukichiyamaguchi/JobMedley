@@ -70,7 +70,7 @@ context.selection_required: UNRESOLVED
 context.selector: UNRESOLVED
 
 # ログイン後のトップ/マイページのURL。
-nav.mypage_url: UNRESOLVED
+nav.mypage_url: "https://customers.job-medley.com/"
 
 # 候補者一覧 (検索結果) の画面URL。
 nav.candidate_list_url: UNRESOLVED

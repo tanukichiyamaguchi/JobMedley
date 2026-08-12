@@ -19,6 +19,7 @@ on:
           - session-check
           - verify-session
           - observe-login
+          - preflight
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
 # 開いたところで誰も見られない。選べる形にすると「目視で確認した」つもりの
@@ -35,9 +36,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # **本番ワークフローと同じ資格情報を渡す。** ここが揃っていないと preflight は
+    # *存在しない環境* を点検することになる。実際に踏んだ: ANTHROPIC_API_KEY を
+    # 渡していなかったので、シークレットを正しく登録しても「APIキーが未設定」で
+    # 必ず失敗した -- 設定したのに実行環境へ届いていない、という 12.6 の事故を
+    # 点検コマンド自身でやっていたことになる。
+    # 差分は tests/guardrails/test_workflow_safety.py が禁じている。
     env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       JOBMEDLEY_STORAGE_STATE_B64: ${{ secrets.JOBMEDLEY_STORAGE_STATE_B64 }}
       JOBMEDLEY_SESSION_CURL: ${{ secrets.JOBMEDLEY_SESSION_CURL }}
+      JOBMEDLEY_EMAIL: ${{ secrets.JOBMEDLEY_EMAIL }}
+      JOBMEDLEY_PASSWORD: ${{ secrets.JOBMEDLEY_PASSWORD }}
       # 13.6: 偵察であっても安全弁は明示的に渡す。**渡し忘れを既定値で救わない。**
       SCOUT_DRY_RUN: "true"
       SCOUT_STATE_LOSS_GUARD: "true"
@@ -53,6 +63,12 @@ jobs:
         run: |
           pip install -e '.'
           python -m playwright install --with-deps chromium
+
+      # 段階2の合格条件。**失敗しても続行させない** (12.6) ので、
+      # continue-on-error は付けない。安全弁の実効値と由来も印字される。
+      - name: Preflight
+        if: inputs.command == 'preflight'
+        run: scout preflight
 
       # 座標の一覧はブラウザも通信も要らない。何が足りないかを見るだけの用途。
       - name: Coordinates

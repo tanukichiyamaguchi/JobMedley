@@ -94,3 +94,24 @@ def test_the_recon_workflow_never_sends() -> None:
         assert forbidden not in recon
     # 偵察でも安全弁は明示的に渡す。渡し忘れを既定値で救わない。
     assert 'SCOUT_DRY_RUN: "true"' in recon
+
+
+def test_preflight_sees_the_same_credentials_as_a_real_run() -> None:
+    """点検が **存在しない環境** を点検してはいけない。
+
+    実際に踏んだ: 段階2の ``scout preflight`` を Recon (manual) から実行できるように
+    したが、そのジョブに ``ANTHROPIC_API_KEY`` を渡していなかった。シークレットを
+    正しく登録しても「APIキーが未設定」で必ず失敗する -- 設定したのに実行環境へ
+    届いていない、という 12.6 の事故を、それを検知するための点検コマンド自身で
+    やっていたことになる。
+
+    片方に資格情報を足したらもう片方にも足すこと。**preflight の答えは、本番の
+    実行環境についての答えでなければ意味がない。**
+    """
+    credentials = {"ANTHROPIC_API_KEY", "JOBMEDLEY_STORAGE_STATE_B64", "JOBMEDLEY_SESSION_CURL"}
+    scout_env = set(_parsed(SCOUT)["jobs"]["scout"]["env"])
+    recon_env = set(_parsed(RECON)["jobs"]["recon"]["env"])
+
+    assert credentials <= scout_env
+    missing = (scout_env & credentials) - recon_env
+    assert not missing, f"Recon (manual) に渡っていない資格情報があります: {sorted(missing)}"
