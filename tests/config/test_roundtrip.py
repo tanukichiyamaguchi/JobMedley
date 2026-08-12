@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 import yaml
 
+from jobmedley_scout.config.coordinates import COORDINATES_BY_KEY
 from jobmedley_scout.config.loader import load_behavior_config, load_site_coordinates
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN, Unresolved
 from jobmedley_scout.errors import ConfigError
@@ -166,14 +167,31 @@ def test_wrong_type_is_rejected(tmp_path: Path) -> None:
 # --- 座標ファイル -------------------------------------------------------------
 
 
-def test_all_coordinates_present_and_unresolved() -> None:
-    """全キーが存在し、現時点では全て未確定であること。
+def test_every_registered_coordinate_is_accounted_for() -> None:
+    """全キーが「確定」か「未確定」のどちらかとして存在すること。
 
-    「未確定は未完成ではなく方針」を、テストとしても表明しておく。
+    **件数を固定してはいけない。** かつてここは「50件すべて未確定」を固定して
+    いたが、それはラダーを1段登るたびに落ちるテストであり、座標を埋めるという
+    正常な進行を「失敗」として報告する。守るべき不変量は件数ではなく、
+    *登録済みのキーが1つ残らずファイルに現れること* -- 抜けたキーが黙って
+    既定値に落ちる経路が無いこと (7.6) である。
     """
     coordinates = load_site_coordinates(COORDINATES_PATH)
-    assert len(coordinates.unresolved_keys()) == 50
-    assert coordinates.resolved_keys() == ()
+
+    accounted = set(coordinates.unresolved_keys()) | set(coordinates.resolved_keys())
+    assert accounted == set(COORDINATES_BY_KEY)
+
+
+def test_unfilled_coordinates_are_still_unresolved() -> None:
+    """埋めていない座標が残っていること。**推測で埋めないという方針の表明。**
+
+    全部埋まった状態は、この方針に反して埋めたか、ラダーを完走したかのどちらか。
+    完走したなら、そのときにこのテストを消すこと -- 消さずに緩めると、
+    「いつの間にか全部埋まっていた」が検知できなくなる。
+    """
+    coordinates = load_site_coordinates(COORDINATES_PATH)
+
+    assert coordinates.unresolved_keys(), "全座標が確定しています。経緯を確認してください"
 
 
 def test_missing_coordinate_key_is_rejected(tmp_path: Path) -> None:
@@ -218,9 +236,32 @@ def test_nullable_coordinate_accepts_null(tmp_path: Path) -> None:
 
 
 def test_unresolved_coordinate_is_an_unresolved_instance() -> None:
+    """未確定の座標が :class:`Unresolved` として読まれること。
+
+    **特定のキーを名指ししない。** 以前は ``auth.login_url`` を使っていたが、
+    その座標が確定した瞬間にこのテストが落ちた -- 検査したかったのは番兵の型で
+    あって、あのキーが未確定であることではない。未確定のキーを実行時に選ぶ。
+    """
     coordinates = load_site_coordinates(COORDINATES_PATH)
-    value = coordinates.url("auth.login_url")
+    key = coordinates.unresolved_keys()[0]
+
+    value = coordinates.raw_items()[key]
     assert isinstance(value, Unresolved)
-    assert value.key == "auth.login_url"
+    assert value.key == key
     # repr は例外を出さない (デバッガと pytest が壊れるため)。
-    assert "auth.login_url" in repr(value)
+    assert key in repr(value)
+
+
+def test_a_filled_coordinate_reads_back_as_its_value() -> None:
+    """確定した座標が、番兵ではなく素の値として読めること。
+
+    上のテストと対になる。片方だけだと「全部 Unresolved を返す」実装でも
+    通ってしまう。
+    """
+    coordinates = load_site_coordinates(COORDINATES_PATH)
+
+    assert coordinates.url("auth.login_url") == (
+        "https://customers.job-medley.com/customers/sign_in/"
+    )
+    assert coordinates.boolean("auth.is_spa") is True
+    assert coordinates.string_list("auth.submit_text_candidates") == ("ログイン",)

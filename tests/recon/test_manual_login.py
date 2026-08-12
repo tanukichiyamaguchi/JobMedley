@@ -8,12 +8,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jobmedley_scout.browser.dom import Clickable
 from jobmedley_scout.recon.manual_login import (
     NO_DISPLAY_MESSAGE,
     LoginObservation,
     MarkerCandidate,
     headful_display_available,
     login_form_present_in_html,
+    logout_texts_from,
+    marker_candidates_from,
     marker_selector_candidates,
 )
 
@@ -153,3 +156,72 @@ def test_the_no_display_message_points_at_the_cloud_route() -> None:
     """止めるだけで代替を言わないと、運用者はそこで詰む。"""
     assert "JOBMEDLEY_SESSION_CURL" in NO_DISPLAY_MESSAGE
     assert "Copy as cURL" in NO_DISPLAY_MESSAGE
+
+
+# --- 走査 (旧: ブラウザ相手のループ / 現: 平のデータに対する純粋関数) ------------
+
+
+def _clickable(
+    tag: str = "a", element_id: str | None = None, classes: tuple[str, ...] = (), text: str = ""
+) -> Clickable:
+    return Clickable(tag=tag, element_id=element_id, class_names=classes, text=text)
+
+
+def test_logout_elements_become_marker_candidates() -> None:
+    elements = [
+        _clickable("a", "home", (), "トップ"),
+        _clickable("a", "logout-link", ("nav",), "ログアウト"),
+    ]
+
+    assert marker_candidates_from(elements) == (
+        MarkerCandidate("ログアウト", ("#logout-link", "a.nav", 'a:has-text("ログアウト")')),
+    )
+
+
+def test_the_two_scanners_agree_on_the_same_dom() -> None:
+    """**これが今回の事故の核心。**
+
+    同じ DOM に対して verify-session 側とマーカー抽出側の答えが食い違うと、
+    一方が「入れている」と言い、他方が「ログイン後の要素が無い」と言う。実際に
+    その報告が出た (原因は DOM 側の差だったが、走査が食い違わないこと自体を
+    ここで固定しておく)。
+    """
+    elements = [
+        _clickable("a", None, (), "ログアウト"),
+        _clickable("button", None, (), "検索"),
+    ]
+
+    assert bool(logout_texts_from(elements)) is bool(marker_candidates_from(elements))
+    assert logout_texts_from(elements) == ("ログアウト",)
+
+
+def test_both_scanners_are_empty_on_an_empty_dom() -> None:
+    """描画前の DOM。**「要素が無い」と「まだ描画されていない」は区別できない。**
+
+    だから走査の前に待つ (:func:`browser.dom.wait_for_interactive`)。この関数の
+    責務は待つことではないので、ここでは空を返すことだけを固定する。
+    """
+    assert marker_candidates_from([]) == ()
+    assert logout_texts_from([]) == ()
+
+
+def test_duplicate_labels_are_reported_once() -> None:
+    elements = [
+        _clickable("a", None, (), "ログアウト"),
+        _clickable("button", None, (), "ログアウト"),
+    ]
+
+    assert logout_texts_from(elements) == ("ログアウト",)
+    # 候補の方は重複させる -- セレクタが違うので、選択肢として意味がある。
+    assert len(marker_candidates_from(elements)) == 2
+
+
+def test_english_labels_are_recognised() -> None:
+    assert logout_texts_from([_clickable("a", None, (), "Sign out")]) == ("Sign out",)
+
+
+def test_unrelated_elements_are_ignored() -> None:
+    elements = [_clickable("a", None, (), "スカウト"), _clickable("button", None, (), "検索")]
+
+    assert marker_candidates_from(elements) == ()
+    assert logout_texts_from(elements) == ()

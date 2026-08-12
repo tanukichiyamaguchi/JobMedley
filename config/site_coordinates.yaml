@@ -24,27 +24,27 @@
 # ========================================================================
 
 # https://customers.job-medley.com/customers/sign_in/ を開き、実際にフォームが描画されるURL (リダイレクト後) をアドレスバーから転記する。
-auth.login_url: UNRESOLVED
+auth.login_url: "https://customers.job-medley.com/customers/sign_in/"
 
 # ログイン画面で右クリック→ページのソースを表示。
 # フォーム要素がHTMLに含まれていれば false (旧来型)、空の div だけなら true (SPA)。
 # true の場合、送信ボタンのクリックに Enter キーのフォールバックは効かない (5.5)。
-auth.is_spa: UNRESOLVED
+auth.is_spa: true
 
 # ログインフォームのメールアドレス入力欄。
 # 開発者ツールで要素を検査し、name/id 属性ベースの安定したセレクタを選ぶ。
-auth.email_selector: UNRESOLVED
+auth.email_selector: "input[name=\"email\"]"
 
 # ログインフォームのパスワード入力欄。
-auth.password_selector: UNRESOLVED
+auth.password_selector: "input[name=\"password\"]"
 
 # ログインの送信ボタン。
 # SPAの場合は複数のテキスト候補で探す方式にするため、auth.submit_text_candidates も併せて埋めること (5.5)。
-auth.submit_selector: UNRESOLVED
+auth.submit_selector: "button[type=\"submit\"]"
 
 # 送信ボタンの表示文字列の候補 (例: ['ログイン', 'サインイン'])。
 # セレクタが効かなかったときのフォールバック。
-auth.submit_text_candidates: UNRESOLVED
+auth.submit_text_candidates: ["ログイン"]
 
 # **ログイン後にのみ存在する要素**のセレクタ (「ログアウト」リンクなど)。
 # 遷移の完了やステータスコードで判定してはならない (5.5)。
@@ -53,7 +53,7 @@ auth.success_marker_selector: UNRESOLVED
 
 # 2段階認証の種別: none / sms / totp / email_link のいずれか。
 # email_link の場合、CI側で突破する手段が無いため手動ログイン＋セッション持ち込みがほぼ必須になる (4章・5.4)。
-auth.twofa_kind: UNRESOLVED
+auth.twofa_kind: "none"
 
 # ========================================================================
 # 段階2: 起動前チェック

@@ -37,7 +37,8 @@ from typing import Any
 
 from jobmedley_scout.browser import session_store
 from jobmedley_scout.browser.context import browser_context
-from jobmedley_scout.browser.navigation import goto
+from jobmedley_scout.browser.dom import PASSWORD_INPUT, login_form_visible
+from jobmedley_scout.browser.navigation import goto, marker_present
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.known import PUBLIC_SIGN_IN_URL
@@ -82,8 +83,27 @@ class ObservedLogin:
     submit_selectors: tuple[str, ...]
     submit_texts: tuple[str, ...]
     marker_candidates: tuple[MarkerCandidate, ...]
-    #: 認証済みの観測ができたか。できていなければマーカー候補は空になる。
-    authenticated_observation: bool
+    #: 保存セッションのファイルが存在したか。**「認証できた」ではない。**
+    session_present: bool
+    #: 認証済みコンテキストが実際に到達したURL。空なら走査していない。
+    authenticated_url: str
+    #: その画面にパスワード欄があったか。**あるならセッションが効いていない。**
+    authenticated_login_form_visible: bool
+
+    @property
+    def authenticated_observation(self) -> bool:
+        """Whether we can believe the marker scan looked at a logged-in page.
+
+        以前はここが「セッションファイルがあった」だけで真になっていた。その値で
+        「ログイン後にのみ存在する要素が見つかりませんでした」と印字していたので、
+        **セッションが失効してサインイン画面に戻されていた場合でも、出力は
+        1バイト違わず同じ** になった。媒体について何も分かっていないのに、
+        媒体についての事実を述べていたことになる。
+
+        パスワード欄が見えているなら、それは「マーカーが無い画面」ではなく
+        「ログインしていない画面」である。
+        """
+        return self.session_present and not self.authenticated_login_form_visible
 
     def _yaml_line(self, key: str, candidates: tuple[str, ...]) -> list[str]:
         """One coordinate as a paste-ready line, with the alternatives beneath it.
@@ -128,13 +148,26 @@ class ObservedLogin:
             lines.append("    # 送信ボタンの表示文字を読み取れませんでした。")
 
         lines.append("")
-        if not self.authenticated_observation:
+        if not self.session_present:
             lines.extend(
                 [
                     f"  auth.success_marker_selector: {UNRESOLVED_TOKEN}",
-                    "    # 認証済みの観測ができませんでした。保存セッションが無いか、",
-                    "    # 期限切れです。先に `scout recon verify-session` を実行して",
-                    "    # ログイン状態が復元されるか確認してください。",
+                    "    # 保存セッションがありません。シークレット JOBMEDLEY_SESSION_CURL",
+                    "    # (または JOBMEDLEY_STORAGE_STATE_B64) を設定してください。",
+                ]
+            )
+        elif self.authenticated_login_form_visible:
+            # **ここを「マーカーが無い」と報告してはいけない。** パスワード欄が
+            # 見えているなら、見ていたのはログイン後の画面ではない。媒体について
+            # 何も分かっていない状態で、媒体についての事実を述べることになる。
+            lines.extend(
+                [
+                    f"  auth.success_marker_selector: {UNRESOLVED_TOKEN}",
+                    "    # **セッションが効いていません。** 認証済みで開いたはずの画面に",
+                    f"    # パスワード欄がありました (到達URL: {self.authenticated_url})。",
+                    "    # マーカーが存在しないのではなく、ログイン後の画面を見ていません。",
+                    "    # セッションを取り直してから、もう一度実行してください",
+                    "    # (docs/ladder.md「セッションが切れたときの取り直し方」)。",
                 ]
             )
         elif self.marker_candidates:
@@ -153,8 +186,10 @@ class ObservedLogin:
             lines.extend(
                 [
                     f"  auth.success_marker_selector: {UNRESOLVED_TOKEN}",
-                    "    # ログイン後にのみ存在する要素が見つかりませんでした。",
+                    "    # ログイン後の画面には居ますが、ログアウト系の要素が",
+                    f"    # 見つかりませんでした (到達URL: {self.authenticated_url})。",
                     "    # ログアウトリンク以外でも構いません (アカウント名の表示など)。",
+                    "    # 開発者ツールで探して記入してください。",
                 ]
             )
 
@@ -270,22 +305,42 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
             served_html = ""
 
         goto(page, PUBLIC_SIGN_IN_URL, config)
+        # **フォームの描画を待ってから読む。** SPA (``auth.is_spa: true``) では
+        # ``domcontentloaded`` の時点でフォームがまだ無い。待たずに読むと、
+        # セレクタ3種が揃って UNRESOLVED になる -- 「観測したが無かった」に
+        # 見えるが、実際には「早く見すぎた」である。
+        # 待つ対象は HTML の入力種別であって媒体固有の座標ではないので、
+        # 探しているものを待つ循環にはならない。
+        marker_present(page, PASSWORD_INPUT, timeout_ms=config.selector_timeout_ms)
         login_url = page.url
         email_selectors = _email_selectors(page)
-        password_selectors = _field_selectors(page, 'input[type="password"]', "input")
+        password_selectors = _field_selectors(page, PASSWORD_INPUT, "input")
         submit_selectors, submit_texts = _submit_observation(page)
 
     # --- 認証済み: ログアウトリンクはここでしか見られない --------------------
     session = session_store.session_path(credentials_dir)
     marker_candidates: tuple[MarkerCandidate, ...] = ()
-    authenticated = False
-    if session.exists():
+    authenticated_url = ""
+    authenticated_login_form = False
+    session_present = session.exists()
+    if session_present:
         with browser_context(config, storage_state=session) as (_context, page):
             # 認証済みならサインインURLから追い出される。追い出された先に
             # ログアウトリンクがある、というのが verify-session で確認済みの動き。
             goto(page, PUBLIC_SIGN_IN_URL, config)
-            marker_candidates = collect_marker_candidates(page)
-            authenticated = True
+            marker_candidates = collect_marker_candidates(page, config.selector_timeout_ms)
+            # **どこに着いたのかを必ず記録する。** これを取らなかったせいで、
+            # 「マーカーが無い」のか「そもそも認証済みの画面に居ない」のかが
+            # 区別できない報告が出た。区別できない報告は、原則2の静かなゼロ件が
+            # 座標の欠落として定着する経路になる。
+            authenticated_url = page.url
+            # **マーカーが見つかったなら、それ自体がログイン済みの証拠** なので
+            # 問い合わせない。この確認は待つAPIで行い、ログイン済みの画面では
+            # 必ず満了する (パスワード欄は永遠に現れない)。払う価値があるのは、
+            # 「マーカーが無い」の理由を切り分けるときだけである。
+            authenticated_login_form = not marker_candidates and login_form_visible(
+                page, config.selector_timeout_ms
+            )
 
     return ObservedLogin(
         login_url=login_url,
@@ -295,5 +350,7 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
         submit_selectors=submit_selectors,
         submit_texts=submit_texts,
         marker_candidates=marker_candidates,
-        authenticated_observation=authenticated,
+        session_present=session_present,
+        authenticated_url=authenticated_url,
+        authenticated_login_form_visible=authenticated_login_form,
     )
