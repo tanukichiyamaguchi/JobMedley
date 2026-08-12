@@ -49,7 +49,7 @@ auth.submit_text_candidates: ["ログイン"]
 # **ログイン後にのみ存在する要素**のセレクタ (「ログアウト」リンクなど)。
 # 遷移の完了やステータスコードで判定してはならない (5.5)。
 # 手動ログイン後に開発者ツールで探すのが確実。
-auth.success_marker_selector: UNRESOLVED
+auth.success_marker_selector: "a.c-header-menu__logout-link"
 
 # 2段階認証の種別: none / sms / totp / email_link のいずれか。
 # email_link の場合、CI側で突破する手段が無いため手動ログイン＋セッション持ち込みがほぼ必須になる (4章・5.4)。

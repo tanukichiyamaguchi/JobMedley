@@ -217,6 +217,72 @@ def looks_like_logout(text: str) -> bool:
     return any(hint in text for hint in LOGOUT_TEXT_HINTS)
 
 
+#: クラス名がそれ自体で「ログアウトのための要素」と名乗っているか。
+#: 制作者が書いた名前なので、**推測ではなく観測** である。
+LOGOUT_CLASS_TOKENS: tuple[str, ...] = ("logout", "signout", "sign-out", "sign_out")
+
+
+def _names_the_purpose(selector: str) -> bool:
+    lowered = selector.lower()
+    return any(token in lowered for token in LOGOUT_CLASS_TOKENS)
+
+
+def selector_match_count(selector: str, elements: Iterable[Clickable]) -> int:
+    """How many of the observed elements this candidate selector matches.
+
+    候補の良し悪しは **実際に何個に当たるか** で決まる。ここは観測できるので、
+    「たぶん一意だろう」と当て推量する必要がない。
+    """
+    count = 0
+    for element in elements:
+        if selector == f"#{element.element_id}" and element.element_id:
+            count += 1
+        elif selector.startswith(f"{element.tag}."):
+            if selector[len(element.tag) + 1 :] in element.class_names:
+                count += 1
+        elif selector.startswith(f'{element.tag}:has-text("'):
+            wanted = selector[len(element.tag) + 11 : -2]
+            if wanted and wanted in element.text:
+                count += 1
+    return count
+
+
+def rank_marker_selectors(
+    selectors: Iterable[str], elements: Iterable[Clickable]
+) -> tuple[str, ...]:
+    """Order candidates so the *safest* one is first.
+
+    **これを間違えると、マーカーが本来の役目を失う。** 実例: ログアウトリンクの
+    クラスは ``c-link`` / ``c-link--alert`` / ``c-header-menu__logout-link`` の3つで、
+    素朴に並べると汎用の ``a.c-link`` が先頭に来た。それは画面中のリンクほぼ全てに
+    一致するので、**ログイン前の画面でも「マーカーあり」になる**。5.5 が
+    「ログイン成功はマーカー要素の存在で判定する」と決めているのに、その判定が
+    常に真を返すようになり、認証切れを永久に検知できなくなる。
+
+    順序の決め方:
+
+    1. **観測された一致件数が少ないものを優先。** 1件に当たる候補が最も限定的
+    2. 同数なら、クラス名が用途を名乗っているもの (``...logout-link``) を優先。
+       制作者が付けた名前なので、これも観測である
+    3. それも同じなら元の並び (id > クラス > テキスト) を保つ
+    """
+    observed = tuple(elements)
+    ordered = list(selectors)
+
+    def priority(selector: str) -> tuple[int, int]:
+        if selector.startswith("#"):
+            kind = 0
+        elif _names_the_purpose(selector):
+            kind = 1
+        elif ":has-text(" in selector:
+            kind = 2
+        else:
+            kind = 3
+        return (selector_match_count(selector, observed) or len(observed) + 1, kind)
+
+    return tuple(sorted(ordered, key=priority))
+
+
 def marker_candidates_from(elements: Iterable[Clickable]) -> tuple[MarkerCandidate, ...]:
     """Marker candidates for every logout-ish element. **Pure.**
 
@@ -229,15 +295,19 @@ def marker_candidates_from(elements: Iterable[Clickable]) -> tuple[MarkerCandida
     いまは :func:`browser.dom.clickables` が1回で取り出した平のデータを受け取る。
     ハンドルを持ち歩かないので無効化されようがなく、この関数はテストできる。
     """
+    observed = tuple(elements)
     found: list[MarkerCandidate] = []
-    for element in elements:
+    for element in observed:
         if not looks_like_logout(element.text):
             continue
         selectors = marker_selector_candidates(
             element.tag, element.element_id, element.class_names, element.text
         )
         if selectors:
-            found.append(MarkerCandidate(text=element.text, selectors=selectors))
+            # **並べ替えは必須。** 素朴な並びだと汎用クラスが先頭に来て、
+            # ログイン前でも一致するセレクタを推奨してしまう (下記参照)。
+            ranked = rank_marker_selectors(selectors, observed)
+            found.append(MarkerCandidate(text=element.text, selectors=ranked))
     return tuple(found)
 
 
@@ -250,31 +320,34 @@ def logout_texts_from(elements: Iterable[Clickable]) -> tuple[str, ...]:
     return tuple(texts)
 
 
-#: 証拠として印字するラベルの上限。全部出すと段階3以降で候補者名まで流れうるので、
-#: 件数と長さの両方を切る (13.2)。
-LABEL_SAMPLE_LIMIT = 25
-LABEL_LENGTH_LIMIT = 40
+#: 証拠として印字する構造の上限。
+STRUCTURE_SAMPLE_LIMIT = 25
 
 
-def label_sample(elements: Iterable[Clickable]) -> tuple[str, ...]:
-    """A capped sample of what was actually on the page. **Pure.**
+def structure_sample(elements: Iterable[Clickable]) -> tuple[str, ...]:
+    """A capped, **text-free** sample of the page's structure. **Pure.**
 
     「見つからなかった」だけを印字すると、**どの画面を見て見つからなかったのか**
     が分からない。ログイン画面なのか、ログイン後の画面なのか、真っ白なのかで
-    次の一手は全く違うのに、報告からは区別できない。
+    次の一手は全く違うのに、報告からは区別できない。実際にこれで詰まった:
+    到達URLがサインインURLのまま、ログアウトリンクもパスワード欄も無いという
+    報告が出て、3つとも「無い」ので何を見たのか誰にも分からなかった。
 
-    実際にこれで詰まった: 到達URLがサインインURLのまま、ログアウトリンクも
-    パスワード欄も無い、という報告が出た。3つとも「無い」ので、何を見たのかが
-    誰にも分からなかった。**無かったものではなく、有ったものを出す。**
+    **ただし画面の文言そのものは出さない。** 13.2 の要求であり、この走査は
+    指定された画面を無差別に読むので、ログイン後の画面には氏名や会員番号を
+    含むリンクが並びうる。クラス名は制作者が書いた識別子であって個人データでは
+    ないので、``a.c-header-menu__logout-link`` のような形で構造だけを出す。
+    画面の同定にはこれで足りる。
     """
     seen: list[str] = []
     for element in elements:
-        text = element.text.strip()
-        if not text or text in seen:
-            continue
-        seen.append(text[:LABEL_LENGTH_LIMIT])
-        if len(seen) >= LABEL_SAMPLE_LIMIT:
-            break
+        for name in element.class_names or ("",):
+            token = f"{element.tag}.{name}" if name else element.tag
+            if token in seen:
+                continue
+            seen.append(token)
+            if len(seen) >= STRUCTURE_SAMPLE_LIMIT:
+                return tuple(seen)
     return tuple(seen)
 
 

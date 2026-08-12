@@ -51,9 +51,9 @@ from jobmedley_scout.recon.known import PUBLIC_SIGN_IN_URL
 from jobmedley_scout.recon.manual_login import (
     MarkerCandidate,
     form_field_selector_candidates,
-    label_sample,
     login_form_present_in_html,
     marker_candidates_from,
+    structure_sample,
 )
 
 #: 送信ボタンらしき要素を探す順。上ほど確実。
@@ -98,9 +98,10 @@ class ObservedLogin:
     authenticated_login_form_visible: bool
     #: 認証済みの画面のタイトル。どの画面に居たのかの証拠。
     authenticated_title: str = ""
-    #: その画面に実際にあったリンク/ボタンの見出し (上限あり)。
-    #: **無かったものではなく、有ったものを出す。**
-    authenticated_labels: tuple[str, ...] = ()
+    #: その画面にあったリンク/ボタンの **構造** (``a.c-header-menu__logout-link`` 等)。
+    #: **文言は出さない** (13.2)。無かったものではなく有ったものを出しつつ、
+    #: 個人データを実行ログへ流さないための形。
+    authenticated_structure: tuple[str, ...] = ()
 
     @property
     def authenticated_observation(self) -> bool:
@@ -128,9 +129,12 @@ class ObservedLogin:
         lines = [f"    # 到達URL  : {self.authenticated_url or '(記録なし)'}"]
         if self.authenticated_title:
             lines.append(f"    # ページ名 : {self.authenticated_title}")
-        if self.authenticated_labels:
-            lines.append(f"    # 画面にあったリンク/ボタン ({len(self.authenticated_labels)}件):")
-            lines.extend(f"    #   - {label}" for label in self.authenticated_labels)
+        if self.authenticated_structure:
+            lines.append(
+                f"    # 画面にあったリンク/ボタンの構造 ({len(self.authenticated_structure)}種):"
+            )
+            lines.extend(f"    #   - {token}" for token in self.authenticated_structure)
+            lines.append("    #   (文言は出しません。個人データを実行ログに残さないため 13.2)")
         else:
             lines.append("    # 画面にリンクもボタンもありませんでした。")
             lines.append("    #   描画前か、真っ白な画面に着いています。")
@@ -355,7 +359,7 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
     authenticated_url = ""
     authenticated_login_form = False
     authenticated_title = ""
-    authenticated_labels: tuple[str, ...] = ()
+    authenticated_structure: tuple[str, ...] = ()
     session_present = session.exists()
     if session_present:
         with browser_context(config, storage_state=session) as (_context, page):
@@ -366,7 +370,7 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
             found = clickables(page)
             marker_candidates = marker_candidates_from(found)
             authenticated_title = page_title(page)
-            authenticated_labels = label_sample(found)
+            authenticated_structure = structure_sample(found)
             # **どこに着いたのかを必ず記録する。** これを取らなかったせいで、
             # 「マーカーが無い」のか「そもそも認証済みの画面に居ない」のかが
             # 区別できない報告が出た。区別できない報告は、原則2の静かなゼロ件が
@@ -389,7 +393,7 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
         submit_texts=submit_texts,
         marker_candidates=marker_candidates,
         authenticated_title=authenticated_title,
-        authenticated_labels=authenticated_labels,
+        authenticated_structure=authenticated_structure,
         session_present=session_present,
         authenticated_url=authenticated_url,
         authenticated_login_form_visible=authenticated_login_form,

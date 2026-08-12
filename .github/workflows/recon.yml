@@ -71,7 +71,9 @@ jobs:
         if: inputs.command == 'verify-session'
         run: scout recon verify-session
 
-      # 段階1の座標を観測する。**セレクタしか出力しない** ので、個人データは出ない。
+      # 段階1の座標を観測する。出力はURL・ページ名・セレクタ・要素の構造のみで、
+      # **画面の文言は出さない** (13.2)。走査先の画面には氏名や会員番号を含む
+      # リンクが並びうるため、文言をログへ残さない形にしてある。
       - name: Observe login
         if: inputs.command == 'observe-login'
         run: scout recon observe-login

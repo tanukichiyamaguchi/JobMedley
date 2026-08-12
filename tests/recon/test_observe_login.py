@@ -18,11 +18,10 @@ from jobmedley_scout.browser.dom import Clickable
 from jobmedley_scout.config.coordinates import COORDINATES_BY_KEY
 from jobmedley_scout.config.placeholders import LadderStage
 from jobmedley_scout.recon.manual_login import (
-    LABEL_LENGTH_LIMIT,
-    LABEL_SAMPLE_LIMIT,
+    STRUCTURE_SAMPLE_LIMIT,
     MarkerCandidate,
     form_field_selector_candidates,
-    label_sample,
+    structure_sample,
 )
 from jobmedley_scout.recon.observe_login import ObservedLogin
 
@@ -222,17 +221,27 @@ def test_the_report_shows_what_was_on_the_page_not_only_what_was_missing() -> No
     report = _observed(
         marker_candidates=(),
         authenticated_title="採用管理画面ログイン",
-        authenticated_labels=("ログイン", "求人掲載のお申し込み", "求職者ログイン"),
+        authenticated_structure=("a.c-link", "button.c-btn--primary"),
     ).render()
 
     assert "採用管理画面ログイン" in report
-    assert "求職者ログイン" in report
-    assert "3件" in report
+    assert "button.c-btn--primary" in report
+    assert "2種" in report
+
+
+def test_the_report_never_prints_page_text():
+    """13.2: この走査は指定された画面を無差別に読む。文言は出さない。"""
+    report = _observed(
+        marker_candidates=(),
+        authenticated_structure=("a.c-card__name",),
+    ).render()
+
+    assert "文言は出しません" in report
 
 
 def test_an_empty_page_says_so_explicitly() -> None:
     """リンクもボタンも無い = 描画前か真っ白。**黙って空にしない。**"""
-    report = _observed(marker_candidates=(), authenticated_labels=()).render()
+    report = _observed(marker_candidates=(), authenticated_structure=()).render()
 
     assert "リンクもボタンもありませんでした" in report
 
@@ -242,28 +251,30 @@ def test_the_expired_session_branch_also_shows_the_evidence() -> None:
         marker_candidates=(),
         authenticated_login_form_visible=True,
         authenticated_title="採用管理画面ログイン",
-        authenticated_labels=("ログイン",),
+        authenticated_structure=("a.c-link",),
     ).render()
 
     assert "セッションが効いていません" in report
     assert "採用管理画面ログイン" in report
 
 
-def test_labels_are_capped_in_count_and_length() -> None:
-    """13.2: 段階3以降では候補者名が並ぶ画面でも呼ばれうる。上限で切る。"""
-    many = tuple(Clickable("a", None, (), f"リンク{i}" + "あ" * 80) for i in range(60))
-    sample = label_sample(many)
+def test_the_structure_sample_is_capped() -> None:
+    many = tuple(Clickable("a", None, (f"c-{i}",), f"リンク{i}") for i in range(60))
 
-    assert len(sample) == LABEL_SAMPLE_LIMIT
-    assert all(len(label) <= LABEL_LENGTH_LIMIT for label in sample)
+    assert len(structure_sample(many)) == STRUCTURE_SAMPLE_LIMIT
 
 
-def test_duplicate_and_blank_labels_are_dropped() -> None:
-    elements = [
-        Clickable("a", None, (), "トップ"),
-        Clickable("a", None, (), "   "),
-        Clickable("button", None, (), "トップ"),
-        Clickable("a", None, (), "スカウト"),
-    ]
+def test_the_structure_sample_carries_no_page_text() -> None:
+    """**個人データを実行ログへ流さない** (13.2)。クラス名は制作者の識別子。"""
+    elements = [Clickable("a", None, ("c-card__name",), "山田太郎 (会員番号 1234567)")]
 
-    assert label_sample(elements) == ("トップ", "スカウト")
+    sample = structure_sample(elements)
+
+    assert sample == ("a.c-card__name",)
+    assert not any("山田" in token for token in sample)
+
+
+def test_elements_without_classes_still_identify_the_page() -> None:
+    elements = [Clickable("button", None, (), "送信"), Clickable("a", None, ("c-link",), "トップ")]
+
+    assert structure_sample(elements) == ("button", "a.c-link")
