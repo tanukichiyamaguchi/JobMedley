@@ -19,6 +19,7 @@ on:
           - session-check
           - verify-session
           - observe-login
+          - observe-list
           - preflight
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
@@ -93,6 +94,14 @@ jobs:
       - name: Observe login
         if: inputs.command == 'observe-login'
         run: scout recon observe-login
+
+      # 段階2の残り座標 (context.*, nav.list_ready_selector,
+      # nav.drawer_close_selectors) を観測する。候補者の行を実際に1件開く
+      # (ドロワーの閉じ方を観測するため) が、出力は要素の構造のみで
+      # **画面の文言は出さない** (13.2、observe-login と同じ形)。
+      - name: Observe list
+        if: inputs.command == 'observe-list'
+        run: scout recon observe-list
 
       # 13.2: ここで成果物を残さない。偵察の生データは個人データを含みうるため、
       # 判定結果 (ログに出る文字列) 以外は持ち出さない。

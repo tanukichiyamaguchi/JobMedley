@@ -34,7 +34,8 @@ from typing import Any
 
 #: クリック可能な要素をまとめて取り出す。**1回の往復で完結させる。**
 #: ``innerText`` は表示されていない要素では ``textContent`` に落ちる (HTML仕様) ので、
-#: 折り畳まれたメニューの中のリンクも読める。
+#: 折り畳まれたメニューの中のリンクも読める。``aria-label`` も併せて取る -- アイコンのみの
+#: 閉じるボタンには文言が無く、意味は aria-label にしか出ていないことが珍しくない。
 _CLICKABLE_SCRIPT = """
 () => Array.from(document.querySelectorAll('a, button')).map((el) => ({
   tag: el.tagName.toLowerCase(),
@@ -43,6 +44,7 @@ _CLICKABLE_SCRIPT = """
     ? el.className.split(/\\s+/).filter(Boolean)
     : [],
   text: (el.innerText || el.textContent || '').trim(),
+  ariaLabel: el.getAttribute('aria-label') || '',
 }))
 """
 
@@ -61,6 +63,10 @@ class Clickable:
     element_id: str | None
     class_names: tuple[str, ...]
     text: str
+    #: アイコンのみのコントロールでは文言が空なことがある。既定は空文字
+    #: (未観測ではなく「無かった」) -- 座標のUNRESOLVEDとは違う話なので、
+    #: ここは Coord 型を使わない。
+    aria_label: str = ""
 
 
 def wait_for_interactive(page: Any, timeout_ms: int) -> bool:
@@ -75,6 +81,61 @@ def wait_for_interactive(page: Any, timeout_ms: int) -> bool:
     """
     try:
         page.wait_for_selector(INTERACTIVE_SELECTOR, timeout=timeout_ms, state="attached")
+    except Exception:
+        return False
+    return True
+
+
+#: 候補者一覧の描画完了を表す専用の目印はまだ確定していない (それこそが段階2の
+#: 探索対象)。代わりに「class属性を持つ要素数が変化しなくなったこと」を汎用の
+#: 完了シグナルとして使う。ポーリングは Playwright 側の ``wait_for_function`` に
+#: 行わせる -- ``page.wait_for_timeout`` は :mod:`browser.waits` 専用と決めてある
+#: (``tests/guardrails/test_source_conventions.py``)。
+_STRUCTURE_SETTLED_SCRIPT = """
+() => {
+  const key = '__jmScoutStructureSettle';
+  const current = document.querySelectorAll('[class]').length;
+  const state = window[key];
+  if (!state || state.count !== current) {
+    window[key] = { count: current, stableChecks: 0 };
+    return false;
+  }
+  state.stableChecks += 1;
+  return state.stableChecks >= 3;
+}
+"""
+
+
+def wait_for_structure_to_settle(page: Any, timeout_ms: int) -> bool:
+    """Wait until the count of classed elements stops changing between polls.
+
+    **待つのは「通信の静止」ではない** (5.3)。ここで直接測っているのは、実際に
+    知りたいこと (一覧の構造が変化しなくなったか) そのものであり、通信を
+    代理指標にするより直接的である。
+    """
+    try:
+        page.wait_for_function(_STRUCTURE_SETTLED_SCRIPT, timeout=timeout_ms)
+    except Exception:
+        return False
+    return True
+
+
+#: ドロワー/モーダルが開いたことの手掛かり。何が増えるかは媒体依存で分からないので、
+#: 汎用の目印 (a, button) の **個数の増加** という形でしか問えない。
+_MORE_CLICKABLES_SCRIPT = """
+(before) => document.querySelectorAll('a, button').length > before
+"""
+
+
+def wait_for_more_clickables(page: Any, before_count: int, timeout_ms: int) -> bool:
+    """Wait until the number of clickable elements exceeds ``before_count``.
+
+    候補者ドロワー/モーダルが開いたことを検知する。何のセレクタが増えるかは
+    媒体依存で分からないので、汎用の目印の個数という形でしか問えない (5.3 と同じ理屈:
+    待つのは「通信の静止」ではなく「要素の変化」)。
+    """
+    try:
+        page.wait_for_function(_MORE_CLICKABLES_SCRIPT, arg=before_count, timeout=timeout_ms)
     except Exception:
         return False
     return True
@@ -118,6 +179,89 @@ def clickables(page: Any) -> tuple[Clickable, ...]:
                     class_names=tuple(one_line(str(name)) for name in item.get("classes") or ()),
                     # **ここで1行に潰す。** 以降どこへ埋め込まれても改行は出ない。
                     text=one_line(str(item.get("text") or "")),
+                    aria_label=one_line(str(item.get("ariaLabel") or "")),
+                )
+            )
+        except AttributeError:  # pragma: no cover - defensive
+            continue
+    return tuple(found)
+
+
+#: ``<select>`` 要素をまとめて取り出す。段階2の ``context.selector`` (グループ/拠点の
+#: 選択コントロール) 探索で使う。
+_SELECT_SCRIPT = """
+() => Array.from(document.querySelectorAll('select')).map((el) => ({
+  id: el.id || null,
+  name: el.getAttribute('name') || null,
+  optionCount: el.options.length,
+}))
+"""
+
+
+@dataclass(frozen=True)
+class SelectField:
+    """One ``<select>`` element, as plain data."""
+
+    element_id: str | None
+    name: str | None
+    option_count: int
+
+
+def select_fields(page: Any) -> tuple[SelectField, ...]:
+    """Every ``<select>`` on the page, read in a single round trip."""
+    try:
+        raw = page.evaluate(_SELECT_SCRIPT)
+    except Exception:
+        return ()
+    found: list[SelectField] = []
+    for item in raw or ():
+        try:
+            found.append(
+                SelectField(
+                    element_id=one_line(str(item.get("id") or "")) or None,
+                    name=one_line(str(item.get("name") or "")) or None,
+                    option_count=int(item.get("optionCount") or 0),
+                )
+            )
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover - defensive
+            continue
+    return tuple(found)
+
+
+#: class属性を持つ全要素の tag/class を取り出す。段階2の ``nav.list_ready_selector``
+#: 探索 (行 vs コンテナの見分け) で使う。**文言は取らない** -- 個人データを含みうる
+#: 画面を無差別に数えるので、ここでは構造だけを見る (13.2)。
+_CLASSED_SCRIPT = """
+() => Array.from(document.querySelectorAll('[class]')).map((el) => ({
+  tag: el.tagName.toLowerCase(),
+  classes: typeof el.className === 'string'
+    ? el.className.split(/\\s+/).filter(Boolean)
+    : [],
+}))
+"""
+
+
+@dataclass(frozen=True)
+class ClassedElement:
+    """One element with a ``class`` attribute. No text -- see :data:`_CLASSED_SCRIPT`."""
+
+    tag: str
+    class_names: tuple[str, ...]
+
+
+def classed_elements(page: Any) -> tuple[ClassedElement, ...]:
+    """Every classed element on the page, read in a single round trip."""
+    try:
+        raw = page.evaluate(_CLASSED_SCRIPT)
+    except Exception:
+        return ()
+    found: list[ClassedElement] = []
+    for item in raw or ():
+        try:
+            found.append(
+                ClassedElement(
+                    tag=one_line(str(item.get("tag", ""))),
+                    class_names=tuple(one_line(str(name)) for name in item.get("classes") or ()),
                 )
             )
         except AttributeError:  # pragma: no cover - defensive

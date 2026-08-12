@@ -380,6 +380,11 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
     # 段階1の **出力** であって入力ではない。要求してしまうと、ラダーの1歩目が
     # 「1歩目の成果物が無い」という理由で始められなくなる。
     "recon-login": frozenset(),
+    # 段階2の残り4座標 (context.*, nav.list_ready_selector, nav.drawer_close_selectors)
+    # を観測するコマンド。**それ自体がこのコマンドの出力なので要求しない** --
+    # recon-login と同じ理屈 (1歩目の成果物待ちにしない)。要る入力は遷移先
+    # (nav.candidate_list_url、段階1の観測で既に確定済み) だけ。
+    "recon-observe-list": frozenset({"nav.candidate_list_url"}),
     # 保存セッションで入るので auth.login_url は要らない。到達したい画面
     # (nav.*) だけが本当に必要な前提。
     "recon-capture-send": frozenset(

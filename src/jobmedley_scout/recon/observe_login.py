@@ -30,7 +30,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,6 +54,7 @@ from jobmedley_scout.recon.manual_login import (
     marker_candidates_from,
     structure_sample,
 )
+from jobmedley_scout.recon.yaml_paste import yaml_scalar as _scalar
 
 #: 送信ボタンらしき要素を探す順。上ほど確実。
 _SUBMIT_SELECTORS: tuple[str, ...] = (
@@ -63,20 +63,6 @@ _SUBMIT_SELECTORS: tuple[str, ...] = (
     "form button",
     "button",
 )
-
-
-def _scalar(value: object) -> str:
-    """Render ``value`` as a YAML scalar the operator can paste verbatim.
-
-    **``f'"{value}"'`` で囲んではいけない。** セレクタは
-    ``input[name="customer[email]"]`` のように二重引用符を含むのが普通で、
-    素朴に囲むと入れ子になって YAML として壊れる。貼り付けた運用者は、原因の
-    分からない設定エラーを受け取ることになる。
-
-    YAML 1.2 は JSON の上位互換なので、:func:`json.dumps` の出力はそのまま
-    正しい YAML スカラ (およびフロー列) になる。エスケープ規則を自前で書かない。
-    """
-    return json.dumps(value, ensure_ascii=False)
 
 
 @dataclass(frozen=True)

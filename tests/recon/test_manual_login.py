@@ -302,3 +302,42 @@ def test_a_normalised_label_still_yields_a_single_line_selector() -> None:
 
     assert candidates[0].selectors == ('a:has-text("ログアウト")',)
     assert all("\n" not in selector for selector in candidates[0].selectors)
+
+
+# --- 語彙の差し替え (閉じるボタン探索が同じ機構を使う) ----------------------------
+
+
+def test_a_different_text_hint_vocabulary_finds_different_elements() -> None:
+    """観測語彙 (LOGOUT vs CLOSE) を差し替えても、走査の仕組みは変わらない。"""
+    elements = [_clickable("button", None, ("modal-close",), "閉じる")]
+
+    assert marker_candidates_from(elements) == ()  # ログアウト語彙には一致しない
+    assert marker_candidates_from(elements, text_hints=("閉じる",), purpose_tokens=("close",))
+
+    close_candidates = marker_candidates_from(
+        elements, text_hints=("閉じる",), purpose_tokens=("close",)
+    )
+    # クラス名が用途を名乗っている (modal-close) ので、文言一致より優先される。
+    assert close_candidates[0].selectors[0] == "button.modal-close"
+
+
+def test_icon_only_controls_are_found_via_aria_label() -> None:
+    """×アイコンだけのボタンには文言が無い。aria-label でしか意味が分からない。"""
+    element = Clickable("button", None, ("icon-btn",), "", aria_label="閉じる")
+
+    candidates = marker_candidates_from(
+        [element], text_hints=("閉じる",), purpose_tokens=("close",)
+    )
+
+    assert candidates[0].text == "閉じる"
+    assert 'button[aria-label="閉じる"]' in candidates[0].selectors[0]
+
+
+def test_aria_label_ranks_above_a_generic_class_but_below_id() -> None:
+    assert marker_selector_candidates(
+        "button", "close-btn", ("u-mr8",), "", aria_label="閉じる"
+    ) == (
+        "#close-btn",
+        'button[aria-label="閉じる"]',
+        "button.u-mr8",
+    )
