@@ -19,6 +19,7 @@ on:
           - session-check
           - verify-session
           - observe-login
+          - preflight
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
 # 開いたところで誰も見られない。選べる形にすると「目視で確認した」つもりの
@@ -53,6 +54,12 @@ jobs:
         run: |
           pip install -e '.'
           python -m playwright install --with-deps chromium
+
+      # 段階2の合格条件。**失敗しても続行させない** (12.6) ので、
+      # continue-on-error は付けない。安全弁の実効値と由来も印字される。
+      - name: Preflight
+        if: inputs.command == 'preflight'
+        run: scout preflight
 
       # 座標の一覧はブラウザも通信も要らない。何が足りないかを見るだけの用途。
       - name: Coordinates
