@@ -64,6 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # 既定のまま実行して「何も起きない」事故が起きる。
     recon_sub.add_parser("login", help="手動ログインしセッションを保存 (常にヘッドフル)")
     recon_sub.add_parser("observe-login", help="段階1の座標を観測して記入用の値を印字")
+    recon_sub.add_parser("observe-list", help="段階2の残り座標を観測して記入用の値を印字")
     verify = recon_sub.add_parser("verify-session", help="保存セッションで入り直して確認")
     # こちらは機械判定なので既定はヘッドレスでよい。目で見たいときだけ開く。
     verify.add_argument("--headful", action="store_true", help="画面を開いて目視でも確認する")
@@ -176,6 +177,7 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "login": "recon-login",
     "observe-login": "recon-login",
     "verify-session": "recon-login",
+    "observe-list": "recon-observe-list",
     "capture-send": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
@@ -202,6 +204,20 @@ def _dispatch_recon(
         # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
         _restore_session_from_secrets(config)
         print(observe_login(config.browser, config.paths.credentials_dir).render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "observe-list":
+        from jobmedley_scout.recon.observe_list import observe_list
+
+        # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
+        _restore_session_from_secrets(config)
+        print(
+            observe_list(
+                config.browser,
+                config.paths.credentials_dir,
+                coordinates.url("nav.candidate_list_url"),
+            ).render()
+        )
         return int(ExitCode.OK)
 
     if args.recon_command == "verify-session":

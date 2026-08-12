@@ -39,8 +39,15 @@ from jobmedley_scout.recon.known import LOGOUT_TEXT_HINTS, PUBLIC_SIGN_IN_URL
 _PASSWORD_INPUT = re.compile(r"""<input[^>]*type\s*=\s*["']?password["']?""", re.IGNORECASE)
 #: CSS識別子として安全に使えるクラス名。ハッシュ的なものは避ける
 #: (ビルドのたびに変わるので、セレクタとして書くと次のデプロイで壊れる)。
-_STABLE_CLASS = re.compile(r"^[a-zA-Z][\w-]{2,}$")
-_HASHY = re.compile(r"[0-9a-f]{6,}", re.IGNORECASE)
+#: **公開名にしてある。** :mod:`recon.observe_list` が段階2のクラス名候補
+#: (``nav.list_ready_selector`` 探索) を同じ基準でふるいにかけるため。
+STABLE_CLASS_NAME = re.compile(r"^[a-zA-Z][\w-]{2,}$")
+HASHY_TOKEN = re.compile(r"[0-9a-f]{6,}", re.IGNORECASE)
+
+
+def is_stable_class_name(name: str) -> bool:
+    """Whether ``name`` looks like an author-chosen identifier, not a build hash."""
+    return bool(STABLE_CLASS_NAME.match(name) and not HASHY_TOKEN.search(name))
 
 
 # --- 純粋関数 (テスト可能) ---------------------------------------------------
@@ -60,12 +67,21 @@ def login_form_present_in_html(html: str) -> bool:
 
 
 def marker_selector_candidates(
-    tag: str, element_id: str | None, class_names: tuple[str, ...], text: str
+    tag: str,
+    element_id: str | None,
+    class_names: tuple[str, ...],
+    text: str,
+    aria_label: str | None = None,
 ) -> tuple[str, ...]:
-    """Candidate selectors for one logout-ish element, most stable first.
+    """Candidate selectors for one marker-ish element, most stable first.
 
-    座標 ``auth.success_marker_selector`` の記入を助けるためのもの。
-    id > クラス > テキスト の順に並べるのは、その順に画面変更へ強いから。
+    座標 ``auth.success_marker_selector`` の記入を助けるためのもの。当初はログアウト
+    リンク専用だったが、閉じるボタンの探索 (``nav.drawer_close_selectors``) でも
+    同じ形の候補が要るので汎用にしてある。
+
+    id > aria-label > クラス > テキスト の順。``aria-label`` を分類より上に置くのは、
+    アイコンのみの閉じるボタンにはテキストが無く、``name`` 属性と同じく制作者が
+    意味を込めて付ける属性でスタイル用のクラスより変わりにくいから。
 
     ハッシュめいたクラス名 (``css-1a2b3c4``) は候補から外す -- ビルドのたびに
     変わるので、セレクタとして書くと次のデプロイで静かに壊れる。5.5 が
@@ -73,10 +89,13 @@ def marker_selector_candidates(
     追従できるように」と言っているのは、壊れる前提だからである。
     """
     candidates: list[str] = []
-    if element_id and _STABLE_CLASS.match(element_id) and not _HASHY.search(element_id):
+    if element_id and is_stable_class_name(element_id):
         candidates.append(f"#{element_id}")
+    stripped_aria = (aria_label or "").strip()
+    if stripped_aria:
+        candidates.append(f'{tag}[aria-label="{stripped_aria}"]')
     for name in class_names:
-        if _STABLE_CLASS.match(name) and not _HASHY.search(name):
+        if is_stable_class_name(name):
             candidates.append(f"{tag}.{name}")
     stripped = text.strip()
     if stripped:
@@ -101,7 +120,7 @@ def form_field_selector_candidates(
     ビルドのたびに変わるので、書いた瞬間から壊れる予定のセレクタになる。
     """
     candidates: list[str] = []
-    if element_id and _STABLE_CLASS.match(element_id) and not _HASHY.search(element_id):
+    if element_id and is_stable_class_name(element_id):
         candidates.append(f"#{element_id}")
     if name:
         # 属性値は引用符で囲む。``customer[email]`` のような角括弧を含む name が
@@ -222,9 +241,9 @@ def looks_like_logout(text: str) -> bool:
 LOGOUT_CLASS_TOKENS: tuple[str, ...] = ("logout", "signout", "sign-out", "sign_out")
 
 
-def _names_the_purpose(selector: str) -> bool:
+def _names_the_purpose(selector: str, purpose_tokens: tuple[str, ...]) -> bool:
     lowered = selector.lower()
-    return any(token in lowered for token in LOGOUT_CLASS_TOKENS)
+    return any(token in lowered for token in purpose_tokens)
 
 
 def selector_match_count(selector: str, elements: Iterable[Clickable]) -> int:
@@ -237,6 +256,10 @@ def selector_match_count(selector: str, elements: Iterable[Clickable]) -> int:
     for element in elements:
         if selector == f"#{element.element_id}" and element.element_id:
             count += 1
+        elif selector.startswith(f'{element.tag}[aria-label="'):
+            wanted = selector[len(element.tag) + 13 : -2]
+            if wanted and wanted == element.aria_label.strip():
+                count += 1
         elif selector.startswith(f"{element.tag}."):
             if selector[len(element.tag) + 1 :] in element.class_names:
                 count += 1
@@ -248,7 +271,10 @@ def selector_match_count(selector: str, elements: Iterable[Clickable]) -> int:
 
 
 def rank_marker_selectors(
-    selectors: Iterable[str], elements: Iterable[Clickable]
+    selectors: Iterable[str],
+    elements: Iterable[Clickable],
+    *,
+    purpose_tokens: tuple[str, ...] = LOGOUT_CLASS_TOKENS,
 ) -> tuple[str, ...]:
     """Order candidates so the *safest* one is first.
 
@@ -264,7 +290,11 @@ def rank_marker_selectors(
     1. **観測された一致件数が少ないものを優先。** 1件に当たる候補が最も限定的
     2. 同数なら、クラス名が用途を名乗っているもの (``...logout-link``) を優先。
        制作者が付けた名前なので、これも観測である
-    3. それも同じなら元の並び (id > クラス > テキスト) を保つ
+    3. それも同じなら元の並び (id > aria-label > クラス > テキスト) を保つ
+
+    ``purpose_tokens`` は「用途を名乗っている」の判定語彙。既定はログアウト用だが、
+    閉じるボタンの探索 (``nav.drawer_close_selectors``) では別の語彙を渡す --
+    ランキングの仕組み自体は用途に依らず同じなので、関数を複製しない。
     """
     observed = tuple(elements)
     ordered = list(selectors)
@@ -272,7 +302,7 @@ def rank_marker_selectors(
     def priority(selector: str) -> tuple[int, int]:
         if selector.startswith("#"):
             kind = 0
-        elif _names_the_purpose(selector):
+        elif _names_the_purpose(selector, purpose_tokens):
             kind = 1
         elif ":has-text(" in selector:
             kind = 2
@@ -283,8 +313,22 @@ def rank_marker_selectors(
     return tuple(sorted(ordered, key=priority))
 
 
-def marker_candidates_from(elements: Iterable[Clickable]) -> tuple[MarkerCandidate, ...]:
-    """Marker candidates for every logout-ish element. **Pure.**
+def _label_for(element: Clickable) -> str:
+    """The text to judge and display. Falls back to aria-label for icon-only controls.
+
+    閉じるボタンは ``×`` アイコンだけで文言が無いことが珍しくない。その場合
+    ``aria-label="閉じる"`` のような形で意味が付いていることが多いので、そちらを見る。
+    """
+    return element.text or element.aria_label
+
+
+def marker_candidates_from(
+    elements: Iterable[Clickable],
+    *,
+    text_hints: tuple[str, ...] = LOGOUT_TEXT_HINTS,
+    purpose_tokens: tuple[str, ...] = LOGOUT_CLASS_TOKENS,
+) -> tuple[MarkerCandidate, ...]:
+    """Marker candidates for every element matching ``text_hints``. **Pure.**
 
     以前はこれがブラウザ相手のループで、1要素につき ``inner_text`` / ``id`` /
     ``class`` と3回往復していた。SPA のハイドレーション中はその途中で要素ハンドルが
@@ -294,20 +338,26 @@ def marker_candidates_from(elements: Iterable[Clickable]) -> tuple[MarkerCandida
 
     いまは :func:`browser.dom.clickables` が1回で取り出した平のデータを受け取る。
     ハンドルを持ち歩かないので無効化されようがなく、この関数はテストできる。
+
+    当初はログアウトリンク専用だったが、ドロワーの閉じるボタン探索
+    (:mod:`recon.observe_list`) も「探索語に一致する要素の、安定なセレクタ候補を
+    出す」という同じ形なので、探索語 (``text_hints``) と用途語彙 (``purpose_tokens``)
+    を差し替え可能にして共有している。
     """
     observed = tuple(elements)
     found: list[MarkerCandidate] = []
     for element in observed:
-        if not looks_like_logout(element.text):
+        label = _label_for(element)
+        if not any(hint in label for hint in text_hints):
             continue
         selectors = marker_selector_candidates(
-            element.tag, element.element_id, element.class_names, element.text
+            element.tag, element.element_id, element.class_names, element.text, element.aria_label
         )
         if selectors:
             # **並べ替えは必須。** 素朴な並びだと汎用クラスが先頭に来て、
             # ログイン前でも一致するセレクタを推奨してしまう (下記参照)。
-            ranked = rank_marker_selectors(selectors, observed)
-            found.append(MarkerCandidate(text=element.text, selectors=ranked))
+            ranked = rank_marker_selectors(selectors, observed, purpose_tokens=purpose_tokens)
+            found.append(MarkerCandidate(text=label, selectors=ranked))
     return tuple(found)
 
 
