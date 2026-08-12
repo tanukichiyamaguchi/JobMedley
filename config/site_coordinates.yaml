@@ -73,7 +73,7 @@ context.selector: UNRESOLVED
 nav.mypage_url: "https://customers.job-medley.com/"
 
 # 候補者一覧 (検索結果) の画面URL。
-nav.candidate_list_url: UNRESOLVED
+nav.candidate_list_url: "https://customers.job-medley.com/customers/searches?lg=0&da[0][pid]=14&da[0][cid][0]=14131&da[0][cid][1]=14132&da[0][cid][2]=14133&da[0][cid][3]=14134&da[0][cid][4]=14135&da[0][cid][5]=14136&da[0][cid][6]=14137&da[0][cid][7]=14152&da[0][cid][8]=14102&da[0][cid][9]=14109&da[0][cid][10]=14118&da[1][pid]=13&da[1][cid][0]=13104&da[1][cid][1]=13113&da[1][cid][2]=13209&da[1][cid][3]=13206&da[1][cid][4]=13208&da[1][cid][5]=13225&da[1][cid][6]=13224&df[0]=236&df[1]=255&df[2]=524&df[3]=715&df[4]=254&df[5]=521&df[6]=13&df[7]=260&df[8]=574&df[9]=144&addr[0][pid]=&et[0]=1&gdr[0]=1&customer_search_condition_id=739599&received_favorite_job_offer[pid]=0&received_favorite_job_offer[jcid]=0&received_favorite_job_offer[keyword]=&career_jobs[0][type]=job_category_id&career_jobs[0][value]=10&career_jobs[0][cy]=&scouted_member_job_offer[pid]=0&scouted_member_job_offer[jcid]=0&scouted_member_job_offer[keyword]=&pagination[page]=1&pagination[limit]=25&desired_job_category_ids[0]=10&age[from]=0&age[to]=40"
 
 # 候補者一覧の描画完了を表す要素。
 # **「通信の静止」を待ってはならない** (5.3) ので、この要素の出現を待つ。
