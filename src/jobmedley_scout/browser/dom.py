@@ -49,6 +49,9 @@ _CLICKABLE_SCRIPT = """
 #: 走査の前に出現を待つ汎用の目印。**媒体固有のセレクタではない。**
 INTERACTIVE_SELECTOR = "a, button"
 
+#: ログインフォームの目印。HTMLの入力種別であって媒体固有の座標ではない。
+PASSWORD_INPUT = 'input[type="password"]'
+
 
 @dataclass(frozen=True)
 class Clickable:
@@ -99,15 +102,28 @@ def clickables(page: Any) -> tuple[Clickable, ...]:
     return tuple(found)
 
 
-def login_form_visible(page: Any) -> bool:
-    """Whether a password field is on the *rendered* page.
+def login_form_visible(page: Any, timeout_ms: int) -> bool:
+    """Whether a password field is on the page. **Waits before saying "no".**
 
     「ログイン画面に戻された」ことの手掛かり。認証済みのつもりで走査した結果が
     空だったとき、これが真なら **セッションが効いていない** のであって、
     「マーカーが存在しない」のではない。この2つを取り違えると、原則2の
     「静かなゼロ件」がそのまま座標の欠落として定着する。
+
+    **待つAPIで問うのが要点である。** ここは *偽* の側が判断材料になる関数で、
+    「まだ描画されていない」と「存在しない」を取り違えると、最初に塞いだはずの
+    誤報がそのまま戻ってくる -- しかも塞いだつもりの経路から。
+    :func:`wait_for_interactive` は代わりにならない。サインイン画面でも ``a`` や
+    ``button`` はパスワード欄より先に付きうるので、その待機を通過した時点では
+    フォームの有無について何も分かっていない。
+
+    ``timeout_ms`` は **呼び出し側が予算として明示する**。ログイン済みの画面では
+    パスワード欄は永遠に現れないので、この待機は必ず満了する。だから呼び出し側は、
+    その待ち時間を払う価値があるときにだけ呼ぶこと (:mod:`recon.observe_login` は
+    マーカーが見つからなかったときだけ問い合わせる)。
     """
     try:
-        return page.query_selector('input[type="password"]') is not None
+        page.wait_for_selector(PASSWORD_INPUT, timeout=timeout_ms, state="attached")
     except Exception:
         return False
+    return True

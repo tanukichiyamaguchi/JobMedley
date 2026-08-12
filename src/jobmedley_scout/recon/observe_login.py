@@ -37,7 +37,7 @@ from typing import Any
 
 from jobmedley_scout.browser import session_store
 from jobmedley_scout.browser.context import browser_context
-from jobmedley_scout.browser.dom import login_form_visible
+from jobmedley_scout.browser.dom import PASSWORD_INPUT, login_form_visible
 from jobmedley_scout.browser.navigation import goto, marker_present
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN
 from jobmedley_scout.config.schema import BrowserConfig
@@ -48,10 +48,6 @@ from jobmedley_scout.recon.manual_login import (
     form_field_selector_candidates,
     login_form_present_in_html,
 )
-
-#: ログインフォームが描画されたことの目印。**媒体固有ではない** ので、
-#: これを待つのは「探しているものを待つ」循環にはならない。
-PASSWORD_INPUT = 'input[type="password"]'
 
 #: 送信ボタンらしき要素を探す順。上ほど確実。
 _SUBMIT_SELECTORS: tuple[str, ...] = (
@@ -338,7 +334,13 @@ def observe_login(config: BrowserConfig, credentials_dir: Path) -> ObservedLogin
             # 区別できない報告が出た。区別できない報告は、原則2の静かなゼロ件が
             # 座標の欠落として定着する経路になる。
             authenticated_url = page.url
-            authenticated_login_form = login_form_visible(page)
+            # **マーカーが見つかったなら、それ自体がログイン済みの証拠** なので
+            # 問い合わせない。この確認は待つAPIで行い、ログイン済みの画面では
+            # 必ず満了する (パスワード欄は永遠に現れない)。払う価値があるのは、
+            # 「マーカーが無い」の理由を切り分けるときだけである。
+            authenticated_login_form = not marker_candidates and login_form_visible(
+                page, config.selector_timeout_ms
+            )
 
     return ObservedLogin(
         login_url=login_url,

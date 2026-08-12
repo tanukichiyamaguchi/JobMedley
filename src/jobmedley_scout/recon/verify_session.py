@@ -257,7 +257,7 @@ def verify_saved_session(
             )
 
         hits = _logout_hits(page, config.selector_timeout_ms)
-        has_password = login_form_visible(page)
+        has_password = login_form_visible(page, config.selector_timeout_ms)
         return VerifyResult(
             verdict=heuristic_verdict(logout_hits=hits, password_field_present=has_password),
             method=VerifyMethod.LOGOUT_HEURISTIC,
