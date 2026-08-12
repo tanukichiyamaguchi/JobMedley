@@ -31,7 +31,9 @@ def _observed(**overrides: object) -> ObservedLogin:
         "marker_candidates": (
             MarkerCandidate("ログアウト", ("#logout", 'a:has-text("ログアウト")')),
         ),
-        "authenticated_observation": True,
+        "session_present": True,
+        "authenticated_url": "https://customers.job-medley.com/",
+        "authenticated_login_form_visible": False,
     }
     defaults.update(overrides)
     return ObservedLogin(**defaults)  # type: ignore[arg-type]
@@ -144,12 +146,46 @@ def test_spa_detection_flips_the_flag_and_the_warning() -> None:
     assert "SPA" in report
 
 
-def test_marker_is_unresolved_when_the_session_could_not_be_used() -> None:
+def test_marker_is_unresolved_when_there_is_no_saved_session() -> None:
     """認証済みの観測ができなかったのに候補を出すと、嘘の値が座標になる。"""
-    report = _observed(authenticated_observation=False, marker_candidates=()).render()
+    report = _observed(session_present=False, marker_candidates=()).render()
 
     assert "auth.success_marker_selector: UNRESOLVED" in report
-    assert "verify-session" in report
+    assert "JOBMEDLEY_SESSION_CURL" in report
+
+
+def test_an_expired_session_is_never_reported_as_a_missing_marker() -> None:
+    """**この取り違えが実際に起きた形。**
+
+    セッションが失効してサインイン画面に戻されていても、以前の出力は
+    「ログイン後にのみ存在する要素が見つかりませんでした」と述べていた。媒体に
+    ついて何も分かっていないのに、媒体についての事実を述べていたことになる。
+    """
+    report = _observed(
+        marker_candidates=(),
+        authenticated_login_form_visible=True,
+        authenticated_url="https://customers.job-medley.com/customers/sign_in/",
+    ).render()
+
+    assert "セッションが効いていません" in report
+    assert "見つかりませんでした" not in report
+    # どこに着いたのかを必ず出す。これが無いと運用者は切り分けられない。
+    assert "https://customers.job-medley.com/customers/sign_in/" in report
+
+
+def test_the_two_empty_cases_are_distinguishable() -> None:
+    """「マーカーが無い」と「ログインしていない」が同じ文面になってはいけない。"""
+    logged_in = _observed(marker_candidates=()).render()
+    logged_out = _observed(marker_candidates=(), authenticated_login_form_visible=True).render()
+
+    assert logged_in != logged_out
+
+
+def test_authenticated_observation_requires_more_than_a_session_file() -> None:
+    """ファイルがあること = 認証できていること、ではない。"""
+    assert _observed().authenticated_observation is True
+    assert _observed(session_present=False).authenticated_observation is False
+    assert _observed(authenticated_login_form_visible=True).authenticated_observation is False
 
 
 def test_marker_is_unresolved_when_nothing_logout_like_was_found() -> None:
@@ -158,6 +194,7 @@ def test_marker_is_unresolved_when_nothing_logout_like_was_found() -> None:
 
     assert "auth.success_marker_selector: UNRESOLVED" in report
     assert "アカウント名の表示" in report
+    assert "ログイン後の画面には居ますが" in report
 
 
 def test_report_points_at_the_strict_verification() -> None:

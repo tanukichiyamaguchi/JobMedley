@@ -37,15 +37,17 @@ from typing import Any
 
 from jobmedley_scout.browser import session_store
 from jobmedley_scout.browser.context import browser_context
+from jobmedley_scout.browser.dom import clickables, login_form_visible, wait_for_interactive
 from jobmedley_scout.browser.navigation import goto, marker_present
 from jobmedley_scout.config.placeholders import Coord, is_resolved, require
 from jobmedley_scout.config.schema import BrowserConfig
-from jobmedley_scout.recon.known import LOGOUT_TEXT_HINTS, PUBLIC_SIGN_IN_URL
+from jobmedley_scout.recon.known import PUBLIC_SIGN_IN_URL
+from jobmedley_scout.recon.manual_login import logout_texts_from
 
-#: 描画済みDOMからパスワード欄を探すセレクタ。**ログイン画面に戻された** ことの
-#: 手掛かりであり、:func:`recon.manual_login.login_form_present_in_html` とは
-#: 目的が違う (あちらは素のHTMLを見てSPAかどうかを判定する)。
-PASSWORD_FIELD_SELECTOR = 'input[type="password"]'
+# パスワード欄の検出は :func:`browser.dom.login_form_visible` にある。
+# 「ログイン画面に戻された」ことの手掛かりであり、
+# :func:`recon.manual_login.login_form_present_in_html` とは目的が違う
+# (あちらは素のHTMLを見て SPA かどうかを判定する)。
 
 
 class Verdict(StrEnum):
@@ -205,34 +207,18 @@ class VerifyResult:
 # --- ブラウザ依存部 (私は検証できない。運用者の実機確認に委ねる) ----------------
 
 
-def _logout_hits(page: Any) -> tuple[str, ...]:
-    """Logout-ish link/button labels visible on the page.
+def _logout_hits(page: Any, timeout_ms: int) -> tuple[str, ...]:
+    """Logout-ish link/button labels present on the page.
 
     ``page.content()`` の全文検索にしないのは、JSバンドルの中の文字列まで
     拾ってしまい、未ログインでも常に一致するようになるため。
+
+    走査の前に汎用の目印の出現を待つ (:func:`browser.dom.wait_for_interactive`)。
+    待たずに覗くと、SPA では描画前の空の DOM を「ログアウトリンクが無い」と
+    読んでしまう -- それは **認証切れと区別がつかない誤診** になる。
     """
-    hits: list[str] = []
-    for tag in ("a", "button"):
-        try:
-            elements = page.query_selector_all(tag)
-        except Exception:
-            continue
-        for element in elements:
-            try:
-                text = (element.inner_text() or "").strip()
-            except Exception:
-                continue
-            for hint in LOGOUT_TEXT_HINTS:
-                if hint in text and text not in hits:
-                    hits.append(text)
-    return tuple(hits)
-
-
-def _password_field_present(page: Any) -> bool:
-    try:
-        return page.query_selector(PASSWORD_FIELD_SELECTOR) is not None
-    except Exception:
-        return False
+    wait_for_interactive(page, timeout_ms)
+    return logout_texts_from(clickables(page))
 
 
 def verify_saved_session(
@@ -270,8 +256,8 @@ def verify_saved_session(
                 session_path=path,
             )
 
-        hits = _logout_hits(page)
-        has_password = _password_field_present(page)
+        hits = _logout_hits(page, config.selector_timeout_ms)
+        has_password = login_form_visible(page)
         return VerifyResult(
             verdict=heuristic_verdict(logout_hits=hits, password_field_present=has_password),
             method=VerifyMethod.LOGOUT_HEURISTIC,

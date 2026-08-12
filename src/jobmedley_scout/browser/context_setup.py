@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from jobmedley_scout.browser.navigation import marker_present
 from jobmedley_scout.browser.waits import pause
 from jobmedley_scout.config.placeholders import Coord, is_resolved, require
 from jobmedley_scout.config.schema import WaitsConfig
@@ -44,6 +45,7 @@ def establish_context(
     selection_required: Coord[bool],
     selector: Coord[str | None],
     waits: WaitsConfig,
+    selector_timeout_ms: int,
 ) -> ContextResult:
     """Establish any post-login selection. **Runs every time, never raises.**
 
@@ -71,12 +73,22 @@ def establish_context(
         return ContextResult(ContextOutcome.NOT_REQUIRED, "選択コントロールは存在しないと確認済み")
 
     try:
-        element = page.query_selector(control)
-        if element is None:
+        # **見つからないと判断する前に待つ。** ``query_selector`` は自動待機しない
+        # ので、SPA では描画前の DOM を「コントロールが存在しない」と読む。5.6 の
+        # フェイルオープンは *本当に無い* ときのための設計であって、*早く見すぎた*
+        # ときのためのものではない -- 後者は静かに選択を飛ばす事故になる。
+        # ここで待つのは確定済みの座標なので、循環参照にはならない。
+        if not marker_present(page, control, timeout_ms=selector_timeout_ms):
             # 選択肢がない場合は「選択済みまたは不要」として続行する (5.6)。
             return ContextResult(
                 ContextOutcome.ALREADY_SET_OR_UNNECESSARY,
                 "選択コントロールが見つからない (選択済みか、この画面では不要)",
+            )
+        element = page.query_selector(control)
+        if element is None:  # pragma: no cover - 待機直後に消えた場合のみ
+            return ContextResult(
+                ContextOutcome.ALREADY_SET_OR_UNNECESSARY,
+                "選択コントロールが待機直後に消えた",
             )
         element.click()
         pause(waits.between_actions)

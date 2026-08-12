@@ -24,13 +24,14 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from jobmedley_scout.browser import session_store
 from jobmedley_scout.browser.context import browser_context
+from jobmedley_scout.browser.dom import Clickable, clickables, wait_for_interactive
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.recon.known import LOGOUT_TEXT_HINTS, PUBLIC_SIGN_IN_URL
@@ -211,32 +212,57 @@ class LoginObservation:
         return "\n".join(lines)
 
 
+def looks_like_logout(text: str) -> bool:
+    """Whether this label is a logout-ish one."""
+    return any(hint in text for hint in LOGOUT_TEXT_HINTS)
+
+
+def marker_candidates_from(elements: Iterable[Clickable]) -> tuple[MarkerCandidate, ...]:
+    """Marker candidates for every logout-ish element. **Pure.**
+
+    以前はこれがブラウザ相手のループで、1要素につき ``inner_text`` / ``id`` /
+    ``class`` と3回往復していた。SPA のハイドレーション中はその途中で要素ハンドルが
+    無効になり、例外を握りつぶす経路から **黙って** 候補が消えていた。往復1回で
+    済む走査 (:func:`verify_session` 側) より構造的に取りこぼしやすく、実際に
+    同じセッションで一方だけが「見つからない」と報告する事故が起きた。
+
+    いまは :func:`browser.dom.clickables` が1回で取り出した平のデータを受け取る。
+    ハンドルを持ち歩かないので無効化されようがなく、この関数はテストできる。
+    """
+    found: list[MarkerCandidate] = []
+    for element in elements:
+        if not looks_like_logout(element.text):
+            continue
+        selectors = marker_selector_candidates(
+            element.tag, element.element_id, element.class_names, element.text
+        )
+        if selectors:
+            found.append(MarkerCandidate(text=element.text, selectors=selectors))
+    return tuple(found)
+
+
+def logout_texts_from(elements: Iterable[Clickable]) -> tuple[str, ...]:
+    """The logout-ish labels present, de-duplicated. **Pure.**"""
+    texts: list[str] = []
+    for element in elements:
+        if looks_like_logout(element.text) and element.text not in texts:
+            texts.append(element.text)
+    return tuple(texts)
+
+
 # --- ブラウザ依存部 (私は検証できない。運用者の実機確認に委ねる) ----------------
 
 
-def collect_marker_candidates(page: Any) -> tuple[MarkerCandidate, ...]:
-    found: list[MarkerCandidate] = []
-    for tag in ("a", "button"):
-        try:
-            elements = page.query_selector_all(tag)
-        except Exception:
-            continue
-        for element in elements:
-            try:
-                text = (element.inner_text() or "").strip()
-            except Exception:
-                continue
-            if not any(hint in text for hint in LOGOUT_TEXT_HINTS):
-                continue
-            try:
-                element_id = element.get_attribute("id")
-                class_attr = element.get_attribute("class") or ""
-            except Exception:
-                element_id, class_attr = None, ""
-            selectors = marker_selector_candidates(tag, element_id, tuple(class_attr.split()), text)
-            if selectors:
-                found.append(MarkerCandidate(text=text, selectors=selectors))
-    return tuple(found)
+def collect_marker_candidates(page: Any, timeout_ms: int) -> tuple[MarkerCandidate, ...]:
+    """Read the page once, then decide purely.
+
+    **走査の前に汎用の目印の出現を待つ。** ``query_selector_all`` は自動待機せず、
+    ``context.set_default_timeout`` もこの経路には効かないので、待たずに覗くと
+    SPA では描画前の空の DOM を「要素が無い」と読んでしまう (5.3 は通信ではなく
+    要素を待てと言っている)。
+    """
+    wait_for_interactive(page, timeout_ms)
+    return marker_candidates_from(clickables(page))
 
 
 def run_manual_login(
@@ -284,7 +310,7 @@ def run_manual_login(
         wait_for_human()
 
         landed_url = page.url
-        candidates = collect_marker_candidates(page)
+        candidates = collect_marker_candidates(page, config.selector_timeout_ms)
         # 5.4: **ログイン成功直後に保存する。** 終了時だけに任せると、途中で
         # 落ちたときに手動ログインをやり直す羽目になる。
         session_path = session_store.save(context, credentials_dir)
