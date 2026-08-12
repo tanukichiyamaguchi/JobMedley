@@ -117,11 +117,7 @@ def zero_result_variant(url: str) -> str | None:
     if not any(key in ("age[from]", "age[to]") for key, _ in params):
         return None
     replaced = [
-        (key, "120")
-        if key == "age[from]"
-        else (key, "121")
-        if key == "age[to]"
-        else (key, value)
+        (key, "120") if key == "age[from]" else (key, "121") if key == "age[to]" else (key, value)
         for key, value in params
     ]
     # ``safe="[]"`` で元のURLの書式 (角括弧を%エンコードしない) を保つ。
