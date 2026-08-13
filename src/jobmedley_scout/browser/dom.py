@@ -162,6 +162,35 @@ def wait_for_new_clickables(
     return True
 
 
+#: 与えられたセレクタが全て0件になるのを待つ。**語彙は呼び出し側が観測から導く。**
+_ALL_DETACHED_SCRIPT = """
+(sels) => sels.every((s) => {
+  try { return document.querySelectorAll(s).length === 0; }
+  catch (e) { return true; }
+})
+"""
+
+
+def wait_for_all_detached(page: Any, selectors: list[str], timeout_ms: int) -> bool:
+    """Wait until none of ``selectors`` matches anything.
+
+    読み込み中にだけ存在する要素 (ローダー) の消滅を待つために使う。**どの要素が
+    ローダーかは推測しない** -- 呼び出し側が「遷移直後には在り、読み込み完了後の
+    ページには無い」という観測から導いたセレクタを渡す (5.3 と同じ理屈: 待つのは
+    通信の静止ではなく、要素の状態)。
+
+    満了しても例外にしない。ローダーが残り続けるページ (読み込みが完了しない
+    変種) は実在するので、「消えなかった」は観測として呼び出し側へ返す。
+    """
+    if not selectors:
+        return True
+    try:
+        page.wait_for_function(_ALL_DETACHED_SCRIPT, arg=selectors, timeout=timeout_ms)
+    except Exception:
+        return False
+    return True
+
+
 def page_title(page: Any) -> str:
     """The page's title, or empty. Used as evidence of *which* page we were on."""
     try:

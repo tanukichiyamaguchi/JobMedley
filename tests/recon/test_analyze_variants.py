@@ -331,3 +331,84 @@ def test_replay_equals_live_analysis() -> None:
     assert reloaded is not None
 
     assert analyze_candidate_list(reloaded).render() == analyze_candidate_list(capture).render()
+
+
+# --- variant: 実測3回目で判明した形 (ローダーが残る / コンテナが観測できる) --------
+
+
+def test_a_stuck_loader_zero_page_is_visible_in_the_diagnostics() -> None:
+    """**実測3回目の形。** 0件変種の読み込みが完了せず、ローダーだけが残った。
+
+    値は出ない (0件表示を観測できていない) が、``loader_cleared=False`` の事実が
+    診断として必ず印字されること。これが無いと「0件表示が無い媒体」と
+    「読み込みが終わらなかった実行」を、報告から区別できない。
+    """
+    skeleton = _frame_only(LOADING)
+    observed = _analyze(
+        _results_page(),
+        ZeroCapture(
+            kind="age",
+            url=URL,
+            landed_url=URL,
+            early=skeleton,
+            settled=skeleton,
+            loader_cleared=False,
+        ),
+    )
+
+    assert observed.ready == ()
+    report = observed.render()
+    assert "読み込み表示が消えませんでした" in report
+
+
+def test_a_container_observed_on_loaded_zero_pages_becomes_the_single_value() -> None:
+    """コンテナが「0件でも読み込み後に存在し、遷移直後には無い」と観測できた形。
+
+    このとき値はペアではなくコンテナ単独になる -- 取得指針の理想形。
+    """
+    # 結果ページ: 一意なコンテナ div.result-body の中に行が並ぶ。
+    results = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("result-body",), 0),  # アンカー
+        ("div", ("card",), 1),
+        ("p", ("t",), 2),
+        ("div", ("card",), 1),
+        ("p", ("t",), 4),
+    )
+    # 0件ページ (settled): 同じコンテナの中に0件表示。
+    zero_settled = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("result-body",), 0),
+        ("div", ("no-hit",), 1),
+    )
+    # 遷移直後: コンテナ自体がまだ無い (= 出現を待てる)。
+    zero_early = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-loader",), 0),
+    )
+    observed = _analyze(
+        results,
+        ZeroCapture(
+            kind="age",
+            url=URL,
+            landed_url=URL,
+            early=zero_early,
+            settled=zero_settled,
+            loader_cleared=True,
+        ),
+        ZeroCapture(
+            kind="pagination",
+            url=URL,
+            landed_url=URL,
+            early=zero_early,
+            settled=zero_settled,
+            loader_cleared=True,
+        ),
+    )
+
+    assert observed.container_ready == "div.result-body"
+    report = observed.render()
+    assert 'nav.list_ready_selector: "div.result-body"' in report
+    assert "0件の検索でも読み込み後に存在する" in report
+    # ペアは別案として残る (選択肢を奪わない)。
+    assert "別案" in report
