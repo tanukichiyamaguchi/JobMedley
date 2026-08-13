@@ -63,6 +63,7 @@ from jobmedley_scout.browser.dom import (
     dom_tree,
     login_form_visible,
     select_fields,
+    wait_for_all_detached,
     wait_for_interactive,
     wait_for_new_clickables,
     wait_for_structure_to_settle,
@@ -75,6 +76,7 @@ from jobmedley_scout.recon.list_structure import (
     ReadyValue,
     RowGroup,
     click_locator,
+    container_ready_token,
     empty_state_candidates,
     list_region,
     ready_values,
@@ -361,6 +363,9 @@ class ObservedList:
     empty_state_scope: str = ""
     #: 行トークンが一覧の外にもあった数。共通祖先が跳ね上がっている手掛かり。
     rows_outside_group: int = 0
+    #: コンテナ単独の値 (0件ページでも読み込み後に存在することを観測できた場合のみ)。
+    #: これが在れば **ペアより優先** -- 座標の取得指針が言う「行のコンテナ」そのもの。
+    container_ready: str = ""
     #: nav.list_ready_selector の推奨値と別案。**先頭が推奨。**
     ready: tuple[ReadyValue, ...] = ()
     #: ドロワーを試さなかった明示的な理由 (再生など)。空なら状況から推定して印字する。
@@ -497,6 +502,16 @@ class ObservedList:
             return out
 
         row = self.row_groups[0].token
+        if self.container_ready:
+            out = [f"  {key}: {_scalar(self.container_ready)}"]
+            out.append("    # 一覧のコンテナです。**0件の検索でも読み込み後に存在する** ことと、")
+            out.append("    # **遷移直後には存在しない** (= 描画の完了を待てる) ことを、")
+            out.append("    # 0件ページの前後スナップショットで観測済みです。")
+            for value in self.ready[:2]:
+                out.append(f"    # 別案 (行∨0件表示): {value.selector()}")
+            out.extend(self._zero_page_lines())
+            out.extend(self._caveat_lines())
+            return out
         if not self.ready:
             out = [f"  {key}: {UNRESOLVED_TOKEN}"]
             if self.rows_confirmed_vanishing:
@@ -736,6 +751,11 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
             early_counts=early_counts,
         )
         usable, why = zero_page_is_usable(report, zero.url)
+        if zero.loader_cleared is False:
+            # 拒否はしない (高速に描画し終えたページと区別できないため) が、
+            # **読み込み表示が消えなかった事実は必ず診断に残す**。値が出なかった
+            # ときに「変種が完了しない」ことを運用者と開発側が読めるように。
+            why = (why + " / " if why else "") + "読み込み表示が消えませんでした"
         zero_reports.append((zero.kind, usable, why))
         if usable and zero.settled is not None:
             usable_counts.append(zero_counts)
@@ -772,6 +792,20 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
 
     ready = ready_values(rows, empties, counts, usable_counts)
 
+    # コンテナ単独の値。3条件 (結果ページに一意 / 全0件ページの settled に在る /
+    # 全0件ページの early に無い) が観測できたときだけ成立する。
+    usable_zero = [
+        z
+        for z, (_kind, ok, _why) in zip(capture.zeros, zero_reports, strict=True)
+        if ok and z.settled is not None
+    ]
+    container = container_ready_token(
+        anchor_token,
+        counts,
+        [token_counts(z.settled) for z in usable_zero if z.settled is not None],
+        [token_counts(z.early) if z.early is not None else {} for z in usable_zero],
+    )
+
     return (
         ObservedList(
             requested_url=requested_url,
@@ -786,10 +820,39 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
             anchor_token=anchor_token,
             empty_state_scope=scope,
             rows_outside_group=rows_outside,
+            container_ready=container,
             ready=ready,
         ),
         usable_counts,
     )
+
+
+def _wait_out_transients(
+    page: object,
+    early: DomTree | None,
+    reference_counts: Mapping[str, int],
+    timeout_ms: int,
+) -> bool | None:
+    """Wait for observed transient chrome (loaders) to detach.
+
+    一時要素の語彙は観測から導く: **遷移直後のこのページに在り、読み込み完了後の
+    結果ページには無い** トークン。枠は結果ページにも在るので含まれず、ローダーの
+    ような読み込み中限定の要素だけが残る。
+
+    戻り値: 消えた=True / 満了しても残った=False / 一時要素が無かった=None。
+    False は拒否理由にしない (描画し終えた0件表示も「結果ページに無い」を満たし
+    うるため、高速なページと区別できない)。診断として印字されるだけである。
+    """
+    if early is None:
+        return None
+    transients = sorted(
+        token
+        for token, count in token_counts(early).items()
+        if count > 0 and reference_counts.get(token, 0) == 0
+    )
+    if not transients:
+        return None
+    return wait_for_all_detached(page, transients, timeout_ms)
 
 
 def observe_list(
@@ -841,18 +904,29 @@ def observe_list(
             )
 
         # --- 結果ページの構造 -------------------------------------------------
+        # 遷移直後の1枚は診断用 (ローダー語彙の導出と、読み込み前後の区別の材料)。
+        results_early = dom_tree(page)
         wait_for_structure_to_settle(page, config.selector_timeout_ms)
         tree = dom_tree(page)
 
         # --- 0件ページ (結果の木が読めた場合のみ意味がある) --------------------
         zeros: list[ZeroCapture] = []
         if tree is not None and not tree.truncated:
+            reference_counts = token_counts(tree)
             for variant in zero_result_variants(requested_url):
                 goto(page, variant.url, config)
                 wait_for_interactive(page, config.selector_timeout_ms)
                 # **落ち着く前に1枚撮る。** 読み込み中の骨組みはここに写る。0件表示の
                 # 候補からそれを外さないと、未描画のページが最良の0件ページに見える。
                 early_tree = dom_tree(page)
+                # **読み込み表示の消滅を待つ。** 実測で、構造の静止だけでは XHR 待ちの
+                # ローダー画面を「完了」と誤認した (0件ページ2枚ともローダーのまま
+                # 撮影され、0件表示を一度も観測できなかった)。どの要素がローダーかは
+                # 推測しない -- 「遷移直後には在り、読み込み完了後の結果ページには
+                # 無い」トークン (= この実行自身の観測) の消滅を待つ。
+                cleared = _wait_out_transients(
+                    page, early_tree, reference_counts, config.selector_timeout_ms
+                )
                 wait_for_structure_to_settle(page, config.selector_timeout_ms)
                 zeros.append(
                     ZeroCapture(
@@ -861,6 +935,7 @@ def observe_list(
                         landed_url=page.url,
                         early=early_tree,
                         settled=dom_tree(page),
+                        loader_cleared=cleared,
                     )
                 )
 
@@ -869,6 +944,7 @@ def observe_list(
             landed_url=landed_url,
             results=tree,
             zeros=tuple(zeros),
+            results_early=results_early,
         )
         observed, usable_counts = _analyze(capture)
         if tree is None or tree.truncated:
@@ -880,13 +956,20 @@ def observe_list(
         if not rows:
             return observed, capture
 
-        # 結果ページへ戻る (0件ページを見た後なので)。
+        # 結果ページへ戻る (0件ページを見た後なので)。**同じ待ちを掛ける** --
+        # 実測でここが素通りし、ローダー画面から行を探して「行が現れない」まま
+        # ドロワーを諦めていた (報告は誤ってクリック領域の不在を理由にしていた)。
         goto(page, requested_url, config)
         wait_for_interactive(page, config.selector_timeout_ms)
+        fresh_early = dom_tree(page)
+        _wait_out_transients(page, fresh_early, token_counts(tree), config.selector_timeout_ms)
         wait_for_structure_to_settle(page, config.selector_timeout_ms)
         fresh_tree = dom_tree(page)
         if fresh_tree is None:
-            return observed, capture
+            return (
+                replace(observed, drawer_skip_reason="再遷移後のDOMの木を読めませんでした。"),
+                capture,
+            )
         fresh_sizes = subtree_sizes(fresh_tree)
         members = [
             g
@@ -894,15 +977,40 @@ def observe_list(
             if g.token == rows[0].token
         ]
         if not members:
-            return observed, capture
+            return (
+                replace(
+                    observed,
+                    drawer_skip_reason=(
+                        "再遷移した結果ページに行が現れませんでした "
+                        "(読み込みが完了しなかった可能性)。"
+                    ),
+                ),
+                capture,
+            )
 
         # **操作部品を含まない領域だけを押す。** 行の中には送信ボタンがありうる。
         target = safe_click_index(fresh_tree, fresh_sizes, members[0].members[0])
         if target is None:
-            return observed, capture
+            return (
+                replace(
+                    observed,
+                    drawer_skip_reason=(
+                        "行の中に、操作部品 (a/button/input等) を1つも含まない押せる"
+                        "領域が見つかりませんでした。取り消せない外向き操作を避けるため"
+                        "押していません。"
+                    ),
+                ),
+                capture,
+            )
         locator = click_locator(fresh_tree, target)
         if locator is None:
-            return observed, capture
+            return (
+                replace(
+                    observed,
+                    drawer_skip_reason="クリック対象を一意に指すセレクタを作れませんでした。",
+                ),
+                capture,
+            )
 
         before = clickables(page)
         before_visible = sum(1 for c in before if c.visible)

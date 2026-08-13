@@ -425,6 +425,38 @@ def click_locator(tree: DomTree, target: int) -> tuple[str, int] | None:
     return token, matches.index(target)
 
 
+def container_ready_token(
+    anchor_token: str,
+    results_counts: Mapping[str, int],
+    zero_settled: Sequence[Mapping[str, int]],
+    zero_early: Sequence[Mapping[str, int]],
+) -> str:
+    """The list container itself, when it provably renders on empty results too.
+
+    座標の取得指針が最初から言っていた理想形である: 「行そのものではなく行の
+    コンテナを選ぶと空結果でも待てる」。コンテナがそれを満たすかは観測できる:
+
+    * 結果ページにちょうど1個ある (アンカーの構成条件)
+    * **使えたすべての0件ページの、落ち着いた後に存在する** -- 0件でも描画される
+    * **すべての0件ページの、遷移直後には存在しない** -- 描画の完了を待てる。
+      この条件が枠 (``body.c-body`` 等) を落とす。枠は遷移直後から在る
+
+    3条件が揃えば、このトークン単独が ``nav.list_ready_selector`` の最良の値になる
+    (行∨0件表示のペアより単純で、どんな件数でも成立する)。揃わなければ空文字を
+    返し、呼び出し側はペア方式へ落ちる。
+    """
+    if not anchor_token or not zero_settled or len(zero_settled) != len(zero_early):
+        return ""
+    if results_counts.get(anchor_token, 0) != 1:
+        return ""
+    for settled, early in zip(zero_settled, zero_early, strict=False):
+        if settled.get(anchor_token, 0) < 1:
+            return ""
+        if early.get(anchor_token, 0) != 0:
+            return ""
+    return anchor_token
+
+
 # --- 値の組み立て (唯一の出口) -------------------------------------------------
 
 

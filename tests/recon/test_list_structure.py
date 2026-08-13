@@ -23,6 +23,7 @@ from jobmedley_scout.recon.list_structure import (
     ancestors_or_self,
     click_locator,
     contains,
+    container_ready_token,
     empty_state_candidates,
     indices_with_token,
     list_region,
@@ -612,3 +613,51 @@ def test_alternatives_are_deduplicated_by_token() -> None:
     values = ready_values(rows, empties, rc, [zc])
 
     assert [v.selector() for v in values] == ["div.row, div.empty"]
+
+
+# --- コンテナ単独の値 (**取得指針の理想形が観測で成立する場合**) ------------------
+
+
+def test_the_container_becomes_the_value_when_it_provably_renders_on_empty() -> None:
+    """「行のコンテナを選ぶと空結果でも待てる」を観測で確かめられた形。
+
+    3条件: 結果ページに一意 / 全0件ページの settled に在る / 全0件ページの
+    early に無い (= 描画の完了を待てる)。
+    """
+    anchor = "div.result-table__body"
+    results = {anchor: 1, "div.card": 25}
+    settled = {anchor: 1, "div.no-hit": 1}
+    early = {"body.c-body": 1, "div.c-loader": 1}
+
+    assert container_ready_token(anchor, results, [settled], [early]) == anchor
+
+
+def test_a_frame_can_never_become_the_container_value() -> None:
+    """枠は遷移直後から在るので、early不在の条件で落ちる。
+
+    ``body.c-body`` を値にした最初の事故が、この経路から再発しないこと。
+    """
+    frame = "body.c-body"
+    results = {frame: 1}
+    settled = {frame: 1}
+    early = {frame: 1}  # 枠は最初から在る
+
+    assert container_ready_token(frame, results, [settled], [early]) == ""
+
+
+def test_a_container_missing_from_one_zero_page_yields_no_value() -> None:
+    """0件で消えるコンテナは行と同じ欠陥を持つ。全ページでの存在を要求する。"""
+    anchor = "div.result-table__body"
+    results = {anchor: 1}
+
+    assert (
+        container_ready_token(
+            anchor, results, [{anchor: 1}, {}], [{"div.c-loader": 1}, {"div.c-loader": 1}]
+        )
+        == ""
+    )
+
+
+def test_no_usable_zero_page_means_no_container_value() -> None:
+    """観測できていないものを値にしない (原則3)。"""
+    assert container_ready_token("div.x", {"div.x": 1}, [], []) == ""

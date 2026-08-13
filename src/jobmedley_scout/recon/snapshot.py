@@ -63,6 +63,9 @@ class ZeroCapture:
     early: DomTree | None
     #: 落ち着いた後のスナップショット。
     settled: DomTree | None
+    #: 読み込み表示 (観測から導いた一時要素) が消えるのを待てたか。
+    #: None = 一時要素が無かった / 記録の無い旧スナップショット。
+    loader_cleared: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,8 @@ class ListCapture:
     landed_url: str
     results: DomTree | None
     zeros: tuple[ZeroCapture, ...]
+    #: 結果ページの遷移直後のスナップショット (診断用。無い旧形式は None)。
+    results_early: DomTree | None = None
     #: 行をクリックした後の木 (クリックできた場合のみ)。閉じるボタンの再解析用。
     after_click: DomTree | None = None
 
@@ -134,10 +139,12 @@ def capture_to_payload(capture: ListCapture) -> dict[str, object]:
                 "landed_url": zero.landed_url,
                 "early": tree_to_payload(zero.early),
                 "settled": tree_to_payload(zero.settled),
+                "loader_cleared": zero.loader_cleared,
             }
             for zero in capture.zeros
         ],
         "after_click": tree_to_payload(capture.after_click),
+        "results_early": tree_to_payload(capture.results_early),
     }
 
 
@@ -158,6 +165,9 @@ def capture_from_payload(payload: object) -> ListCapture | None:
                 landed_url=str(item.get("landed_url", "")),
                 early=tree_from_payload(item.get("early")),
                 settled=tree_from_payload(item.get("settled")),
+                loader_cleared=item.get("loader_cleared")
+                if isinstance(item.get("loader_cleared"), bool)
+                else None,
             )
         )
     return ListCapture(
@@ -166,6 +176,7 @@ def capture_from_payload(payload: object) -> ListCapture | None:
         results=tree_from_payload(payload.get("results")),
         zeros=tuple(zeros),
         after_click=tree_from_payload(payload.get("after_click")),
+        results_early=tree_from_payload(payload.get("results_early")),
     )
 
 
