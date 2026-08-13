@@ -433,6 +433,39 @@ def test_a_click_that_navigates_is_reported_as_navigation_not_failure() -> None:
     assert "この座標は不要かもしれません" in report
 
 
+def test_a_click_that_never_completed_is_not_reported_as_pressed() -> None:
+    """**実測4回目の誤導を塞ぐ。** クリックが完了しなかった (操作可能性の検査で
+    満了した) のに「押しましたが新出要素なし」と報告し、ドロワーの謎を
+    「押しても開かない」問題だと誤認させた。押せていないなら押せていないと言う。
+    """
+    report = _found(
+        drawer_attempted=True,
+        drawer_click_locator=("div.c-search-member-card__main-content", 0),
+        drawer_click_failed=True,
+        drawer_covering=("div.c-tour-guide__tooltip", "div.c-overlay", "body.c-body"),
+    ).render()
+
+    assert "nav.drawer_close_selectors: UNRESOLVED" in report
+    assert "完了しませんでした" in report
+    assert "押しましたが" not in report
+    assert "div.c-tour-guide__tooltip" in report
+    # 覆い要素にツアー系の語があれば、実画面での解消手順まで案内する。
+    assert "実画面で一度案内を閉じてから再実行" in report
+
+
+def test_a_failed_click_without_covering_evidence_stays_honest() -> None:
+    """遮り要素を読めなかったときに「遮り無し」と断定しない。"""
+    report = _found(
+        drawer_attempted=True,
+        drawer_click_locator=("div.c-search-member-card__main-content", 0),
+        drawer_click_failed=True,
+    ).render()
+
+    assert "nav.drawer_close_selectors: UNRESOLVED" in report
+    assert "完了しませんでした" in report
+    assert "覆っていた要素" not in report
+
+
 def test_a_click_that_opens_nothing_is_reported_honestly() -> None:
     report = _found(
         drawer_attempted=True,

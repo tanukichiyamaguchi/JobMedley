@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -60,6 +61,7 @@ from jobmedley_scout.browser.dom import (
     DomTree,
     SelectField,
     clickables,
+    covering_rows,
     dom_tree,
     login_form_visible,
     select_fields,
@@ -84,6 +86,7 @@ from jobmedley_scout.recon.list_structure import (
     repeated_child_groups,
     row_group_candidates,
     safe_click_index,
+    stable_tokens,
     subtree_sizes,
     token_counts,
     transient_tokens,
@@ -380,6 +383,13 @@ class ObservedList:
     drawer_click_locator: tuple[str, int] | None = None
     #: クリック自体を試みたか。
     drawer_attempted: bool = False
+    #: クリックが完了しなかったか (Playwright が操作可能性の検査で満了した等)。
+    #: **「押したが無反応」とは別の事実。** 実測4回目でこの区別を怠り、完了して
+    #: いないクリックを「押しましたが新出要素なし」と報告して診断を誤導した。
+    drawer_click_failed: bool = False
+    #: クリック地点 (対象の中心) を覆っていた要素とその祖先の構造トークン。
+    #: クリックが遮られたときの一次証拠。文言は含まない (13.2)。
+    drawer_covering: tuple[str, ...] = ()
     #: クリック後に新しい要素の出現を検知できたか。
     drawer_opened: bool = False
     #: クリックがドロワーではなくページ遷移だったか。
@@ -651,6 +661,25 @@ class ObservedList:
             if self.drawer_click_locator
             else "(記録なし)"
         )
+        if self.drawer_click_failed:
+            # **押せていないことを「押したが無反応」と言わない。** 事実は
+            # 「クリックが完了しなかった」であり、遮り要素があればそれが証拠。
+            out = [
+                f"  {key}: {UNRESOLVED_TOKEN}",
+                f"    # {pressed} へのクリックが **完了しませんでした**",
+                "    # (操作可能になるのを待って満了)。押せていないので、",
+                "    # ドロワーが開くかどうかはまだ分かっていません。",
+            ]
+            if self.drawer_covering:
+                out.append("    # クリック地点を覆っていた要素 (内側→外側):")
+                out.extend(f"    #   - {token}" for token in self.drawer_covering)
+                out.append("    #   (文言は出しません 13.2)")
+                if any("tour" in token or "overlay" in token for token in self.drawer_covering):
+                    out.append(
+                        "    # ツアー案内らしき要素が画面を覆っています。実画面で一度"
+                        "案内を閉じてから再実行すると通る可能性があります。"
+                    )
+            return out
         if self.drawer_url_changed:
             return [
                 f"  {key}: {UNRESOLVED_TOKEN}",
@@ -888,6 +917,35 @@ def _wait_out_transients(
     return wait_for_all_detached(page, transients, timeout_ms)
 
 
+def _covering_tokens(page: object, locator: tuple[str, int]) -> tuple[str, ...]:
+    """Structure tokens of whatever sits under the click point, innermost first.
+
+    読めなかったとき (None) と「遮り無し = 自分自身が居た」を混同しない --
+    どちらも空でない結果を返せないが、報告では「覆っていた要素」を印字しない
+    だけで済む。タグとクラスのみで、文言は含まない (13.2)。
+    """
+    rows = covering_rows(page, locator[0], locator[1])
+    if rows is None:
+        return ()
+    out: list[str] = []
+    for tag, class_names in rows:
+        tokens = stable_tokens(tag, class_names)
+        out.append(tokens[0] if tokens else tag)
+    return tuple(dict.fromkeys(out))[:8]
+
+
+def _second_row_locator(
+    tree: DomTree, sizes: tuple[int, ...], row_members: tuple[int, ...]
+) -> tuple[str, int] | None:
+    """A safe click locator inside the second row, if any."""
+    if len(row_members) < 2:
+        return None
+    target = safe_click_index(tree, sizes, row_members[1])
+    if target is None:
+        return None
+    return click_locator(tree, target)
+
+
 def observe_list(
     config: BrowserConfig,
     credentials_dir: Path,
@@ -1065,16 +1123,50 @@ def observe_list(
                 capture,
             )
 
+        # ツアー案内の吹き出しが画面を覆い、クリックが完了しないことがある
+        # (実測4回目: div.c-tour-guide__tooltip + div.c-overlay が結果ページに常駐)。
+        # Escape はキー入力1つで、外向きの送信を起こさない閉じる試みとして安全。
+        with suppress(Exception):
+            page.keyboard.press("Escape")
+
         before = clickables(page)
         before_visible = sum(1 for c in before if c.visible)
         url_before = page.url
+        covering: tuple[str, ...] = ()
         try:
             page.locator(locator[0]).nth(locator[1]).click(timeout=config.selector_timeout_ms)
         except Exception:
-            return (
-                replace(observed, drawer_attempted=True, drawer_click_locator=locator),
-                capture,
-            )
+            # **押せなかった事実を「押したが無反応」にすり替えない** (実測4回目の
+            # 報告がこれをやり、診断を誤導した)。何が遮っていたかを DOM から直接
+            # 読み、クリック時点の木ごと持ち帰る。
+            covering = _covering_tokens(page, locator)
+            retry = _second_row_locator(fresh_tree, fresh_sizes, members[0].members)
+            if retry is None:
+                return (
+                    replace(
+                        observed,
+                        drawer_attempted=True,
+                        drawer_click_locator=locator,
+                        drawer_click_failed=True,
+                        drawer_covering=covering,
+                    ),
+                    replace(capture, after_click=dom_tree(page)),
+                )
+            # 吹き出しは1枚目のカードに係留されがちなので、2枚目で1度だけ再試行。
+            try:
+                page.locator(retry[0]).nth(retry[1]).click(timeout=config.selector_timeout_ms)
+                locator = retry
+            except Exception:
+                return (
+                    replace(
+                        observed,
+                        drawer_attempted=True,
+                        drawer_click_locator=locator,
+                        drawer_click_failed=True,
+                        drawer_covering=covering,
+                    ),
+                    replace(capture, after_click=dom_tree(page)),
+                )
 
         opened = wait_for_new_clickables(
             page,

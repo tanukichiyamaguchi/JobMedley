@@ -191,6 +191,42 @@ def wait_for_all_detached(page: Any, selectors: list[str], timeout_ms: int) -> b
     return True
 
 
+#: クリック対象の中心に実際に居る要素 (= ポインタを受け取る要素) と、その祖先を
+#: たどって [タグ, クラス配列] の列で返す。**タグとクラスしか読まない** (13.2)。
+_COVERING_SCRIPT = """
+([css, nth]) => {
+  const target = document.querySelectorAll(css)[nth];
+  if (!target) return null;
+  const r = target.getBoundingClientRect();
+  let node = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  if (!node) return null;
+  const rows = [];
+  for (let i = 0; i < 8 && node && node.tagName; i++) {
+    rows.push([node.tagName.toLowerCase(), Array.from(node.classList || [])]);
+    node = node.parentElement;
+  }
+  return rows;
+}
+"""
+
+
+def covering_rows(page: Any, css: str, nth: int) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    """Who is actually under the pointer at the click target's center.
+
+    クリックが「操作可能になるのを待って満了」したとき、**何が遮っていたのか** は
+    例外メッセージの推定ではなく DOM から直接読める (`elementFromPoint`)。対象が
+    自分自身なら遮りは無い (別の理由で押せていない)。読めなければ None -- 読めない
+    ことを「遮り無し」と報告しないため、空タプルとは区別する。
+    """
+    try:
+        rows = page.evaluate(_COVERING_SCRIPT, [css, nth])
+    except Exception:
+        return None
+    if not rows:
+        return None
+    return tuple((str(tag), tuple(str(c) for c in classes)) for tag, classes in rows)
+
+
 def page_title(page: Any) -> str:
     """The page's title, or empty. Used as evidence of *which* page we were on."""
     try:

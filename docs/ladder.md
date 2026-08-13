@@ -329,11 +329,13 @@ scout preflight
 
 > **2026-08-13 時点の進捗**: `observe-list` 4回の実測で `context.selection_required`
 > / `context.selector` / `nav.list_ready_selector` は記入済み。残りは
-> `nav.drawer_close_selectors` 1個のみ。実測ではカードの安全領域をクリックしても
-> ドロワーの新出要素を検出できなかった (閉じ操作の器 `div.c-side-cover` /
-> `div.c-modal` はDOMに実在するが、どれが開くかは未確認)。この1個のためだけに
-> observe-list を再実行はせず、**段階3の `capture-send` (どのみち手動・実画面) で
-> ドロワーの開閉を確認してから記入する。**
+> `nav.drawer_close_selectors` 1個のみ。4回目の報告は「カードを押したが新出要素
+> なし」だったが、スナップショット解剖で **クリック自体が完了していなかった** と
+> 判明した (ツアー案内の吹き出し `div.c-tour-guide__tooltip` が結果ページに常駐して
+> おり、遮った可能性が高い)。次の `observe-list` には Escape での案内閉じ・遮り
+> 要素の特定・2枚目のカードでの再試行を実装済みで、**5回目の実行がこの座標を
+> 確定させる (か、遮り要素を特定して実画面での解消手順を印字する)。**
+> 段階3 (`capture-send`) はドロワーの開き方が分かってから配線する。
 
 **Actions → Recon (manual) → Run workflow → `observe-list`**
 
