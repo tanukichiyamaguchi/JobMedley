@@ -78,6 +78,7 @@ from jobmedley_scout.recon.list_structure import (
     empty_state_candidates,
     list_region,
     ready_values,
+    repeated_child_groups,
     row_group_candidates,
     safe_click_index,
     subtree_sizes,
@@ -223,8 +224,14 @@ class ZeroPage:
     tree_read: bool
     tree_truncated: bool
     counts: Mapping[str, int]
-    #: 結果ページで選ばれた行トークンが、このページに何個あったか。
-    row_token_count: int
+    #: 結果ページで繰り返していた群のうち、このページで消えたものの数。
+    #:
+    #: **特定の行トークンに依存させない。** 当初は「選ばれた行トークンがこのページに
+    #: 何個あるか」で判定していたが、行の同定を誤ると0件ページまで巻き添えで捨てられる。
+    #: 実測で起きた: 行が ``div.c-segment`` と誤判定され、それが0件ページにも1個
+    #: 残っていたため、**0件ページが2枚とも「0件になっていない」と判定された**。
+    #: 行が正しいかに関わらず「結果ページで繰り返していた何かが消えた」は観測できる。
+    vanished_group_count: int
 
 
 def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
@@ -247,10 +254,10 @@ def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
         return False, "DOMの木を読めませんでした (要素が無かったのではありません)"
     if page.tree_truncated:
         return False, "木が上限で打ち切られました"
-    if page.row_token_count != 0:
+    if page.vanished_group_count == 0:
         return False, (
-            f"行が {page.row_token_count} 個ありました "
-            f"(0件になっていません。遷移が失敗して結果ページのままの可能性)"
+            "結果ページで繰り返していた要素が1つも消えていません "
+            "(遷移が失敗して結果ページのままの可能性)"
         )
     return True, ""
 
@@ -662,9 +669,11 @@ def observe_list(
         counts = token_counts(tree)
 
         # --- 0件ページを、作れるだけ作って検査する ----------------------------
-        # 行の同定に0件ページは要らないので、先に暫定の行を出しておく。
-        provisional = row_group_candidates(tree, sizes, [])
-        provisional_token = provisional[0].token if provisional else ""
+        # **暫定の行トークンに依存させない。** 行の同定を誤ると0件ページまで
+        # 巻き添えで捨てられ、何も確定しないまま終わる (実測でそうなった)。
+        # 「結果ページで繰り返していた群のどれかが消えた」は行の正しさに関わらず
+        # 観測できるので、そちらを判定に使う。
+        repeated_tokens = {g.token for g in repeated_child_groups(tree, sizes)}
 
         zero_reports: list[tuple[str, bool, str]] = []
         usable_counts: list[Mapping[str, int]] = []
@@ -681,7 +690,9 @@ def observe_list(
                 tree_read=zero_tree is not None,
                 tree_truncated=bool(zero_tree and zero_tree.truncated),
                 counts=zero_counts,
-                row_token_count=zero_counts.get(provisional_token, 0) if provisional_token else 0,
+                vanished_group_count=sum(
+                    1 for token in repeated_tokens if zero_counts.get(token, 0) == 0
+                ),
             )
             usable, why = zero_page_is_usable(report, variant.url)
             zero_reports.append((variant.kind, usable, why))

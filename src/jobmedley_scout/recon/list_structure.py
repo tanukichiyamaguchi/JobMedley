@@ -192,10 +192,21 @@ def maximal_groups(groups: Sequence[RowGroup], sizes: Sequence[int]) -> tuple[Ro
     ``div.c-search-member-card`` に件数で勝ち、文字要素をクリックして
     「何も開かなかった」で終わった。文字要素の親はカードの子孫なので、ここで落ちる。
 
-    **極大性は0件フィルタより先に、全群に対して計算する。** 順序を逆にすると、
-    カード群が何かの理由で0件フィルタに落ちたときに「カードの中の列」が繰り上がって
-    行として採用される。先に潰しておけば、その場合は行が0件になり UNRESOLVED に
-    落ちる -- そちらが正しい。
+    **極大性は0件フィルタの *後* に掛ける。順序を逆にすると壊れる。**
+
+    当初は「先に極大性、後で0件フィルタ」にしていた。実測で破綻した --
+    ``div.c-segment`` が画面に2つあり (検索条件パネルと一覧を囲む区画)、カードの親は
+    その内側なので **カード群が極大でなくなって落ちた**。結果、行が
+    ``div.c-segment`` (2個) と誤判定され、0件ページの検査もその誤った行で行われて
+    2枚とも捨てられ、何も確定しなかった。
+
+    この規則は「内側を落とす」ので、素朴に全群へ掛けると **最も外側の繰り返し群
+    だけが残る**。一覧と無関係な外側の繰り返し (ページの区画・2カラムのレイアウト)
+    があれば必ずそれが勝つ。
+
+    先に「0件検索で消える」で絞れば、一覧と無関係な群はそこで落ちる
+    (``div.c-segment`` は0件ページにも残るので消えない)。残った中で極大を取れば、
+    カードが文字要素に勝つ -- これが本来欲しかった比較である。
     """
     return tuple(
         group
@@ -212,16 +223,22 @@ def row_group_candidates(
     sizes: Sequence[int],
     zero_counts: Sequence[Mapping[str, int]],
 ) -> tuple[RowGroup, ...]:
-    """Maximal repeating groups that vanish on every usable zero-result page.
+    """Repeating groups that vanish on every usable zero-result page, then maximal.
 
-    ``zero_counts`` が空 (0件ページを作れなかった) なら群の同定だけは成立するので
-    無条件に通す。その場合、呼び出し側は「消えることは確認していない」と明記する。
+    **この順序が要点である** (:func:`maximal_groups` の docstring を参照)。
+    先に極大性を掛けると、一覧と無関係な外側の繰り返し群が必ず勝ってしまう。
+
+    ``zero_counts`` が空 (0件ページを作れなかった) なら消える群を絞れないので、
+    全群に対して極大性を掛ける。これは実測で破綻した順序と同じなので、
+    **行を誤る可能性がある**。呼び出し側は「消えることは確認していない」と
+    明記すること -- 確認できていない値を、確認したものと同じ顔で出さない。
     """
-    live = [
+    vanishing = [
         group
-        for group in maximal_groups(repeated_child_groups(tree, sizes), sizes)
+        for group in repeated_child_groups(tree, sizes)
         if all(counts.get(group.token, 0) == 0 for counts in zero_counts)
     ]
+    live = list(maximal_groups(vanishing, sizes))
     # 部分木の重い群を優先する。``<br class="x">`` を30個並べたような薄い群に
     # 負けないため。順位を誤っても **安全側** である -- どの行トークンも
     # 「0件ページに存在しない」ことを観測済みなので、枠になることはない。

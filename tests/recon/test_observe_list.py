@@ -142,7 +142,7 @@ def _zero(**overrides: object) -> ZeroPage:
         "tree_read": True,
         "tree_truncated": False,
         "counts": {},
-        "row_token_count": 0,
+        "vanished_group_count": 3,
     }
     defaults.update(overrides)
     return ZeroPage(**defaults)  # type: ignore[arg-type]
@@ -153,17 +153,31 @@ def test_a_clean_zero_page_is_usable() -> None:
     assert usable is True and why == ""
 
 
-def test_a_zero_page_that_still_has_rows_is_refused() -> None:
+def test_a_zero_page_where_nothing_vanished_is_refused() -> None:
     """**判定の土台を無検査で信頼しない。**
 
     ``goto`` は遷移失敗を握り潰す (5.3 のため意図的にそうしてある)。遷移が
     失敗して結果ページのままだと、全トークンが「両ページに存在」になり、
     いま直したはずの ``body.c-body`` がまた通る。
     """
-    usable, why = zero_page_is_usable(_zero(row_token_count=25), REQUESTED)
+    usable, why = zero_page_is_usable(_zero(vanished_group_count=0), REQUESTED)
 
     assert usable is False
-    assert "0件になっていません" in why
+    assert "1つも消えていません" in why
+
+
+def test_the_zero_page_check_does_not_depend_on_the_row_being_right() -> None:
+    """**実際に起きた巻き添え。**
+
+    当初は「選ばれた行トークンがこのページに何個あるか」で判定していた。行の同定を
+    誤った実行で、誤った行 (``div.c-segment``) が0件ページにも1個残っていたため、
+    **0件ページが2枚とも「0件になっていない」と捨てられ**、何も確定しなかった。
+
+    行が正しいかに関わらず「結果ページで繰り返していた何かが消えた」は観測できる。
+    """
+    usable, _why = zero_page_is_usable(_zero(vanished_group_count=1), REQUESTED)
+
+    assert usable is True
 
 
 def test_a_redirected_zero_page_is_refused() -> None:

@@ -424,3 +424,87 @@ def test_a_broken_invariant_drops_the_value_instead_of_emitting_it() -> None:
     )
 
     assert ready_values(rows, empties, rc, [zc]) == ()
+
+
+# --- 外側の繰り返し群に行を奪われないこと (**2回目の実測で壊れた形**) -----------
+
+
+def _segmented_results() -> DomTree:
+    """実測の形。``div.c-segment`` が画面に2つあり、その片方が一覧を囲む。
+
+    検索条件パネルと一覧の区画がどちらも ``c-segment`` で、カードの親はその内側。
+    """
+    return _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("div", ("c-segment",), 0),  # 1  検索条件パネル
+        ("p", ("c-filter-text",), 1),  # 2
+        ("div", ("c-segment",), 0),  # 3  一覧を囲む区画
+        ("div", ("js-infinity-scroll-outer-el",), 3),  # 4
+        ("div", ("c-search-member-card",), 4),  # 5
+        ("div", ("c-search-member-card__field",), 5),  # 6
+        ("p", ("c-search-member-card-text",), 6),  # 7
+        ("p", ("c-search-member-card-text",), 6),  # 8
+        ("div", ("c-search-member-card",), 4),  # 9
+        ("div", ("c-search-member-card__field",), 9),  # 10
+        ("p", ("c-search-member-card-text",), 10),  # 11
+        ("p", ("c-search-member-card-text",), 10),  # 12
+    )
+
+
+def _segmented_zero() -> DomTree:
+    """0件でも ``c-segment`` は2つとも残る。消えるのはカードと中身だけ。"""
+    return _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-segment",), 0),
+        ("p", ("c-filter-text",), 1),
+        ("div", ("c-segment",), 0),
+        ("div", ("js-infinity-scroll-outer-el",), 3),
+        ("div", ("c-search-empty",), 4),
+    )
+
+
+def test_an_unrelated_outer_repeating_group_does_not_steal_the_row() -> None:
+    """**2回目の実測で実際に壊れた形。**
+
+    「極大性 → 0件フィルタ」の順だと、``maximal_groups`` は内側を落とす規則なので
+    **最も外側の繰り返し群だけが残る**。カードの親は ``c-segment`` の内側なので
+    カード群が消え、行が ``div.c-segment`` (2個) と誤判定された。
+
+    そのうえ0件ページの検査もその誤った行で行われ、``c-segment`` は0件ページにも
+    残っているため **0件ページが2枚とも捨てられ**、何も確定しないまま終わった。
+
+    先に「0件で消える」で絞れば ``c-segment`` はそこで落ちる。
+    """
+    results, zero = _segmented_results(), _segmented_zero()
+    sizes = subtree_sizes(results)
+
+    rows = row_group_candidates(results, sizes, [token_counts(zero)])
+
+    assert rows, "行が1つも残らないなら、0件フィルタが効きすぎている"
+    assert rows[0].token == "div.c-search-member-card"
+    assert not any(r.token == "div.c-segment" for r in rows)
+
+
+def test_the_row_still_beats_the_text_inside_it_after_the_reorder() -> None:
+    """順序を入れ替えても、当初の目的 (行 > 行の中身) は保たれること。"""
+    results, zero = _segmented_results(), _segmented_zero()
+    rows = row_group_candidates(results, subtree_sizes(results), [token_counts(zero)])
+
+    tokens = [r.token for r in rows]
+    assert "p.c-search-member-card-text" not in tokens
+
+
+def test_the_segmented_page_still_yields_a_safe_value() -> None:
+    """この形でも、値は行と0件表示の論理和になり枠は現れないこと。"""
+    results, zero = _segmented_results(), _segmented_zero()
+    rc, zc = token_counts(results), token_counts(zero)
+    rows = row_group_candidates(results, subtree_sizes(results), [zc])
+    empties = empty_state_candidates(
+        zero, subtree_sizes(zero), rc, "div.js-infinity-scroll-outer-el"
+    )
+
+    values = ready_values(rows, empties, rc, [zc])
+
+    assert values[0].selector() == "div.c-search-member-card, div.c-search-empty"
+    assert "div.c-segment" not in _emitted_tokens(values)
+    assert "body.c-body" not in _emitted_tokens(values)
