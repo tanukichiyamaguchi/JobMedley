@@ -135,6 +135,13 @@ def test_heuristic_success_does_not_declare_stage_one_finished() -> None:
 
 
 def test_strict_success_sends_the_operator_to_stage_two() -> None:
+    """厳密判定で通ったら、段階2で **実際に次にやること** を出す。
+
+    以前は「段階2 `scout preflight` (Actions からは Recon (manual) ではなく
+    docs/ladder.md の手順)」と出していた。2つ間違っている -- preflight は
+    Recon (manual) から実行でき、かつ preflight の前に observe-list で段階2の
+    残り4座標を埋めないと、未確定のまま警告を読むだけになる。
+    """
     report = VerifyResult(
         verdict=Verdict.RESTORED,
         method=VerifyMethod.MARKER,
@@ -143,7 +150,10 @@ def test_strict_success_sends_the_operator_to_stage_two() -> None:
     ).render()
 
     assert "段階1は完了です" in report
-    assert "preflight" in report
+    # 順序が要点。観測してから点検する。
+    assert report.index("observe-list") < report.index("preflight")
+    # 実行できる場所を偽らない (Recon (manual) から両方走る)。
+    assert "Recon (manual)" in report
 
 
 def test_the_export_advice_is_marked_optional() -> None:

@@ -152,8 +152,11 @@ class VerifyResult:
                     [
                         "**段階1は完了です。** 厳密判定で確認できました。",
                         "",
-                        "次: 段階2 `scout preflight` (Actions からは Recon (manual) ではなく",
-                        "    docs/ladder.md 段階2の手順) へ進んでください。",
+                        "次: `scout recon observe-list` で段階2の残り座標を観測してください。",
+                        "    (context.selection_required / context.selector /",
+                        "     nav.list_ready_selector / nav.drawer_close_selectors)",
+                        "    記入し終えたら `scout preflight` が段階2の合格条件です。",
+                        "    どちらも Actions → Recon (manual) から実行できます。",
                     ]
                 )
             else:
