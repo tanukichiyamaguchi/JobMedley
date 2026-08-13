@@ -62,12 +62,18 @@ auth.twofa_kind: "none"
 # 手動ログイン直後に候補者一覧のURLへ直接遷移してデータが返るかを試す。
 # 返らなければグループ/拠点/求人アカウントの選択ステップが挟まっている (4章)。
 # その場合 true にし、context.selector を埋める。
-context.selection_required: UNRESOLVED
+#
+# 2026-08-13 `scout recon observe-list` で観測: 保存セッションで候補者一覧URLへ
+# 直接遷移したところ、同じパスに着地した (転送なし)。選択ステップは無い。
+context.selection_required: false
 
 # グループ/拠点の選択コントロール。
 # 選択が不要なら null。
 # (存在しないことが確認できた場合は null と書いてよい)
-context.selector: UNRESOLVED
+#
+# **UNRESOLVED ではなく null。** 上の観測で「選択が不要」と確認できたので、
+# これは未確認ではなく「確認した結果 存在しない」である。
+context.selector: null
 
 # ログイン後のトップ/マイページのURL。
 nav.mypage_url: "https://customers.job-medley.com/"
