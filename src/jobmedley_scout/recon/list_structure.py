@@ -311,12 +311,45 @@ class EmptyCandidate:
     scope: str
 
 
+def empty_exclusions(
+    early_counts: Mapping[str, int],
+    settled_counts: Mapping[str, int],
+    transients: frozenset[str],
+) -> frozenset[str]:
+    """What one zero page must not adopt as its empty state. **Pure.**
+
+    2つの体制がある。**どちらを使うかはこのページ自身の観測が決める。**
+
+    * このページの遷移内で「消えた」を観測できた (ローダーが実際に剥がれた) --
+      除外は観測済みの一時要素だけでよい。遷移直後から在っても、剥がれた後に
+      残っているものは最終的な0件描画の一部である。実測4回目: 0件表示
+      (``div.c-not-found--searches``) は遷移直後の1枚に写り終わっていた。
+      「early に在る」を理由に捨てると、実在する専用要素が UNRESOLVED になる。
+    * 1つも消えていない -- 骨組みと内容の区別が付く材料がこのページに無い。
+      遷移直後に在ったもの全部を保守的に除外する。読み込み骨組み
+      (``div.c-loading`` のような) は「結果ページに無く0件ページに在る」を
+      完璧に満たすので、これが無いと0件表示として採用され、本番では行より
+      先に現れて ``wait_for_selector`` が描画前に成功する (原則2)。
+
+    観測済みの一時要素は **どちらの体制でも** 除外する。0件ページが1枚しか
+    使えない実行では、ページ間の突き合わせ (すべての0件ページに在るものだけを
+    残す) が働かないので、他の遷移で消滅を観測済みのローダーがこのページに
+    残っていたら、ここが最後の防壁になる。
+    """
+    shed = any(
+        count > 0 and settled_counts.get(token, 0) == 0 for token, count in early_counts.items()
+    )
+    if shed:
+        return transients
+    return transients | frozenset(token for token, count in early_counts.items() if count > 0)
+
+
 def empty_state_candidates(
     zero_tree: DomTree,
     zero_sizes: Sequence[int],
     results_counts: Mapping[str, int],
     anchor_token: str,
-    early_counts: Mapping[str, int] | None = None,
+    excluded_tokens: frozenset[str] = frozenset(),
 ) -> tuple[EmptyCandidate, ...]:
     """Tokens present on the zero-result page but absent from the results page.
 
@@ -328,19 +361,9 @@ def empty_state_candidates(
     タイブレークは使わない -- 辞書順は推測ですらなく乱択であり、ロードごとに出没する
     装飾を先頭に据えうる。
 
-    ``early_counts`` -- **描画される前のスナップショット。渡されたら、そこに既に
-    在ったトークンを候補から外す。**
-
-    これが無いと、**未描画のページが最良の0件ページに見える**。読み込み中の骨組み
-    (``div.c-loading`` のような) は「結果ページに無く、0件ページに在る」を完璧に
-    満たすので0件表示として採用される。そして本番では **行より先に** 現れるので、
-    ``wait_for_selector`` が一覧の描画前に成功する -- このモジュールが潰すために
-    書かれた失敗そのものである (原則2)。
-
-    読み込み表示は遷移直後から在る。本物の0件表示は応答が返ってから出る。
-    **この時間差は観測できる** ので、推測せずに切り分けられる。素のHTMLに0件表示が
-    含まれる作り (サーバ描画) では候補が空になるが、それは UNRESOLVED = 見える失敗に
-    なるだけで、静かな誤りにはならない。
+    ``excluded_tokens`` -- このページで0件表示を名乗れないトークン
+    (:func:`empty_exclusions` が観測から決める)。読み込み骨組みを0件表示として
+    採用しないための唯一の防壁なので、呼び出し側は必ず計算して渡すこと。
     """
     anchors = indices_with_token(zero_tree, anchor_token) if anchor_token else ()
     if len(anchors) == 1:
@@ -358,7 +381,6 @@ def empty_state_candidates(
             if token not in seen:
                 seen[token] = (depth, index)
 
-    early = early_counts or {}
     fresh = [
         EmptyCandidate(
             token=token,
@@ -367,9 +389,8 @@ def empty_state_candidates(
             scope=scope,
         )
         for token, (depth, _order) in seen.items()
-        # 結果ページに無く、**かつ描画前にも無かった** ものだけ。
-        # 後者を落とすと読み込み表示が0件表示として採用される (上記)。
-        if results_counts.get(token, 0) == 0 and early.get(token, 0) == 0
+        # 結果ページに無く、**かつ除外集合にも無い** ものだけ。
+        if results_counts.get(token, 0) == 0 and token not in excluded_tokens
     ]
     return tuple(
         sorted(fresh, key=lambda c: (c.depth_from_anchor, c.counts_zero[0], seen[c.token][1]))
@@ -425,36 +446,83 @@ def click_locator(tree: DomTree, target: int) -> tuple[str, int] | None:
     return token, matches.index(target)
 
 
-def container_ready_token(
-    anchor_token: str,
-    results_counts: Mapping[str, int],
-    zero_settled: Sequence[Mapping[str, int]],
-    zero_early: Sequence[Mapping[str, int]],
-) -> str:
-    """The list container itself, when it provably renders on empty results too.
+def transient_tokens(
+    navigations: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
+) -> frozenset[str]:
+    """Tokens observed to vanish within a navigation: present right after arrival,
+    gone from the same navigation's settled tree. **Pure.**
 
-    座標の取得指針が最初から言っていた理想形である: 「行そのものではなく行の
-    コンテナを選ぶと空結果でも待てる」。コンテナがそれを満たすかは観測できる:
+    以前の定義は「遷移直後に在り、結果ページに無い」だった。実測4回目でそれが
+    **0件表示そのもの** (``div.c-not-found--searches``) を一時要素と誤分類した --
+    SPA の描画は速く、0件表示は遷移直後の1枚に写り終わっていた。結果ページに
+    無いのは0件表示の定義そのものであって、ローダーである証拠ではない。
 
-    * 結果ページにちょうど1個ある (アンカーの構成条件)
-    * **使えたすべての0件ページの、落ち着いた後に存在する** -- 0件でも描画される
-    * **すべての0件ページの、遷移直後には存在しない** -- 描画の完了を待てる。
-      この条件が枠 (``body.c-body`` 等) を落とす。枠は遷移直後から在る
-
-    3条件が揃えば、このトークン単独が ``nav.list_ready_selector`` の最良の値になる
-    (行∨0件表示のペアより単純で、どんな件数でも成立する)。揃わなければ空文字を
-    返し、呼び出し側はペア方式へ落ちる。
+    **「消えたことが観測された」ものだけが一時要素である。** 実測ではローダー一式
+    (``div.c-loader-view`` 系11種) がこれに一致し、0件表示は残った。全遷移の
+    和集合を取るのは、遷移直後の1枚が薄すぎて (アプリ起動前の骨組み26節点しか
+    写らず) 自分の遷移からは語彙を導けないことがあるため -- 実測の pagination
+    変種がそうだった。
     """
-    if not anchor_token or not zero_settled or len(zero_settled) != len(zero_early):
-        return ""
-    if results_counts.get(anchor_token, 0) != 1:
-        return ""
-    for settled, early in zip(zero_settled, zero_early, strict=False):
-        if settled.get(anchor_token, 0) < 1:
-            return ""
-        if early.get(anchor_token, 0) != 0:
-            return ""
-    return anchor_token
+    found: set[str] = set()
+    for early, settled in navigations:
+        for token, count in early.items():
+            if count > 0 and settled.get(token, 0) == 0:
+                found.add(token)
+    return frozenset(found)
+
+
+def zero_page_finished(settled: Mapping[str, int], transients: frozenset[str]) -> bool:
+    """Whether a zero page's settled tree is past the loading stage. **Pure.**
+
+    一時要素 (ローダー) が1つも残っていなければ完了とみなす。実測で、構造の静止は
+    XHR待ちの静けさと区別できなかった -- ローダーの不在は区別できる。
+    """
+    return all(settled.get(token, 0) == 0 for token in transients)
+
+
+def post_load_markers(
+    tree: DomTree,
+    results_counts: Mapping[str, int],
+    early_counts_list: Sequence[Mapping[str, int]],
+    finished_settled_list: Sequence[Mapping[str, int]],
+) -> tuple[str, ...]:
+    """Tokens that appear only once the search response has rendered. **Pure.**
+
+    ``nav.list_ready_selector`` の最良の値。実測で判明した事実に基づく:
+    この媒体の0件ページには「0件表示」の専用要素が **存在しない** (結果テーブル
+    領域ごと消える)。行∨0件表示のペアは原理的に組めない。代わりに、
+
+    * 結果ページに存在する
+    * **すべての遷移直後のスナップショットに存在しない** -- 描画の完了を待てる。
+      枠 (``body.c-body`` 等) は遷移直後から在るので、この条件で構造的に落ちる
+    * **読み込みが完了したすべての0件ページに存在する** -- 0件でも待てる
+
+    を満たすトークンは「検索応答が描画された」ことの目印になる。件数に依らず
+    成立し、常に真にはならない (読み込み中には存在しないことを観測済み)。
+
+    並びは (結果ページで一意なもの優先, 件数昇順, 文書順)。完了した0件ページが
+    1枚も無ければ空 -- **観測できていないものを値にしない** (原則3)。遷移直後の
+    スナップショットが1枚も無いときも空。「すべての early に不在」が空虚に真に
+    なり、結果ページの全トークンが目印を名乗れてしまうため。
+    """
+    if not early_counts_list or not finished_settled_list:
+        return ()
+    candidates = [
+        token
+        for token, count in results_counts.items()
+        if count >= 1
+        and all(early.get(token, 0) == 0 for early in early_counts_list)
+        and all(settled.get(token, 0) >= 1 for settled in finished_settled_list)
+    ]
+    if not candidates:
+        return ()
+    first_index = {token: indices_with_token(tree, token)[0] for token in candidates}
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda t: (results_counts[t] != 1, results_counts[t], first_index[t]),
+        )
+    )
 
 
 # --- 値の組み立て (唯一の出口) -------------------------------------------------

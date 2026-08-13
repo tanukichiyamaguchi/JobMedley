@@ -83,11 +83,30 @@ nav.candidate_list_url: "https://customers.job-medley.com/customers/searches?lg=
 
 # 候補者一覧の描画完了を表す要素。
 # **「通信の静止」を待ってはならない** (5.3) ので、この要素の出現を待つ。
-# 行そのものではなく行のコンテナを選ぶと空結果でも待てる。
-nav.list_ready_selector: UNRESOLVED
+#
+# 2026-08-13 `scout recon observe-list` (4回目) の構造スナップショットから
+# `replay-list` で導出。「行が出た **または** 0件表示が出た」で成立する
+# (カンマは論理和)。
+#   行     : div.c-search-member-card  (結果ページに25個、0件ページ2種で全滅を確認)
+#   0件表示: div.c-not-found--searches (0件ページ2種の両方に存在、結果ページに無し)
+# 0件表示の要素は c-not-found と c-not-found--searches を同じノードに持つ。
+# 修飾付きの方を採る -- 素の c-not-found は検索以外の画面 (エラー表示等) でも
+# 使われうる汎用ブロックで、それを0件と読むと静かなゼロ件 (原則2) になる。
+# --searches 側なら、別画面に落ちたときは待ちが満了して **見えて** 失敗する。
+# 別案 (同じ観測に基づく): "div.c-search-member-card, div.c-not-found"、
+# "div.c-search-conditions" (検索応答の描画後にのみ現れる要素)。
+nav.list_ready_selector: "div.c-search-member-card, div.c-not-found--searches"
 
 # 候補者ドロワー/モーダルを閉じるコントロールの候補を、**実画面で確認した順**に。
 # 総当たりして駄目ならEscape、それでも消えなければ一覧へ再遷移する (5.7)。
+#
+# 2026-08-13 観測 (4回目) の記録: 結果ページのDOMに閉じ操作の器が実在する --
+#   div.c-side-cover (u-is-hidden で待機) の中に a.c-side-cover__close-btn
+#   複数の div.c-modal (js-modal) の中に a.c-modal__closer
+# ただしカードの安全領域 (main-content) をクリックしても新出要素が検出されず、
+# **どの器が候補者ドロワーとして開くのかは未確認。** 閉じる機能の確認まで
+# 観測できていないため、推測で埋めない (原則3)。段階3の capture-send 実行が
+# どのみち手動なので、その同じ実行でドロワーの開閉を確認してから記入する。
 nav.drawer_close_selectors: UNRESOLVED
 
 # ========================================================================

@@ -48,7 +48,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -76,15 +76,18 @@ from jobmedley_scout.recon.list_structure import (
     ReadyValue,
     RowGroup,
     click_locator,
-    container_ready_token,
+    empty_exclusions,
     empty_state_candidates,
     list_region,
+    post_load_markers,
     ready_values,
     repeated_child_groups,
     row_group_candidates,
     safe_click_index,
     subtree_sizes,
     token_counts,
+    transient_tokens,
+    zero_page_finished,
 )
 from jobmedley_scout.recon.manual_login import (
     MarkerCandidate,
@@ -161,12 +164,13 @@ def zero_result_variant(url: str) -> str | None:
 
 @dataclass(frozen=True)
 class DomTreeSnapshot:
-    """A zero-result page's tree, its subtree sizes, and its pre-render counts."""
+    """A zero-result page's tree, its subtree sizes, and its exclusion set."""
 
     tree: DomTree
     sizes: tuple[int, ...]
-    #: 描画前のトークン件数。読み込み表示を0件表示と取り違えないために持ち回る。
-    early_counts: Mapping[str, int]
+    #: このページで0件表示を名乗れないトークン (list_structure.empty_exclusions が
+    #: 観測から決める)。読み込み骨組みを0件表示と取り違えないために持ち回る。
+    excluded_tokens: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -363,9 +367,11 @@ class ObservedList:
     empty_state_scope: str = ""
     #: 行トークンが一覧の外にもあった数。共通祖先が跳ね上がっている手掛かり。
     rows_outside_group: int = 0
-    #: コンテナ単独の値 (0件ページでも読み込み後に存在することを観測できた場合のみ)。
-    #: これが在れば **ペアより優先** -- 座標の取得指針が言う「行のコンテナ」そのもの。
-    container_ready: str = ""
+    #: 読み込み後マーカー単独の値 (検索応答の描画後にのみ現れる要素)。これが在れば
+    #: **最優先** -- 件数に依らず成立し、読み込み中には存在しないことを観測済み。
+    loaded_marker: str = ""
+    #: マーカーの別案 (同じ3条件を満たす他のトークン)。
+    loaded_marker_alternatives: tuple[str, ...] = ()
     #: nav.list_ready_selector の推奨値と別案。**先頭が推奨。**
     ready: tuple[ReadyValue, ...] = ()
     #: ドロワーを試さなかった明示的な理由 (再生など)。空なら状況から推定して印字する。
@@ -502,13 +508,17 @@ class ObservedList:
             return out
 
         row = self.row_groups[0].token
-        if self.container_ready:
-            out = [f"  {key}: {_scalar(self.container_ready)}"]
-            out.append("    # 一覧のコンテナです。**0件の検索でも読み込み後に存在する** ことと、")
-            out.append("    # **遷移直後には存在しない** (= 描画の完了を待てる) ことを、")
-            out.append("    # 0件ページの前後スナップショットで観測済みです。")
-            for value in self.ready[:2]:
-                out.append(f"    # 別案 (行∨0件表示): {value.selector()}")
+        if not self.ready and self.loaded_marker:
+            # ペアが組めなかった媒体のための控え。ペアが組めたときはペアが本命 --
+            # 行∨0件表示は「答えが見えた」を直接に意味し、0件側の証拠も
+            # (観測できたすべての0件ページに存在) マーカーより厚い。
+            out = [f"  {key}: {_scalar(self.loaded_marker)}"]
+            out.append("    # **検索応答の描画後にのみ現れる要素です。** 結果ページと、")
+            out.append("    # 読み込みが完了した0件ページの両方に存在し、遷移直後の")
+            out.append("    # スナップショットには存在しないことを観測済み -- 件数に")
+            out.append("    # 依らず「描画が終わった」を待てます。")
+            for token in self.loaded_marker_alternatives:
+                out.append(f"    # 別案: {token}")
             out.extend(self._zero_page_lines())
             out.extend(self._caveat_lines())
             return out
@@ -556,6 +566,8 @@ class ObservedList:
         out.append(f"    #   0件表示: {self.ready[0].empty_token}  (0件ページのみに存在)")
         for alternative in self.ready[1:]:
             out.append(f"    # 別案: {alternative.selector()}")
+        if self.loaded_marker:
+            out.append(f"    # 別案 (読み込み後にのみ現れる要素): {self.loaded_marker}")
         # **成功時も診断を出す。** 0件ページに何が残っていたかは、値が妥当かを
         # 後から検証する唯一の材料になる (構造スナップショットと突き合わせる)。
         out.extend(self._zero_page_lines())
@@ -730,6 +742,16 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
     # に経緯)。結果ページで繰り返していたトークンの集合は、結果ページだけから決まる。
     repeated_tokens = {g.token for g in repeated_child_groups(tree, sizes)}
 
+    # 一時要素の語彙は「同じ遷移の中で消えたことを観測された」ものだけ (経緯は
+    # list_structure.transient_tokens)。結果ページの遷移も語彙の供給源に含める。
+    navigations: list[tuple[Mapping[str, int], Mapping[str, int]]] = []
+    if capture.results_early is not None:
+        navigations.append((token_counts(capture.results_early), counts))
+    for z in capture.zeros:
+        if z.early is not None and z.settled is not None:
+            navigations.append((token_counts(z.early), token_counts(z.settled)))
+    transients = transient_tokens(navigations)
+
     zero_reports: list[tuple[str, bool, str]] = []
     usable_counts: list[Mapping[str, int]] = []
     usable_pages: list[DomTreeSnapshot] = []
@@ -752,15 +774,19 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
         )
         usable, why = zero_page_is_usable(report, zero.url)
         if zero.loader_cleared is False:
-            # 拒否はしない (高速に描画し終えたページと区別できないため) が、
-            # **読み込み表示が消えなかった事実は必ず診断に残す**。値が出なかった
-            # ときに「変種が完了しない」ことを運用者と開発側が読めるように。
-            why = (why + " / " if why else "") + "読み込み表示が消えませんでした"
+            # 拒否はしない (高速に描画し終えたページと区別できないため) が、事実は
+            # 必ず診断に残す。**「読み込み表示が残った」とは書かない** -- 実測4回目
+            # で残っていたのは先に描画された0件表示であり、ローダーは剥がれていた。
+            why = (why + " / " if why else "") + "遷移直後からの要素が一部残りました"
         zero_reports.append((zero.kind, usable, why))
         if usable and zero.settled is not None:
             usable_counts.append(zero_counts)
             usable_pages.append(
-                DomTreeSnapshot(zero.settled, subtree_sizes(zero.settled), early_counts)
+                DomTreeSnapshot(
+                    zero.settled,
+                    subtree_sizes(zero.settled),
+                    empty_exclusions(early_counts, zero_counts, transients),
+                )
             )
 
     rows = row_group_candidates(tree, sizes, usable_counts)
@@ -777,7 +803,7 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
             rows_outside = region.rows_outside_group
         for snapshot in usable_pages:
             found = empty_state_candidates(
-                snapshot.tree, snapshot.sizes, counts, anchor_token, snapshot.early_counts
+                snapshot.tree, snapshot.sizes, counts, anchor_token, snapshot.excluded_tokens
             )
             if not found:
                 continue
@@ -792,19 +818,16 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
 
     ready = ready_values(rows, empties, counts, usable_counts)
 
-    # コンテナ単独の値。3条件 (結果ページに一意 / 全0件ページの settled に在る /
-    # 全0件ページの early に無い) が観測できたときだけ成立する。
-    usable_zero = [
-        z
-        for z, (_kind, ok, _why) in zip(capture.zeros, zero_reports, strict=True)
-        if ok and z.settled is not None
-    ]
-    container = container_ready_token(
-        anchor_token,
-        counts,
-        [token_counts(z.settled) for z in usable_zero if z.settled is not None],
-        [token_counts(z.early) if z.early is not None else {} for z in usable_zero],
-    )
+    # 読み込み後マーカー (ペアが組めない媒体のための控え。recon/list_structure.
+    # post_load_markers 参照)。根拠に使う0件ページは **使用可能なものだけ**。
+    # 検索条件が差し戻されて結果が並んだままのページを根拠にすると、本物の0件
+    # 描画には現れない要素が目印になり得る -- 0件の検索が永久に待たされる (原則2)。
+    # 「遷移直後に不在」の検査には0件変種の early だけを使う。結果ページの early は
+    # 実測で既に描画後だった (25枚のカードごと写っていた) ので、そこに在ることは
+    # 「遷移直後から在る」証拠にならない。
+    zero_earlies = [token_counts(z.early) for z in capture.zeros if z.early is not None]
+    finished_settleds = [zc for zc in usable_counts if zero_page_finished(zc, transients)]
+    markers = post_load_markers(tree, counts, zero_earlies, finished_settleds)
 
     return (
         ObservedList(
@@ -820,7 +843,8 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
             anchor_token=anchor_token,
             empty_state_scope=scope,
             rows_outside_group=rows_outside,
-            container_ready=container,
+            loaded_marker=markers[0] if markers else "",
+            loaded_marker_alternatives=markers[1:4],
             ready=ready,
         ),
         usable_counts,
@@ -832,24 +856,33 @@ def _wait_out_transients(
     early: DomTree | None,
     reference_counts: Mapping[str, int],
     timeout_ms: int,
+    learned: Collection[str] = (),
 ) -> bool | None:
     """Wait for observed transient chrome (loaders) to detach.
 
-    一時要素の語彙は観測から導く: **遷移直後のこのページに在り、読み込み完了後の
-    結果ページには無い** トークン。枠は結果ページにも在るので含まれず、ローダーの
-    ような読み込み中限定の要素だけが残る。
+    待つ対象は2系統の和集合。どちらもこの実行自身の観測から導く (推測しない)。
 
-    戻り値: 消えた=True / 満了しても残った=False / 一時要素が無かった=None。
-    False は拒否理由にしない (描画し終えた0件表示も「結果ページに無い」を満たし
-    うるため、高速なページと区別できない)。診断として印字されるだけである。
+    * **遷移直後のこのページに在り、読み込み完了後の結果ページには無い** トークン。
+      枠は結果ページにも在るので含まれない。ただしこれは近似で、先に描画し終えた
+      0件表示も混ざる (実測4回目: ``div.c-not-found--searches``)。その場合は満了
+      まで待って False が返るだけで、撮影は続行される -- 時間を失うが嘘は撮らない。
+    * ``learned`` -- **同じ実行の先行する遷移で「消えた」ことを観測済み** の語彙。
+      遷移直後の1枚が起動前の骨組みしか写さないページ (実測の pagination 変種は
+      26節点) では上の系統が空になり、待ち無しで読み込み途中を撮影していた。
+      先行遷移で剥がれるのを見たローダーは、ここでも剥がれるまで待てる。
+
+    戻り値: 消えた=True / 満了しても残った=False / 待つ対象が無かった=None。
+    False は拒否理由にしない (先に描画し終えた0件表示と区別できないため)。
+    診断として印字されるだけである。
     """
     if early is None:
         return None
-    transients = sorted(
+    proxy = {
         token
         for token, count in token_counts(early).items()
         if count > 0 and reference_counts.get(token, 0) == 0
-    )
+    }
+    transients = sorted(proxy | set(learned))
     if not transients:
         return None
     return wait_for_all_detached(page, transients, timeout_ms)
@@ -911,8 +944,18 @@ def observe_list(
 
         # --- 0件ページ (結果の木が読めた場合のみ意味がある) --------------------
         zeros: list[ZeroCapture] = []
+        # 「消えたことを観測済み」のローダー語彙。遷移をまたいで蓄積する --
+        # 遷移直後の1枚が薄いページ (起動前の骨組みだけ) では自分の語彙を導けず、
+        # 待ち無しで読み込み途中を撮影してしまう (実測4回目の pagination 変種)。
+        learned: set[str] = set()
         if tree is not None and not tree.truncated:
             reference_counts = token_counts(tree)
+            if results_early is not None:
+                learned |= {
+                    token
+                    for token, count in token_counts(results_early).items()
+                    if count > 0 and reference_counts.get(token, 0) == 0
+                }
             for variant in zero_result_variants(requested_url):
                 goto(page, variant.url, config)
                 wait_for_interactive(page, config.selector_timeout_ms)
@@ -922,19 +965,27 @@ def observe_list(
                 # **読み込み表示の消滅を待つ。** 実測で、構造の静止だけでは XHR 待ちの
                 # ローダー画面を「完了」と誤認した (0件ページ2枚ともローダーのまま
                 # 撮影され、0件表示を一度も観測できなかった)。どの要素がローダーかは
-                # 推測しない -- 「遷移直後には在り、読み込み完了後の結果ページには
-                # 無い」トークン (= この実行自身の観測) の消滅を待つ。
+                # 推測しない -- この実行自身の観測 (このページの遷移直後∖結果ページ、
+                # および先行遷移で消滅を観測済みの語彙) の消滅を待つ。
                 cleared = _wait_out_transients(
-                    page, early_tree, reference_counts, config.selector_timeout_ms
+                    page, early_tree, reference_counts, config.selector_timeout_ms, learned
                 )
                 wait_for_structure_to_settle(page, config.selector_timeout_ms)
+                settled_tree = dom_tree(page)
+                if early_tree is not None and settled_tree is not None:
+                    settled_counts = token_counts(settled_tree)
+                    learned |= {
+                        token
+                        for token, count in token_counts(early_tree).items()
+                        if count > 0 and settled_counts.get(token, 0) == 0
+                    }
                 zeros.append(
                     ZeroCapture(
                         kind=variant.kind,
                         url=variant.url,
                         landed_url=page.url,
                         early=early_tree,
-                        settled=dom_tree(page),
+                        settled=settled_tree,
                         loader_cleared=cleared,
                     )
                 )
@@ -962,7 +1013,9 @@ def observe_list(
         goto(page, requested_url, config)
         wait_for_interactive(page, config.selector_timeout_ms)
         fresh_early = dom_tree(page)
-        _wait_out_transients(page, fresh_early, token_counts(tree), config.selector_timeout_ms)
+        _wait_out_transients(
+            page, fresh_early, token_counts(tree), config.selector_timeout_ms, learned
+        )
         wait_for_structure_to_settle(page, config.selector_timeout_ms)
         fresh_tree = dom_tree(page)
         if fresh_tree is None:

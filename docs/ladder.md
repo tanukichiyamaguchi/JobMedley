@@ -325,8 +325,15 @@ scout preflight
 (12.6)。
 
 あわせて `nav.*` / `context.*` 座標を埋める。マイページ・候補者一覧のURLは段階1の
-観測時に確定済み。残る4個 (グループ/拠点の選択有無、一覧の描画完了を表す要素、
-ドロワーの閉じ方) も、**開発者ツールで1つずつ読む必要はない。**
+観測時に確定済み。残る座標も、**開発者ツールで1つずつ読む必要はない。**
+
+> **2026-08-13 時点の進捗**: `observe-list` 4回の実測で `context.selection_required`
+> / `context.selector` / `nav.list_ready_selector` は記入済み。残りは
+> `nav.drawer_close_selectors` 1個のみ。実測ではカードの安全領域をクリックしても
+> ドロワーの新出要素を検出できなかった (閉じ操作の器 `div.c-side-cover` /
+> `div.c-modal` はDOMに実在するが、どれが開くかは未確認)。この1個のためだけに
+> observe-list を再実行はせず、**段階3の `capture-send` (どのみち手動・実画面) で
+> ドロワーの開閉を確認してから記入する。**
 
 **Actions → Recon (manual) → Run workflow → `observe-list`**
 

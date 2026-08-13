@@ -22,13 +22,14 @@ from jobmedley_scout.recon.list_structure import (
     RowGroup,
     ancestors_or_self,
     click_locator,
-    container_ready_token,
     contains,
+    empty_exclusions,
     empty_state_candidates,
     indices_with_token,
     list_region,
     lowest_common_ancestor,
     maximal_groups,
+    post_load_markers,
     ready_values,
     repeated_child_groups,
     row_group_candidates,
@@ -36,6 +37,8 @@ from jobmedley_scout.recon.list_structure import (
     stable_tokens,
     subtree_sizes,
     token_counts,
+    transient_tokens,
+    zero_page_finished,
 )
 
 
@@ -587,12 +590,34 @@ def test_a_loading_skeleton_never_becomes_the_empty_state() -> None:
     )
     results = {"body.c-body": 1, "div.list": 1}
     early = {"body.c-body": 1, "div.list": 1, "div.c-loading": 1}
+    # このページでは何も消えていない (骨組みと内容の区別材料が無い) ので、
+    # 除外は保守的に「遷移直後に在ったもの全部」になる。
+    excluded = empty_exclusions(early, token_counts(zero), frozenset())
 
     without_guard = empty_state_candidates(zero, subtree_sizes(zero), results, "div.list")
-    with_guard = empty_state_candidates(zero, subtree_sizes(zero), results, "div.list", early)
+    with_guard = empty_state_candidates(zero, subtree_sizes(zero), results, "div.list", excluded)
 
     assert "div.c-loading" in [c.token for c in without_guard]  # 守りが無ければ通る
     assert [c.token for c in with_guard] == ["div.c-search-empty"]
+
+
+def test_a_prerendered_empty_state_survives_when_the_loader_was_seen_shedding() -> None:
+    """**実測4回目の形。** SPA が速く、0件表示 (``div.c-not-found--searches``) は
+    遷移直後の1枚に写り終わっていて、ローダーはその後に剥がれた。
+
+    「early に在る」を理由に捨てると、実在する専用要素が UNRESOLVED になる --
+    3回目の「この媒体に0件表示は無い」という結論は、この取り違えから生まれた
+    誤りだった。剥がれたことを観測できたページでは、除外は観測済みの一時要素
+    (消えたことが観測されたもの) だけでよい。
+    """
+    early = {"body.c-body": 1, "div.c-loader": 1, "div.c-not-found": 1}
+    settled = {"body.c-body": 1, "div.c-not-found": 1}  # ローダーだけが剥がれた
+    transients = frozenset({"div.c-loader"})
+
+    excluded = empty_exclusions(early, settled, transients)
+
+    assert "div.c-loader" in excluded
+    assert "div.c-not-found" not in excluded
 
 
 def test_alternatives_are_deduplicated_by_token() -> None:
@@ -615,49 +640,82 @@ def test_alternatives_are_deduplicated_by_token() -> None:
     assert [v.selector() for v in values] == ["div.row, div.empty"]
 
 
-# --- コンテナ単独の値 (**取得指針の理想形が観測で成立する場合**) ------------------
+# --- 読み込み後マーカー (**実測4回目で確定した形**) ------------------------------
+#
+# この媒体の0件ページには「0件表示」の専用要素が存在しない (結果テーブル領域ごと
+# 消える)。行∨0件表示のペアは原理的に組めないので、「検索応答の描画後にのみ
+# 現れる要素」を値にする。
 
 
-def test_the_container_becomes_the_value_when_it_provably_renders_on_empty() -> None:
-    """「行のコンテナを選ぶと空結果でも待てる」を観測で確かめられた形。
-
-    3条件: 結果ページに一意 / 全0件ページの settled に在る / 全0件ページの
-    early に無い (= 描画の完了を待てる)。
-    """
-    anchor = "div.result-table__body"
-    results = {anchor: 1, "div.card": 25}
-    settled = {anchor: 1, "div.no-hit": 1}
-    early = {"body.c-body": 1, "div.c-loader": 1}
-
-    assert container_ready_token(anchor, results, [settled], [early]) == anchor
-
-
-def test_a_frame_can_never_become_the_container_value() -> None:
-    """枠は遷移直後から在るので、early不在の条件で落ちる。
-
-    ``body.c-body`` を値にした最初の事故が、この経路から再発しないこと。
-    """
-    frame = "body.c-body"
-    results = {frame: 1}
-    settled = {frame: 1}
-    early = {frame: 1}  # 枠は最初から在る
-
-    assert container_ready_token(frame, results, [settled], [early]) == ""
-
-
-def test_a_container_missing_from_one_zero_page_yields_no_value() -> None:
-    """0件で消えるコンテナは行と同じ欠陥を持つ。全ページでの存在を要求する。"""
-    anchor = "div.result-table__body"
-    results = {anchor: 1}
-
-    assert (
-        container_ready_token(
-            anchor, results, [{anchor: 1}, {}], [{"div.c-loader": 1}, {"div.c-loader": 1}]
-        )
-        == ""
+def _marker_tree() -> DomTree:
+    """結果ページの縮約: 枠 + 検索条件表示 + 一覧。"""
+    return _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-conditions",), 0),  # 応答の描画後にのみ現れる
+        ("div", ("list",), 0),
+        ("div", ("card",), 2),
+        ("div", ("card",), 2),
     )
 
 
-def test_no_usable_zero_page_means_no_container_value() -> None:
+def test_the_marker_appears_only_after_the_response_rendered() -> None:
+    tree = _marker_tree()
+    rc = token_counts(tree)
+    earlies = [{"body.c-body": 1, "div.c-loader": 1}]  # 遷移直後: 枠+ローダーのみ
+    finished = [{"body.c-body": 1, "div.c-search-conditions": 1}]  # 完了した0件ページ
+
+    markers = post_load_markers(tree, rc, earlies, finished)
+
+    assert markers[0] == "div.c-search-conditions"
+    # 枠は遷移直後から在るので落ち、行は0件ページに無いので落ちる。
+    assert "body.c-body" not in markers
+    assert "div.card" not in markers
+
+
+def test_no_finished_zero_page_means_no_marker() -> None:
     """観測できていないものを値にしない (原則3)。"""
-    assert container_ready_token("div.x", {"div.x": 1}, [], []) == ""
+    tree = _marker_tree()
+    assert post_load_markers(tree, token_counts(tree), [{"div.c-loader": 1}], []) == ()
+
+
+def test_transients_are_derived_from_observation_not_vocabulary() -> None:
+    """「同じ遷移の中で消えた」がローダーの定義。名前は見ない。
+
+    「結果ページに無い」も見ない -- それは0件表示の定義そのものであって、
+    ローダーである証拠ではない。実測4回目で、先に描画し終えた0件表示
+    (``div.c-not-found--searches``) が旧定義でローダー扱いされた。
+    """
+    navigations = [
+        # ローダーは剥がれた。0件表示は遷移直後から居て、残った。
+        ({"div.c-loader-view": 1, "div.c-not-found": 1}, {"div.c-not-found": 1}),
+    ]
+
+    assert transient_tokens(navigations) == frozenset({"div.c-loader-view"})
+
+
+def test_a_thin_early_snapshot_borrows_the_other_navigations_vocabulary() -> None:
+    """遷移直後の1枚が薄すぎて自分から導けなくても、和集合が受け止める。
+
+    実測で pagination 変種の直後スナップショットは26節点 (起動前の骨組み) で、
+    ローダーはそこに写っていなかった。age 側の遷移で「消えた」を観測した語彙が
+    供給され、pagination の settled にローダーが残っていること (= 未完了) を
+    見抜ける。
+    """
+    navigations = [
+        ({"div.c-loader-view": 1}, {"div.no-hit": 1}),  # age: 消滅を観測
+        ({}, {"div.c-loader-view": 1, "div.no-hit": 1}),  # pagination: 薄い1枚
+    ]
+    transients = transient_tokens(navigations)
+
+    assert zero_page_finished({"div.c-loader-view": 1}, transients) is False  # 未完了
+    assert zero_page_finished({"div.no-hit": 1}, transients) is True  # 完了
+
+
+def test_no_early_snapshot_means_no_marker() -> None:
+    """遷移直後の1枚が無いと「early に不在」が空虚に真になり、全トークンが
+    目印を名乗れてしまう。観測していない不在は不在の証拠ではない (原則3)。"""
+    tree = _marker_tree()
+    rc = token_counts(tree)
+    finished = [{"body.c-body": 1, "div.c-search-conditions": 1}]
+
+    assert post_load_markers(tree, rc, [], finished) == ()
