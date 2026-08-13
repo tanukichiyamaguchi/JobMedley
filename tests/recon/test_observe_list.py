@@ -142,7 +142,8 @@ def _zero(**overrides: object) -> ZeroPage:
         "tree_read": True,
         "tree_truncated": False,
         "counts": {},
-        "vanished_group_count": 3,
+        "heaviest_group_count": 0,
+        "early_counts": {},
     }
     defaults.update(overrides)
     return ZeroPage(**defaults)  # type: ignore[arg-type]
@@ -153,17 +154,17 @@ def test_a_clean_zero_page_is_usable() -> None:
     assert usable is True and why == ""
 
 
-def test_a_zero_page_where_nothing_vanished_is_refused() -> None:
+def test_a_zero_page_that_still_shows_the_list_is_refused() -> None:
     """**判定の土台を無検査で信頼しない。**
 
     ``goto`` は遷移失敗を握り潰す (5.3 のため意図的にそうしてある)。遷移が
     失敗して結果ページのままだと、全トークンが「両ページに存在」になり、
     いま直したはずの ``body.c-body`` がまた通る。
     """
-    usable, why = zero_page_is_usable(_zero(vanished_group_count=0), REQUESTED)
+    usable, why = zero_page_is_usable(_zero(heaviest_group_count=25), REQUESTED)
 
     assert usable is False
-    assert "1つも消えていません" in why
+    assert "25 個残っています" in why
 
 
 def test_the_zero_page_check_does_not_depend_on_the_row_being_right() -> None:
@@ -175,7 +176,7 @@ def test_the_zero_page_check_does_not_depend_on_the_row_being_right() -> None:
 
     行が正しいかに関わらず「結果ページで繰り返していた何かが消えた」は観測できる。
     """
-    usable, _why = zero_page_is_usable(_zero(vanished_group_count=1), REQUESTED)
+    usable, _why = zero_page_is_usable(_zero(heaviest_group_count=0), REQUESTED)
 
     assert usable is True
 
@@ -502,3 +503,44 @@ def test_every_scenario_emits_exactly_the_stage_2_keys(scenario: ObservedList) -
     parsed = yaml.safe_load(textwrap.dedent(scenario.yaml_block()))
 
     assert set(parsed) == set(STAGE_2_KEYS)
+
+
+# --- 反証で見つかった報告側の穴 --------------------------------------------------
+
+
+def test_an_unverified_row_never_gets_a_paste_ready_template() -> None:
+    """**実測でここが牙を剥いた。**
+
+    0件ページが2枚とも使えなかった実行で、行が ``div.c-segment`` (画面の区画) と
+    誤判定されたまま ``"div.c-segment, <0件表示のセレクタ>"`` という記入例を印字して
+    いた。``c-segment`` は描画前から常に在るので、指示どおり貼れば **常に真になる
+    目印が座標に入る** -- このモジュールが潰すはずの失敗を、こちらから勧めていた。
+    """
+    report = _observed(
+        tree_read=True,
+        row_groups=(RowGroup(token="div.c-segment", parent=0, members=(1, 3), subtree_total=8),),
+        rows_confirmed_vanishing=False,
+        zero_pages=(("age", False, "一覧の繰り返し要素が 1 個残っています"),),
+    ).render()
+
+    assert "nav.list_ready_selector: UNRESOLVED" in report
+    # 記入例を出さない。
+    assert "div.c-segment, <0件表示のセレクタ>" not in report
+    # 確認していないことを明示する。
+    assert "0件検索で消えることは" in report
+    assert "そのまま座標に書かないでください" in report
+    # 参考としては出す (運用者が手で確認する手掛かりになるため)。
+    assert "参考: div.c-segment" in report
+
+
+def test_a_verified_row_still_gets_the_template() -> None:
+    """確認できた行なら、記入例を出してよい。守りが行き過ぎていないこと。"""
+    report = _observed(
+        tree_read=True,
+        row_groups=(ROW,),
+        rows_confirmed_vanishing=True,
+        zero_pages=(("age", True, ""),),
+    ).render()
+
+    assert "0件検索で消えることを確認済み" in report
+    assert "div.c-search-member-card, <0件表示のセレクタ>" in report

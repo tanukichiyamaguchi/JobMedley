@@ -76,9 +76,9 @@ from jobmedley_scout.recon.list_structure import (
     RowGroup,
     click_locator,
     empty_state_candidates,
+    heaviest_repeated_token,
     list_region,
     ready_values,
-    repeated_child_groups,
     row_group_candidates,
     safe_click_index,
     subtree_sizes,
@@ -158,10 +158,12 @@ def zero_result_variant(url: str) -> str | None:
 
 @dataclass(frozen=True)
 class DomTreeSnapshot:
-    """A zero-result page's tree with its precomputed subtree sizes."""
+    """A zero-result page's tree, its subtree sizes, and its pre-render counts."""
 
     tree: DomTree
     sizes: tuple[int, ...]
+    #: 描画前のトークン件数。読み込み表示を0件表示と取り違えないために持ち回る。
+    early_counts: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -224,14 +226,23 @@ class ZeroPage:
     tree_read: bool
     tree_truncated: bool
     counts: Mapping[str, int]
-    #: 結果ページで繰り返していた群のうち、このページで消えたものの数。
+    #: 結果ページで最も重い繰り返し群が、このページに何個残っていたか。
     #:
-    #: **特定の行トークンに依存させない。** 当初は「選ばれた行トークンがこのページに
-    #: 何個あるか」で判定していたが、行の同定を誤ると0件ページまで巻き添えで捨てられる。
-    #: 実測で起きた: 行が ``div.c-segment`` と誤判定され、それが0件ページにも1個
-    #: 残っていたため、**0件ページが2枚とも「0件になっていない」と判定された**。
-    #: 行が正しいかに関わらず「結果ページで繰り返していた何かが消えた」は観測できる。
-    vanished_group_count: int
+    #: **0でなければ、このページは0件ではない。** 判定をこの1つに絞ってある。
+    #:
+    #: 経緯: 当初は「選ばれた行トークンの件数」で判定していたが、行の同定を誤ると
+    #: 0件ページまで巻き添えで捨てられた (実測で2枚とも失った)。次に「消えた群が
+    #: 1つでもあるか」に緩めたが、**今度は緩すぎた** -- 修飾クラス
+    #: (``div.c-search-member-card--scouted``) は独立のトークンなので、カードが25枚
+    #: 表示されたままのページでも「スカウト済みが0枚」で合格してしまう。そのページを
+    #: 採用すると正しい行が消され、カードの中の文字要素が行として **推奨値になる**。
+    #:
+    #: 最も重い繰り返し群は行の同定より前に、結果ページだけから決まる
+    #: (:func:`recon.list_structure.heaviest_repeated_token`)。行の確定に依存せず、
+    #: かつ修飾クラス1つでは満たせない。
+    heaviest_group_count: int
+    #: 描画される前 (遷移直後) のトークン件数。0件表示の候補から読み込み表示を外す。
+    early_counts: Mapping[str, int]
 
 
 def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
@@ -254,10 +265,10 @@ def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
         return False, "DOMの木を読めませんでした (要素が無かったのではありません)"
     if page.tree_truncated:
         return False, "木が上限で打ち切られました"
-    if page.vanished_group_count == 0:
+    if page.heaviest_group_count != 0:
         return False, (
-            "結果ページで繰り返していた要素が1つも消えていません "
-            "(遷移が失敗して結果ページのままの可能性)"
+            f"一覧の繰り返し要素が {page.heaviest_group_count} 個残っています "
+            f"(0件になっていません。遷移が失敗した / 検索条件が差し戻された可能性)"
         )
     return True, ""
 
@@ -473,19 +484,41 @@ class ObservedList:
 
         row = self.row_groups[0].token
         if not self.ready:
-            out = [
-                f"  {key}: {UNRESOLVED_TOKEN}",
-                f"    # 行は同定できました: {row} ({len(self.row_groups[0].members)} 個)",
-            ]
-            out.extend(self._zero_page_lines())
+            out = [f"  {key}: {UNRESOLVED_TOKEN}"]
+            if self.rows_confirmed_vanishing:
+                # 0件ページで消えることを確認できた行だけ、貼り付け用に出す。
+                out.append(
+                    f"    # 行: {row} ({len(self.row_groups[0].members)} 個) "
+                    f"-- 0件検索で消えることを確認済み"
+                )
+                out.extend(self._zero_page_lines())
+                out.extend(
+                    [
+                        "    # 0件表示の要素を特定できなかったため、値を出しません。",
+                        "    # **行トークン単独を値にしないこと** -- 0件の検索が永久に",
+                        "    # 待たされます。手で0件表示のセレクタを確認し、この形で記入を:",
+                        f'    #   {key}: "{row}, <0件表示のセレクタ>"',
+                    ]
+                )
+                return out
+            # **0件ページが1枚も使えなかったときは、貼り付け用の形を出さない。**
+            # 実測でここが牙を剥いた: 行が div.c-segment (画面の区画) と誤判定された
+            # まま `"div.c-segment, <0件表示>"` という記入例を印字していた。
+            # c-segment は描画前から常に在るので、指示どおり貼れば常に真になる目印が
+            # 座標に入る -- このモジュールが潰すはずの失敗を、こちらから勧めていた。
             out.extend(
                 [
-                    "    # 0件表示の要素を特定できなかったため、値を出しません。",
-                    "    # **行トークン単独を値にしないこと** -- 0件の検索が永久に",
-                    "    # 待たされます。手で0件表示のセレクタを確認し、この形で記入を:",
-                    f'    #   {key}: "{row}, <0件表示のセレクタ>"',
+                    "    # **0件ページを1枚も使えなかったため、行を確認できていません。**",
+                    "    # 下は「繰り返し出現した構造」であって、0件検索で消えることは",
+                    "    # 確認していません。**そのまま座標に書かないでください。**",
                 ]
             )
+            out.extend(
+                f"    #   参考: {group.token} ({len(group.members)} 個)"
+                for group in self.row_groups[:3]
+            )
+            out.extend(self._zero_page_lines())
+            out.append("    # 0件ページを作れるようにするか、手で確認してください。")
             return out
 
         out = [f"  {key}: {_scalar(self.ready[0].selector())}"]
@@ -673,7 +706,7 @@ def observe_list(
         # 巻き添えで捨てられ、何も確定しないまま終わる (実測でそうなった)。
         # 「結果ページで繰り返していた群のどれかが消えた」は行の正しさに関わらず
         # 観測できるので、そちらを判定に使う。
-        repeated_tokens = {g.token for g in repeated_child_groups(tree, sizes)}
+        heaviest = heaviest_repeated_token(tree, sizes)
 
         zero_reports: list[tuple[str, bool, str]] = []
         usable_counts: list[Mapping[str, int]] = []
@@ -681,6 +714,11 @@ def observe_list(
         for variant in zero_result_variants(requested_url):
             goto(page, variant.url, config)
             wait_for_interactive(page, config.selector_timeout_ms)
+            # **落ち着く前に1枚撮る。** 読み込み中の骨組みはここに写る。0件表示の
+            # 候補からそれを外さないと、未描画のページが最良の0件ページに見える
+            # (recon/list_structure.empty_state_candidates 参照)。
+            early_tree = dom_tree(page)
+            early_counts = token_counts(early_tree) if early_tree is not None else {}
             wait_for_structure_to_settle(page, config.selector_timeout_ms)
             zero_tree = dom_tree(page)
             zero_counts = token_counts(zero_tree) if zero_tree is not None else {}
@@ -690,16 +728,18 @@ def observe_list(
                 tree_read=zero_tree is not None,
                 tree_truncated=bool(zero_tree and zero_tree.truncated),
                 counts=zero_counts,
-                vanished_group_count=sum(
-                    1 for token in repeated_tokens if zero_counts.get(token, 0) == 0
-                ),
+                heaviest_group_count=zero_counts.get(heaviest, 0) if heaviest else 0,
+                early_counts=early_counts,
             )
             usable, why = zero_page_is_usable(report, variant.url)
             zero_reports.append((variant.kind, usable, why))
             if usable and zero_tree is not None:
                 usable_counts.append(zero_counts)
                 usable_pages.append(
-                    (variant.kind, DomTreeSnapshot(zero_tree, subtree_sizes(zero_tree)))
+                    (
+                        variant.kind,
+                        DomTreeSnapshot(zero_tree, subtree_sizes(zero_tree), early_counts),
+                    )
                 )
 
         rows = row_group_candidates(tree, sizes, usable_counts)
@@ -715,7 +755,13 @@ def observe_list(
                 anchor_token = region.anchor_token
                 rows_outside = region.rows_outside_group
             for _kind, snapshot in usable_pages:
-                found = empty_state_candidates(snapshot.tree, snapshot.sizes, counts, anchor_token)
+                found = empty_state_candidates(
+                    snapshot.tree,
+                    snapshot.sizes,
+                    counts,
+                    anchor_token,
+                    snapshot.early_counts,
+                )
                 if not found:
                     continue
                 scope = found[0].scope

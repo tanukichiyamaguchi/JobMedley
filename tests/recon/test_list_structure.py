@@ -17,12 +17,14 @@ from __future__ import annotations
 
 from jobmedley_scout.browser.dom import DomNode, DomTree
 from jobmedley_scout.recon.list_structure import (
+    EmptyCandidate,
     ReadyValue,
     RowGroup,
     ancestors_or_self,
     click_locator,
     contains,
     empty_state_candidates,
+    heaviest_repeated_token,
     indices_with_token,
     list_region,
     lowest_common_ancestor,
@@ -508,3 +510,117 @@ def test_the_segmented_page_still_yields_a_safe_value() -> None:
     assert values[0].selector() == "div.c-search-member-card, div.c-search-empty"
     assert "div.c-segment" not in _emitted_tokens(values)
     assert "body.c-body" not in _emitted_tokens(values)
+
+
+# --- 反証で見つかった2つの穴 (**どちらも推奨値として誤りが出ていた**) ------------
+
+
+def test_a_contaminated_zero_page_would_promote_the_text_inside_the_card() -> None:
+    """**汚染された0件ページを採用すると、行の同定が内側へ滑り落ちる。**
+
+    ``maximal_groups`` は「他の群の要素の内側に親がある群」を落とす規則なので、
+    支配者 (カード群) が0件フィルタで先に消えると、その子孫が繰り上がって極大になる。
+
+    実際に再現した: カードが残っている0件ページを採用すると、行が
+    ``p.c-search-member-card-text`` になり、しかも UNRESOLVED ではなく
+    **推奨値として出た**。1回目に直したはずの誤りが値になって戻ってきていた。
+
+    これを塞ぐのは ``zero_page_is_usable`` 側である
+    (:func:`heaviest_repeated_token` が0でなければ0件ページを採用しない)。
+    ここでは「採用してしまうと何が起きるか」を、防御の理由として固定しておく。
+    """
+    results = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("list",), 0),
+        ("div", ("c-search-member-card",), 1),
+        ("p", ("c-search-member-card-text",), 2),
+        ("p", ("c-search-member-card-text",), 2),
+        ("div", ("c-search-member-card",), 1),
+        ("p", ("c-search-member-card-text",), 5),
+        ("p", ("c-search-member-card-text",), 5),
+    )
+    contaminated = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("list",), 0),
+        ("div", ("c-search-member-card",), 1),  # おすすめ候補者が残っている
+        ("div", ("c-search-member-card",), 1),
+        ("div", ("c-search-empty",), 1),
+    )
+    sizes = subtree_sizes(results)
+
+    # **このページは採用されてはいけない。** 一覧の繰り返しが残っている。
+    assert heaviest_repeated_token(results, sizes) == "div.c-search-member-card"
+    assert token_counts(contaminated)["div.c-search-member-card"] == 2
+
+    # もし採用してしまえば、行は内側へ滑る (だから採用しない)。
+    rows = row_group_candidates(results, sizes, [token_counts(contaminated)])
+    assert rows and rows[0].token == "p.c-search-member-card-text"
+
+
+def test_the_heaviest_group_is_decided_before_the_row_is() -> None:
+    """0件ページの検査が、行の同定結果に依存しないこと。
+
+    修飾クラス (``--scouted``) は独立のトークンなので、「消えた群が1つでもあるか」
+    では緩すぎる -- カードが25枚出たままのページでも「スカウト済みが0枚」で合格する。
+    最も重い繰り返し群は結果ページだけから決まり、修飾クラス1つでは満たせない。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("list",), 0),
+        ("div", ("card",), 1),
+        ("p", ("t",), 2),
+        ("p", ("t",), 2),
+        ("div", ("card", "card--scouted"), 1),
+        ("p", ("t",), 5),
+        ("p", ("t",), 5),
+        ("div", ("chip",), 1),
+        ("div", ("chip",), 1),
+    )
+
+    assert heaviest_repeated_token(tree, subtree_sizes(tree)) == "div.card"
+
+
+def test_a_loading_skeleton_never_becomes_the_empty_state() -> None:
+    """**未描画のページが最良の0件ページに見える経路を塞ぐ。**
+
+    読み込み中の骨組みは「結果ページに無く、0件ページに在る」を完璧に満たすので、
+    0件表示として採用されうる。そして本番では **行より先に** 出るため、
+    ``wait_for_selector`` が一覧の描画前に成功する -- このモジュールが潰すために
+    書かれた失敗そのもの (原則2)。
+
+    読み込み表示は遷移直後から在り、本物の0件表示は応答後に出る。**時間差は観測できる。**
+    """
+    zero = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("list",), 0),
+        ("div", ("c-loading",), 1),  # 遷移直後から在る
+        ("div", ("c-search-empty",), 1),  # 応答後に出る
+    )
+    results = {"body.c-body": 1, "div.list": 1}
+    early = {"body.c-body": 1, "div.list": 1, "div.c-loading": 1}
+
+    without_guard = empty_state_candidates(zero, subtree_sizes(zero), results, "div.list")
+    with_guard = empty_state_candidates(zero, subtree_sizes(zero), results, "div.list", early)
+
+    assert "div.c-loading" in [c.token for c in without_guard]  # 守りが無ければ通る
+    assert [c.token for c in with_guard] == ["div.c-search-empty"]
+
+
+def test_alternatives_are_deduplicated_by_token() -> None:
+    """同じトークンの群が親ごとに複数生き残ると、別案が全部同じ文字列になっていた。
+
+    選択肢を出したつもりで何も出していない状態は、別案が無いより悪い。
+    """
+    rows = (
+        RowGroup(token="div.row", parent=1, members=(2, 3), subtree_total=2),
+        RowGroup(token="div.row", parent=9, members=(10, 11), subtree_total=2),
+    )
+    empties = (
+        EmptyCandidate(token="div.empty", depth_from_anchor=1, counts_zero=(1,), scope="region"),
+    )
+    rc = {"div.row": 4, "div.empty": 0}
+    zc = {"div.empty": 1}
+
+    values = ready_values(rows, empties, rc, [zc])
+
+    assert [v.selector() for v in values] == ["div.row, div.empty"]

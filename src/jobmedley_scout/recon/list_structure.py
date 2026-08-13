@@ -218,6 +218,24 @@ def maximal_groups(groups: Sequence[RowGroup], sizes: Sequence[int]) -> tuple[Ro
     )
 
 
+def heaviest_repeated_token(tree: DomTree, sizes: Sequence[int]) -> str:
+    """The token of the repeating group with the largest total subtree. ``""`` if none.
+
+    **0件ページが本物かを、行の同定結果に依存せずに問うための量である。**
+
+    一覧のある画面で最も「重い」繰り返しは、ほぼ必ず候補者の行である (実測では
+    カード25枚 × 約50節点)。ページャのリンクや装飾のチップは桁が違う。だから
+    「このトークンが0件ページで消えたか」は、行を確定する前に問える近似になる。
+
+    近似が外れても **安全側に倒れる**。外れた場合に起きるのは「0件ページを厳しく
+    拒否しすぎる」ことであり、その結果は UNRESOLVED = 見える失敗である。
+    """
+    groups = repeated_child_groups(tree, sizes)
+    if not groups:
+        return ""
+    return max(groups, key=lambda g: (g.subtree_total, len(g.members))).token
+
+
 def row_group_candidates(
     tree: DomTree,
     sizes: Sequence[int],
@@ -316,6 +334,7 @@ def empty_state_candidates(
     zero_sizes: Sequence[int],
     results_counts: Mapping[str, int],
     anchor_token: str,
+    early_counts: Mapping[str, int] | None = None,
 ) -> tuple[EmptyCandidate, ...]:
     """Tokens present on the zero-result page but absent from the results page.
 
@@ -326,6 +345,20 @@ def empty_state_candidates(
     先頭** = 0件表示のブロック本体で、内側の文字要素は後ろへ回る。件数最少 + 辞書順の
     タイブレークは使わない -- 辞書順は推測ですらなく乱択であり、ロードごとに出没する
     装飾を先頭に据えうる。
+
+    ``early_counts`` -- **描画される前のスナップショット。渡されたら、そこに既に
+    在ったトークンを候補から外す。**
+
+    これが無いと、**未描画のページが最良の0件ページに見える**。読み込み中の骨組み
+    (``div.c-loading`` のような) は「結果ページに無く、0件ページに在る」を完璧に
+    満たすので0件表示として採用される。そして本番では **行より先に** 現れるので、
+    ``wait_for_selector`` が一覧の描画前に成功する -- このモジュールが潰すために
+    書かれた失敗そのものである (原則2)。
+
+    読み込み表示は遷移直後から在る。本物の0件表示は応答が返ってから出る。
+    **この時間差は観測できる** ので、推測せずに切り分けられる。素のHTMLに0件表示が
+    含まれる作り (サーバ描画) では候補が空になるが、それは UNRESOLVED = 見える失敗に
+    なるだけで、静かな誤りにはならない。
     """
     anchors = indices_with_token(zero_tree, anchor_token) if anchor_token else ()
     if len(anchors) == 1:
@@ -343,6 +376,7 @@ def empty_state_candidates(
             if token not in seen:
                 seen[token] = (depth, index)
 
+    early = early_counts or {}
     fresh = [
         EmptyCandidate(
             token=token,
@@ -351,7 +385,9 @@ def empty_state_candidates(
             scope=scope,
         )
         for token, (depth, _order) in seen.items()
-        if results_counts.get(token, 0) == 0
+        # 結果ページに無く、**かつ描画前にも無かった** ものだけ。
+        # 後者を落とすと読み込み表示が0件表示として採用される (上記)。
+        if results_counts.get(token, 0) == 0 and early.get(token, 0) == 0
     ]
     return tuple(
         sorted(fresh, key=lambda c: (c.depth_from_anchor, c.counts_zero[0], seen[c.token][1]))
@@ -450,19 +486,24 @@ def ready_values(
     if not rows or not empties:
         return ()
 
-    pairs: list[ReadyValue] = []
-    head_row, head_empty = rows[0], empties[0]
-    pairs.append(ReadyValue(head_row.token, head_empty.token))
-    for row in rows[1 : 1 + 2]:
-        pairs.append(ReadyValue(row.token, head_empty.token))
-    for empty in empties[1:2]:
-        pairs.append(ReadyValue(head_row.token, empty.token))
+    # **トークンで重複を潰す。** 同じトークンの群が親ごとに複数生き残るので、
+    # 素朴に並べると別案3件が全部同じ文字列になり、選択肢を出したつもりで
+    # 何も出していないことになる (実測で確認)。
+    row_tokens = list(dict.fromkeys(row.token for row in rows))
+    empty_tokens = list(dict.fromkeys(empty.token for empty in empties))
+
+    pairs: list[ReadyValue] = [ReadyValue(row_tokens[0], empty_tokens[0])]
+    pairs.extend(ReadyValue(token, empty_tokens[0]) for token in row_tokens[1:3])
+    pairs.extend(ReadyValue(row_tokens[0], token) for token in empty_tokens[1:2])
 
     kept: list[ReadyValue] = []
-    for value in pairs[: 1 + MAX_ALTERNATIVES]:
+    for value in pairs:
+        if len(kept) > MAX_ALTERNATIVES:
+            break
         if not _row_side_holds(value.row_token, results_counts, zero_counts):
             continue
         if not _empty_side_holds(value.empty_token, results_counts, zero_counts):
             continue
-        kept.append(value)
+        if value not in kept:
+            kept.append(value)
     return tuple(kept)
