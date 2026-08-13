@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -306,6 +307,33 @@ class DomTree:
     shadow_root_count: int
 
 
+def build_tree(
+    rows: Iterable[tuple[str, tuple[str, ...], int]],
+    *,
+    truncated: bool,
+    shadow_root_count: int,
+) -> DomTree | None:
+    """Validate pre-order numbering and build a tree, or ``None``.
+
+    前順採番の前提 (根だけが ``-1``、それ以外は ``0 <= parent < i``) をここで
+    自己検査する。破れていたら以降の包含判定が全部嘘になるので、**黙って先へ
+    進まず ``None`` を返す**。実行時の走査 (:func:`dom_tree`) と、保存された
+    スナップショットの読み戻し (:mod:`recon.snapshot`) の **両方がこの1つの
+    検査を通る** -- 検証器を2つ持つと、片方だけ緩む。
+    """
+    nodes: list[DomNode] = []
+    for index, (tag, classes, parent) in enumerate(rows):
+        if index == 0:
+            if parent != -1:
+                return None
+        elif not 0 <= parent < index:
+            return None
+        nodes.append(DomNode(tag=tag, class_names=tuple(classes), parent=parent))
+    if not nodes:
+        return None
+    return DomTree(nodes=tuple(nodes), truncated=truncated, shadow_root_count=shadow_root_count)
+
+
 def dom_tree(page: Any, *, cap: int = DOM_TREE_NODE_CAP) -> DomTree | None:
     """Read the whole element tree in a single round trip, or ``None``.
 
@@ -313,9 +341,6 @@ def dom_tree(page: Any, *, cap: int = DOM_TREE_NODE_CAP) -> DomTree | None:
     このモジュールの存在理由そのものである。読めなかったのを「何も無かった」と
     読むと、いま塞ごうとしている静かなゼロ件 (原則2) を新しい経路で再生産する。
     呼び出し側は ``None`` を必ず UNRESOLVED へ落とすこと。
-
-    前順採番の前提 (``0 <= parent < i``) はここで自己検査する。破れていたら
-    以降の包含判定が全部嘘になるので、**黙って先へ進まず ``None`` を返す**。
     """
     try:
         raw = page.evaluate(_DOM_TREE_SCRIPT, cap)
@@ -323,26 +348,20 @@ def dom_tree(page: Any, *, cap: int = DOM_TREE_NODE_CAP) -> DomTree | None:
         return None
     if not isinstance(raw, dict):
         return None
-    items = raw.get("nodes") or ()
-    nodes: list[DomNode] = []
-    for index, item in enumerate(items):
+    rows: list[tuple[str, tuple[str, ...], int]] = []
+    for item in raw.get("nodes") or ():
         try:
-            parent = int(item.get("parent", -1))
-            tag = one_line(str(item.get("tag", "")))
-            classes = tuple(one_line(str(name)) for name in item.get("classes") or ())
+            rows.append(
+                (
+                    one_line(str(item.get("tag", ""))),
+                    tuple(one_line(str(name)) for name in item.get("classes") or ()),
+                    int(item.get("parent", -1)),
+                )
+            )
         except (AttributeError, TypeError, ValueError):
             return None
-        # 前順採番の自己検査。根だけが -1、それ以外は必ず自分より小さい添字を指す。
-        if index == 0:
-            if parent != -1:
-                return None
-        elif not 0 <= parent < index:
-            return None
-        nodes.append(DomNode(tag=tag, class_names=classes, parent=parent))
-    if not nodes:
-        return None
-    return DomTree(
-        nodes=tuple(nodes),
+    return build_tree(
+        rows,
         truncated=bool(raw.get("truncated")),
         shadow_root_count=int(raw.get("shadowRoots") or 0),
     )

@@ -24,7 +24,6 @@ from jobmedley_scout.recon.list_structure import (
     click_locator,
     contains,
     empty_state_candidates,
-    heaviest_repeated_token,
     indices_with_token,
     list_region,
     lowest_common_ancestor,
@@ -515,19 +514,23 @@ def test_the_segmented_page_still_yields_a_safe_value() -> None:
 # --- 反証で見つかった2つの穴 (**どちらも推奨値として誤りが出ていた**) ------------
 
 
-def test_a_contaminated_zero_page_would_promote_the_text_inside_the_card() -> None:
-    """**汚染された0件ページを採用すると、行の同定が内側へ滑り落ちる。**
+def test_a_contaminated_zero_page_slides_the_row_inward_but_never_to_a_frame() -> None:
+    """**汚染された0件ページを採用すると、行の同定が内側へ滑る。**
 
     ``maximal_groups`` は「他の群の要素の内側に親がある群」を落とす規則なので、
     支配者 (カード群) が0件フィルタで先に消えると、その子孫が繰り上がって極大になる。
 
-    実際に再現した: カードが残っている0件ページを採用すると、行が
-    ``p.c-search-member-card-text`` になり、しかも UNRESOLVED ではなく
-    **推奨値として出た**。1回目に直したはずの誤りが値になって戻ってきていた。
+    汚染の第一防衛は :func:`recon.observe_list.zero_page_is_usable` (繰り返しが
+    1つも消えていないページを拒否する) だが、**一部だけ消えたページは通りうる**
+    (カードの骨だけ残した「おすすめ」等)。そのとき行は内側のトークンへ滑る --
+    それでも次の2点が保たれることを、ここで固定する:
 
-    これを塞ぐのは ``zero_page_is_usable`` 側である
-    (:func:`heaviest_repeated_token` が0でなければ0件ページを採用しない)。
-    ここでは「採用してしまうと何が起きるか」を、防御の理由として固定しておく。
+    1. 滑った先も「結果ページに2個以上・0件ページに0個」を満たす = 内容が出たら
+       一致するトークンであり、**常に真になる枠には決してならない**
+    2. 出力の不変条件 (行側 XOR 0件側) は破れない
+
+    つまり最悪ケースでも失敗は「最適でない値」止まりで、静かなゼロ件には戻らない。
+    残存の内訳は診断として印字され、構造スナップショットで手元から検証できる。
     """
     results = _tree(
         ("body", ("c-body",), -1),
@@ -542,42 +545,27 @@ def test_a_contaminated_zero_page_would_promote_the_text_inside_the_card() -> No
     contaminated = _tree(
         ("body", ("c-body",), -1),
         ("div", ("list",), 0),
-        ("div", ("c-search-member-card",), 1),  # おすすめ候補者が残っている
+        ("div", ("c-search-member-card",), 1),  # 骨だけの「おすすめ」
         ("div", ("c-search-member-card",), 1),
         ("div", ("c-search-empty",), 1),
     )
+    rc, zc = token_counts(results), token_counts(contaminated)
     sizes = subtree_sizes(results)
 
-    # **このページは採用されてはいけない。** 一覧の繰り返しが残っている。
-    assert heaviest_repeated_token(results, sizes) == "div.c-search-member-card"
-    assert token_counts(contaminated)["div.c-search-member-card"] == 2
+    rows = row_group_candidates(results, sizes, [zc])
+    empties = empty_state_candidates(contaminated, subtree_sizes(contaminated), rc, "div.list")
+    values = ready_values(rows, empties, rc, [zc])
 
-    # もし採用してしまえば、行は内側へ滑る (だから採用しない)。
-    rows = row_group_candidates(results, sizes, [token_counts(contaminated)])
-    assert rows and rows[0].token == "p.c-search-member-card-text"
-
-
-def test_the_heaviest_group_is_decided_before_the_row_is() -> None:
-    """0件ページの検査が、行の同定結果に依存しないこと。
-
-    修飾クラス (``--scouted``) は独立のトークンなので、「消えた群が1つでもあるか」
-    では緩すぎる -- カードが25枚出たままのページでも「スカウト済みが0枚」で合格する。
-    最も重い繰り返し群は結果ページだけから決まり、修飾クラス1つでは満たせない。
-    """
-    tree = _tree(
-        ("body", ("c-body",), -1),
-        ("div", ("list",), 0),
-        ("div", ("card",), 1),
-        ("p", ("t",), 2),
-        ("p", ("t",), 2),
-        ("div", ("card", "card--scouted"), 1),
-        ("p", ("t",), 5),
-        ("p", ("t",), 5),
-        ("div", ("chip",), 1),
-        ("div", ("chip",), 1),
-    )
-
-    assert heaviest_repeated_token(tree, subtree_sizes(tree)) == "div.card"
+    # 行は内側へ滑る (カードは0件ページに残っているため候補から外れる)。
+    assert rows[0].token == "p.c-search-member-card-text"
+    # それでも枠は決して出ない。全トークンが XOR を満たす。
+    assert values
+    for value in values:
+        for token in (value.row_token, value.empty_token):
+            row_side = rc.get(token, 0) >= 2 and zc.get(token, 0) == 0
+            empty_side = rc.get(token, 0) == 0 and zc.get(token, 0) >= 1
+            assert row_side != empty_side, token
+    assert "body.c-body" not in _emitted_tokens(values)
 
 
 def test_a_loading_skeleton_never_becomes_the_empty_state() -> None:

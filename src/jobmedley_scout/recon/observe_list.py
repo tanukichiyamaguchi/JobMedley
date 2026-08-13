@@ -76,9 +76,9 @@ from jobmedley_scout.recon.list_structure import (
     RowGroup,
     click_locator,
     empty_state_candidates,
-    heaviest_repeated_token,
     list_region,
     ready_values,
+    repeated_child_groups,
     row_group_candidates,
     safe_click_index,
     subtree_sizes,
@@ -90,6 +90,7 @@ from jobmedley_scout.recon.manual_login import (
     marker_candidates_from,
     structure_sample,
 )
+from jobmedley_scout.recon.snapshot import ListCapture, ZeroCapture
 from jobmedley_scout.recon.yaml_paste import yaml_scalar as _scalar
 
 #: 閉じる系コントロールの探索語。ログアウトと同じ仕組み
@@ -226,21 +227,29 @@ class ZeroPage:
     tree_read: bool
     tree_truncated: bool
     counts: Mapping[str, int]
-    #: 結果ページで最も重い繰り返し群が、このページに何個残っていたか。
+    #: 結果ページで繰り返していたトークンのうち、このページで完全に消えた種類の数。
     #:
-    #: **0でなければ、このページは0件ではない。** 判定をこの1つに絞ってある。
+    #: **0なら、このページは結果ページから変わっていない** (遷移が失敗して
+    #: 結果ページのままか、条件が差し戻されて同等の一覧が出ている)。判定は
+    #: この1点に絞る。
     #:
-    #: 経緯: 当初は「選ばれた行トークンの件数」で判定していたが、行の同定を誤ると
-    #: 0件ページまで巻き添えで捨てられた (実測で2枚とも失った)。次に「消えた群が
-    #: 1つでもあるか」に緩めたが、**今度は緩すぎた** -- 修飾クラス
-    #: (``div.c-search-member-card--scouted``) は独立のトークンなので、カードが25枚
-    #: 表示されたままのページでも「スカウト済みが0枚」で合格してしまう。そのページを
-    #: 採用すると正しい行が消され、カードの中の文字要素が行として **推奨値になる**。
+    #: 経緯 (3代目である):
+    #: 1. 「選ばれた行トークンの件数」-- 行の同定を誤ると0件ページまで巻き添えで
+    #:    捨てられた (実測)
+    #: 2. 「最も重い繰り返し群の件数」-- 部分木の重さは入れ子の外側を優遇する。
+    #:    一覧を **囲む** 区画 (``div.c-segment`` ×2) が中身ごと数えられて
+    #:    カード25枚より重くなり、正常な0件ページを2枚とも拒否した
+    #:    (variant電池が実機の前に検出)
+    #: 3. 現在: 消えた種類が1つも無い = 変わっていない、という向きの判定。
+    #:    入れ子にも行の誤同定にも依存しない
     #:
-    #: 最も重い繰り返し群は行の同定より前に、結果ページだけから決まる
-    #: (:func:`recon.list_structure.heaviest_repeated_token`)。行の確定に依存せず、
-    #: かつ修飾クラス1つでは満たせない。
-    heaviest_group_count: int
+    #: この判定は「一覧の一部が残ったまま別の一部が消えた」ページを通しうる。
+    #: その場合でも出力の不変条件 (行側 XOR 0件側) は保たれ、値は「内容が出たら
+    #: 一致する」トークンになる -- 静かな常真にはならない。残存の内訳は
+    #: 診断として印字し、構造スナップショットで手元から検証できる。
+    vanished_repeated_count: int
+    #: 残存した繰り返しの種類数 (診断のみ。判定には使わない)。
+    remaining_repeated_count: int
     #: 描画される前 (遷移直後) のトークン件数。0件表示の候補から読み込み表示を外す。
     early_counts: Mapping[str, int]
 
@@ -265,12 +274,15 @@ def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
         return False, "DOMの木を読めませんでした (要素が無かったのではありません)"
     if page.tree_truncated:
         return False, "木が上限で打ち切られました"
-    if page.heaviest_group_count != 0:
+    if page.vanished_repeated_count == 0:
         return False, (
-            f"一覧の繰り返し要素が {page.heaviest_group_count} 個残っています "
-            f"(0件になっていません。遷移が失敗した / 検索条件が差し戻された可能性)"
+            "結果ページで繰り返していた要素が1つも消えていません "
+            "(遷移が失敗したか、条件が差し戻されて一覧が出たままの可能性)"
         )
-    return True, ""
+    return (
+        True,
+        f"消えた繰り返し {page.vanished_repeated_count}種 / 残存 {page.remaining_repeated_count}種",
+    )
 
 
 def newly_visible_clickables(
@@ -351,6 +363,8 @@ class ObservedList:
     rows_outside_group: int = 0
     #: nav.list_ready_selector の推奨値と別案。**先頭が推奨。**
     ready: tuple[ReadyValue, ...] = ()
+    #: ドロワーを試さなかった明示的な理由 (再生など)。空なら状況から推定して印字する。
+    drawer_skip_reason: str = ""
     #: ドロワーを開くために実際に押した ``(セレクタ, 文書順)``。押していなければ None。
     drawer_click_locator: tuple[str, int] | None = None
     #: クリック自体を試みたか。
@@ -527,6 +541,9 @@ class ObservedList:
         out.append(f"    #   0件表示: {self.ready[0].empty_token}  (0件ページのみに存在)")
         for alternative in self.ready[1:]:
             out.append(f"    # 別案: {alternative.selector()}")
+        # **成功時も診断を出す。** 0件ページに何が残っていたかは、値が妥当かを
+        # 後から検証する唯一の材料になる (構造スナップショットと突き合わせる)。
+        out.extend(self._zero_page_lines())
         out.extend(self._caveat_lines())
         return out
 
@@ -539,7 +556,11 @@ class ObservedList:
             ]
         out = ["    # 0件ページの試行:"]
         for kind, usable, reason in self.zero_pages:
-            out.append(f"    #   - {kind}: {'使えました' if usable else f'使えません — {reason}'}")
+            if usable:
+                note = f" ({reason})" if reason else ""
+                out.append(f"    #   - {kind}: 使えました{note}")
+            else:
+                out.append(f"    #   - {kind}: 使えません — {reason}")
         return out
 
     def _caveat_lines(self) -> list[str]:
@@ -577,6 +598,11 @@ class ObservedList:
     def _drawer_lines(self) -> list[str]:
         key = "nav.drawer_close_selectors"
         if not self.drawer_attempted:
+            if self.drawer_skip_reason:
+                # 明示的な理由がある場合 (オフライン再生など)、状況から推定した
+                # 文面を出さない。**再生でクリックしなかったのは実装の判断ではなく
+                # 再生の性質** なので、推定文は嘘になる。
+                return [f"  {key}: {UNRESOLVED_TOKEN}", f"    # {self.drawer_skip_reason}"]
             reason = (
                 "候補者の行を特定できなかったため"
                 if not self.row_groups
@@ -643,139 +669,111 @@ class ObservedList:
 # --- ブラウザ依存部 (私は検証できない。運用者の実機確認に委ねる) ----------------
 
 
-def observe_list(
-    config: BrowserConfig,
-    credentials_dir: Path,
-    candidate_list_url: Coord[str],
-) -> ObservedList:
-    """Open the authenticated candidate list and observe stage 2's remaining coordinates.
+def analyze_candidate_list(capture: ListCapture, *, drawer_skip_reason: str = "") -> ObservedList:
+    """Analyze a capture (live or replayed) into the stage-2 report. **Pure.**
 
-    **1回の実行で取れるものを全部取る。** 開発コンテナから媒体へ到達できないので、
-    検証は運用者が GitHub Actions で行う -- つまり往復1回が運用者の手間1回である。
-    途中で観測できないものがあっても、そこで打ち切らずに残りを続行する。
+    **実行時とオフライン再生が、この同じ関数を通る。** 解析コードが2系統に
+    分かれると「再生では直ったが実行では直っていない」が起きるので、値の決定は
+    ここに一本化してある。ブラウザ側 (:func:`observe_list`) は木を集めて渡すだけ、
+    再生側 (``scout recon replay-list``) は保存された木を渡すだけである。
+
+    ドロワーの観測は実際のクリックが要るので、ここには含まれない。再生では
+    ``drawer_skip_reason`` にその旨を渡す。
     """
-    requested_url = require(candidate_list_url, used_by="recon.observe_list.observe_list")
+    observed, _usable = _analyze(capture)
+    if drawer_skip_reason:
+        observed = replace(observed, drawer_skip_reason=drawer_skip_reason)
+    return observed
 
-    session = session_store.session_path(credentials_dir)
-    if not session.exists():
-        return ObservedList(requested_url=requested_url, session_present=False)
 
-    with browser_context(config, storage_state=session) as (_context, page):
-        goto(page, requested_url, config)
-        wait_for_interactive(page, config.selector_timeout_ms)
-
-        # **ここを「座標が見つからない」で片付けてはいけない。** 段階1で踏んだ
-        # 取り違えと同じ形 (recon/observe_login.py 参照)。
-        if login_form_visible(page, config.selector_timeout_ms):
-            return ObservedList(
-                requested_url=requested_url, session_expired=True, landed_url=page.url
-            )
-
-        landed_url = page.url
-        if selection_redirected(requested_url, landed_url):
-            return ObservedList(
-                requested_url=requested_url,
-                landed_url=landed_url,
-                selection_required=True,
-                select_candidates=select_selector_candidates(select_fields(page)),
-                landing_structure=structure_sample(clickables(page)),
-            )
-
-        # --- 結果ページの構造 -------------------------------------------------
-        wait_for_structure_to_settle(page, config.selector_timeout_ms)
-        tree = dom_tree(page)
-        if tree is None:
-            # **読めなかったのを「空だった」と読まない。** それが原則2の再生産になる。
-            return ObservedList(requested_url=requested_url, landed_url=landed_url, tree_read=False)
-
-        base = ObservedList(
-            requested_url=requested_url,
-            landed_url=landed_url,
-            tree_read=True,
-            tree_truncated=tree.truncated,
-            shadow_root_count=tree.shadow_root_count,
+def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]]]:
+    """The shared analysis. Returns the report and the usable zero-page counts."""
+    requested_url, landed_url = capture.requested_url, capture.landed_url
+    tree = capture.results
+    if tree is None:
+        # **読めなかったのを「空だった」と読まない。** それが原則2の再生産になる。
+        return (
+            ObservedList(requested_url=requested_url, landed_url=landed_url, tree_read=False),
+            [],
         )
-        if tree.truncated:
-            return base
 
-        sizes = subtree_sizes(tree)
-        counts = token_counts(tree)
+    base = ObservedList(
+        requested_url=requested_url,
+        landed_url=landed_url,
+        tree_read=True,
+        tree_truncated=tree.truncated,
+        shadow_root_count=tree.shadow_root_count,
+    )
+    if tree.truncated:
+        return base, []
 
-        # --- 0件ページを、作れるだけ作って検査する ----------------------------
-        # **暫定の行トークンに依存させない。** 行の同定を誤ると0件ページまで
-        # 巻き添えで捨てられ、何も確定しないまま終わる (実測でそうなった)。
-        # 「結果ページで繰り返していた群のどれかが消えた」は行の正しさに関わらず
-        # 観測できるので、そちらを判定に使う。
-        heaviest = heaviest_repeated_token(tree, sizes)
+    sizes = subtree_sizes(tree)
+    counts = token_counts(tree)
 
-        zero_reports: list[tuple[str, bool, str]] = []
-        usable_counts: list[Mapping[str, int]] = []
-        usable_pages: list[tuple[str, DomTreeSnapshot]] = []
-        for variant in zero_result_variants(requested_url):
-            goto(page, variant.url, config)
-            wait_for_interactive(page, config.selector_timeout_ms)
-            # **落ち着く前に1枚撮る。** 読み込み中の骨組みはここに写る。0件表示の
-            # 候補からそれを外さないと、未描画のページが最良の0件ページに見える
-            # (recon/list_structure.empty_state_candidates 参照)。
-            early_tree = dom_tree(page)
-            early_counts = token_counts(early_tree) if early_tree is not None else {}
-            wait_for_structure_to_settle(page, config.selector_timeout_ms)
-            zero_tree = dom_tree(page)
-            zero_counts = token_counts(zero_tree) if zero_tree is not None else {}
-            report = ZeroPage(
-                kind=variant.kind,
-                landed_url=page.url,
-                tree_read=zero_tree is not None,
-                tree_truncated=bool(zero_tree and zero_tree.truncated),
-                counts=zero_counts,
-                heaviest_group_count=zero_counts.get(heaviest, 0) if heaviest else 0,
-                early_counts=early_counts,
+    # --- 0件ページの検査 -------------------------------------------------------
+    # **行の同定にも入れ子の形にも依存しない量で判定する** (ZeroPage の docstring
+    # に経緯)。結果ページで繰り返していたトークンの集合は、結果ページだけから決まる。
+    repeated_tokens = {g.token for g in repeated_child_groups(tree, sizes)}
+
+    zero_reports: list[tuple[str, bool, str]] = []
+    usable_counts: list[Mapping[str, int]] = []
+    usable_pages: list[DomTreeSnapshot] = []
+    for zero in capture.zeros:
+        zero_counts = token_counts(zero.settled) if zero.settled is not None else {}
+        early_counts = token_counts(zero.early) if zero.early is not None else {}
+        report = ZeroPage(
+            kind=zero.kind,
+            landed_url=zero.landed_url,
+            tree_read=zero.settled is not None,
+            tree_truncated=bool(zero.settled and zero.settled.truncated),
+            counts=zero_counts,
+            vanished_repeated_count=sum(
+                1 for token in repeated_tokens if zero_counts.get(token, 0) == 0
+            ),
+            remaining_repeated_count=sum(
+                1 for token in repeated_tokens if zero_counts.get(token, 0) > 0
+            ),
+            early_counts=early_counts,
+        )
+        usable, why = zero_page_is_usable(report, zero.url)
+        zero_reports.append((zero.kind, usable, why))
+        if usable and zero.settled is not None:
+            usable_counts.append(zero_counts)
+            usable_pages.append(
+                DomTreeSnapshot(zero.settled, subtree_sizes(zero.settled), early_counts)
             )
-            usable, why = zero_page_is_usable(report, variant.url)
-            zero_reports.append((variant.kind, usable, why))
-            if usable and zero_tree is not None:
-                usable_counts.append(zero_counts)
-                usable_pages.append(
-                    (
-                        variant.kind,
-                        DomTreeSnapshot(zero_tree, subtree_sizes(zero_tree), early_counts),
-                    )
-                )
 
-        rows = row_group_candidates(tree, sizes, usable_counts)
+    rows = row_group_candidates(tree, sizes, usable_counts)
 
-        # --- 0件表示 ----------------------------------------------------------
-        empties: tuple[EmptyCandidate, ...] = ()
-        anchor_token = ""
-        rows_outside = 0
-        scope = ""
-        if rows:
-            region = list_region(tree, sizes, counts, rows[0])
-            if region is not None:
-                anchor_token = region.anchor_token
-                rows_outside = region.rows_outside_group
-            for _kind, snapshot in usable_pages:
-                found = empty_state_candidates(
-                    snapshot.tree,
-                    snapshot.sizes,
-                    counts,
-                    anchor_token,
-                    snapshot.early_counts,
-                )
-                if not found:
-                    continue
-                scope = found[0].scope
-                if not empties:
-                    empties = found
-                else:
-                    # **すべての0件ページに在るものだけを残す。** 片方でしか出ない
-                    # 要素は「年齢の検証エラー画面」のような別物かもしれない。
-                    keep = {c.token for c in found}
-                    empties = tuple(c for c in empties if c.token in keep)
+    # --- 0件表示 ---------------------------------------------------------------
+    empties: tuple[EmptyCandidate, ...] = ()
+    anchor_token = ""
+    rows_outside = 0
+    scope = ""
+    if rows:
+        region = list_region(tree, sizes, counts, rows[0])
+        if region is not None:
+            anchor_token = region.anchor_token
+            rows_outside = region.rows_outside_group
+        for snapshot in usable_pages:
+            found = empty_state_candidates(
+                snapshot.tree, snapshot.sizes, counts, anchor_token, snapshot.early_counts
+            )
+            if not found:
+                continue
+            scope = found[0].scope
+            if not empties:
+                empties = found
+            else:
+                # **すべての0件ページに在るものだけを残す。** 片方でしか出ない
+                # 要素は「年齢の検証エラー画面」のような別物かもしれない。
+                keep = {c.token for c in found}
+                empties = tuple(c for c in empties if c.token in keep)
 
-        ready = ready_values(rows, empties, counts, usable_counts)
+    ready = ready_values(rows, empties, counts, usable_counts)
 
-        observed = ObservedList(
+    return (
+        ObservedList(
             requested_url=requested_url,
             landed_url=landed_url,
             tree_read=True,
@@ -789,11 +787,98 @@ def observe_list(
             empty_state_scope=scope,
             rows_outside_group=rows_outside,
             ready=ready,
+        ),
+        usable_counts,
+    )
+
+
+def observe_list(
+    config: BrowserConfig,
+    credentials_dir: Path,
+    candidate_list_url: Coord[str],
+) -> tuple[ObservedList, ListCapture | None]:
+    """Open the authenticated candidate list and observe stage 2's remaining coordinates.
+
+    **1回の実行で取れるものを全部取る。** 開発コンテナから媒体へ到達できないので、
+    検証は運用者が GitHub Actions で行う -- つまり往復1回が運用者の手間1回である。
+    途中で観測できないものがあっても、そこで打ち切らずに残りを続行する。
+
+    戻り値の :class:`~recon.snapshot.ListCapture` は、この実行が読んだDOM構造の
+    丸ごとである (結果ページ・0件ページ・クリック後)。呼び出し側がこれを保存すれば、
+    **値が出なかった実行も、手元で解析を直す材料になる**。木を読めた場合は必ず返す。
+    """
+    requested_url = require(candidate_list_url, used_by="recon.observe_list.observe_list")
+
+    session = session_store.session_path(credentials_dir)
+    if not session.exists():
+        return ObservedList(requested_url=requested_url, session_present=False), None
+
+    with browser_context(config, storage_state=session) as (_context, page):
+        goto(page, requested_url, config)
+        wait_for_interactive(page, config.selector_timeout_ms)
+
+        # **ここを「座標が見つからない」で片付けてはいけない。** 段階1で踏んだ
+        # 取り違えと同じ形 (recon/observe_login.py 参照)。
+        if login_form_visible(page, config.selector_timeout_ms):
+            return (
+                ObservedList(
+                    requested_url=requested_url, session_expired=True, landed_url=page.url
+                ),
+                None,
+            )
+
+        landed_url = page.url
+        if selection_redirected(requested_url, landed_url):
+            return (
+                ObservedList(
+                    requested_url=requested_url,
+                    landed_url=landed_url,
+                    selection_required=True,
+                    select_candidates=select_selector_candidates(select_fields(page)),
+                    landing_structure=structure_sample(clickables(page)),
+                ),
+                None,
+            )
+
+        # --- 結果ページの構造 -------------------------------------------------
+        wait_for_structure_to_settle(page, config.selector_timeout_ms)
+        tree = dom_tree(page)
+
+        # --- 0件ページ (結果の木が読めた場合のみ意味がある) --------------------
+        zeros: list[ZeroCapture] = []
+        if tree is not None and not tree.truncated:
+            for variant in zero_result_variants(requested_url):
+                goto(page, variant.url, config)
+                wait_for_interactive(page, config.selector_timeout_ms)
+                # **落ち着く前に1枚撮る。** 読み込み中の骨組みはここに写る。0件表示の
+                # 候補からそれを外さないと、未描画のページが最良の0件ページに見える。
+                early_tree = dom_tree(page)
+                wait_for_structure_to_settle(page, config.selector_timeout_ms)
+                zeros.append(
+                    ZeroCapture(
+                        kind=variant.kind,
+                        url=variant.url,
+                        landed_url=page.url,
+                        early=early_tree,
+                        settled=dom_tree(page),
+                    )
+                )
+
+        capture = ListCapture(
+            requested_url=requested_url,
+            landed_url=landed_url,
+            results=tree,
+            zeros=tuple(zeros),
         )
+        observed, usable_counts = _analyze(capture)
+        if tree is None or tree.truncated:
+            return observed, (capture if tree is not None else None)
+
+        rows = observed.row_groups
 
         # --- ドロワーの閉じ方 --------------------------------------------------
         if not rows:
-            return observed
+            return observed, capture
 
         # 結果ページへ戻る (0件ページを見た後なので)。
         goto(page, requested_url, config)
@@ -801,7 +886,7 @@ def observe_list(
         wait_for_structure_to_settle(page, config.selector_timeout_ms)
         fresh_tree = dom_tree(page)
         if fresh_tree is None:
-            return observed
+            return observed, capture
         fresh_sizes = subtree_sizes(fresh_tree)
         members = [
             g
@@ -809,15 +894,15 @@ def observe_list(
             if g.token == rows[0].token
         ]
         if not members:
-            return observed
+            return observed, capture
 
         # **操作部品を含まない領域だけを押す。** 行の中には送信ボタンがありうる。
         target = safe_click_index(fresh_tree, fresh_sizes, members[0].members[0])
         if target is None:
-            return observed
+            return observed, capture
         locator = click_locator(fresh_tree, target)
         if locator is None:
-            return observed
+            return observed, capture
 
         before = clickables(page)
         before_visible = sum(1 for c in before if c.visible)
@@ -825,7 +910,10 @@ def observe_list(
         try:
             page.locator(locator[0]).nth(locator[1]).click(timeout=config.selector_timeout_ms)
         except Exception:
-            return replace(observed, drawer_attempted=True, drawer_click_locator=locator)
+            return (
+                replace(observed, drawer_attempted=True, drawer_click_locator=locator),
+                capture,
+            )
 
         opened = wait_for_new_clickables(
             page,
@@ -835,15 +923,20 @@ def observe_list(
         )
         after = clickables(page)
         delta = tuple(c for c in newly_visible_clickables(before, after) if c.visible)
-        return replace(
-            observed,
-            landed_url=page.url,
-            drawer_attempted=True,
-            drawer_click_locator=locator,
-            drawer_opened=opened,
-            drawer_url_changed=page.url != url_before,
-            close_candidates=marker_candidates_from(
-                delta, text_hints=CLOSE_TEXT_HINTS, purpose_tokens=CLOSE_CLASS_TOKENS
+        # クリック後の木も持ち帰る。閉じるボタンの再解析を手元でやり直せるように。
+        capture = replace(capture, after_click=dom_tree(page))
+        return (
+            replace(
+                observed,
+                landed_url=page.url,
+                drawer_attempted=True,
+                drawer_click_locator=locator,
+                drawer_opened=opened,
+                drawer_url_changed=page.url != url_before,
+                close_candidates=marker_candidates_from(
+                    delta, text_hints=CLOSE_TEXT_HINTS, purpose_tokens=CLOSE_CLASS_TOKENS
+                ),
+                drawer_evidence=structure_sample(delta),
             ),
-            drawer_evidence=structure_sample(delta),
+            capture,
         )

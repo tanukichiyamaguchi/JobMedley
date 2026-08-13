@@ -103,5 +103,19 @@ jobs:
         if: inputs.command == 'observe-list'
         run: scout recon observe-list
 
-      # 13.2: ここで成果物を残さない。偵察の生データは個人データを含みうるため、
-      # 判定結果 (ログに出る文字列) 以外は持ち出さない。
+      # 構造スナップショット (タグ名・クラス名・親子関係のみ。文言・id・属性値は
+      # 走査の時点で取っていないので、個人データは構造的に入らない = 13.2 の
+      # 「構造ダイジェスト」)。これがあると、値が出なかった実行も無駄にならない --
+      # 保存された実データに対して解析を手元で直せる (scout recon replay-list)。
+      # 保持3日は偵察ダンプの既定 (paths.recon_dump_retention_days) に合わせてある。
+      - name: Upload structure snapshot
+        if: inputs.command == 'observe-list'
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-structure
+          path: artifacts/recon/structure/
+          retention-days: 3
+          if-no-files-found: ignore
+
+      # 13.2: 上記の構造スナップショット以外の成果物は残さない。偵察の生データは
+      # 個人データを含みうるため、判定結果 (ログに出る文字列) 以外は持ち出さない。

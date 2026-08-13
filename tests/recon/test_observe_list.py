@@ -142,43 +142,54 @@ def _zero(**overrides: object) -> ZeroPage:
         "tree_read": True,
         "tree_truncated": False,
         "counts": {},
-        "heaviest_group_count": 0,
+        "vanished_repeated_count": 3,
+        "remaining_repeated_count": 1,
         "early_counts": {},
     }
     defaults.update(overrides)
     return ZeroPage(**defaults)  # type: ignore[arg-type]
 
 
-def test_a_clean_zero_page_is_usable() -> None:
+def test_a_clean_zero_page_is_usable_and_carries_diagnostics() -> None:
+    """使える場合も内訳を返す。報告に印字され、スナップショットと突き合わせられる。"""
     usable, why = zero_page_is_usable(_zero(), REQUESTED)
-    assert usable is True and why == ""
+    assert usable is True
+    assert "消えた繰り返し 3種" in why
 
 
-def test_a_zero_page_that_still_shows_the_list_is_refused() -> None:
+def test_an_unchanged_zero_page_is_refused() -> None:
     """**判定の土台を無検査で信頼しない。**
 
     ``goto`` は遷移失敗を握り潰す (5.3 のため意図的にそうしてある)。遷移が
     失敗して結果ページのままだと、全トークンが「両ページに存在」になり、
-    いま直したはずの ``body.c-body`` がまた通る。
+    いま直したはずの ``body.c-body`` がまた通る。「繰り返しが1つも消えていない」は
+    その状態の観測である。
     """
-    usable, why = zero_page_is_usable(_zero(heaviest_group_count=25), REQUESTED)
+    usable, why = zero_page_is_usable(
+        _zero(vanished_repeated_count=0, remaining_repeated_count=4), REQUESTED
+    )
 
     assert usable is False
-    assert "25 個残っています" in why
+    assert "1つも消えていません" in why
 
 
-def test_the_zero_page_check_does_not_depend_on_the_row_being_right() -> None:
-    """**実際に起きた巻き添え。**
+def test_the_zero_page_check_does_not_depend_on_nesting_or_on_the_row() -> None:
+    """**この判定は3代目である** (:class:`ZeroPage` の docstring に経緯)。
 
-    当初は「選ばれた行トークンがこのページに何個あるか」で判定していた。行の同定を
-    誤った実行で、誤った行 (``div.c-segment``) が0件ページにも1個残っていたため、
-    **0件ページが2枚とも「0件になっていない」と捨てられ**、何も確定しなかった。
+    1代目は行の同定に依存して巻き添えを起こし (実測)、2代目 (最も重い繰り返し群) は
+    部分木の重さが入れ子の外側を優遇するため、一覧を **囲む** 区画
+    (``div.c-segment`` ×2) が中身ごと数えられてカード25枚より重くなり、
+    正常な0件ページを2枚とも拒否した (variant電池が実機の前に検出した)。
 
-    行が正しいかに関わらず「結果ページで繰り返していた何かが消えた」は観測できる。
+    現在の判定は「種類が消えたか」だけを見る。入れ子の形にも行の同定にも依存しない。
     """
-    usable, _why = zero_page_is_usable(_zero(heaviest_group_count=0), REQUESTED)
+    usable, note = zero_page_is_usable(
+        _zero(vanished_repeated_count=1, remaining_repeated_count=9), REQUESTED
+    )
 
     assert usable is True
+    # 残存の内訳は診断として返り、報告に印字される (スナップショットと突き合わせ用)。
+    assert "残存 9種" in note
 
 
 def test_a_redirected_zero_page_is_refused() -> None:

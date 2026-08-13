@@ -65,6 +65,10 @@ def _build_parser() -> argparse.ArgumentParser:
     recon_sub.add_parser("login", help="手動ログインしセッションを保存 (常にヘッドフル)")
     recon_sub.add_parser("observe-login", help="段階1の座標を観測して記入用の値を印字")
     recon_sub.add_parser("observe-list", help="段階2の残り座標を観測して記入用の値を印字")
+    replay = recon_sub.add_parser(
+        "replay-list", help="保存された構造スナップショットに対して同じ解析を再実行 (接続なし)"
+    )
+    replay.add_argument("snapshot", type=Path, help="observe-list が保存したJSON (またはそのログ)")
     verify = recon_sub.add_parser("verify-session", help="保存セッションで入り直して確認")
     # こちらは機械判定なので既定はヘッドレスでよい。目で見たいときだけ開く。
     verify.add_argument("--headful", action="store_true", help="画面を開いて目視でも確認する")
@@ -178,6 +182,7 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "observe-login": "recon-login",
     "verify-session": "recon-login",
     "observe-list": "recon-observe-list",
+    "replay-list": "recon-replay",
     "capture-send": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
@@ -208,16 +213,49 @@ def _dispatch_recon(
 
     if args.recon_command == "observe-list":
         from jobmedley_scout.recon.observe_list import observe_list
+        from jobmedley_scout.recon.snapshot import render_snapshot_footer, save_capture
 
         # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
         _restore_session_from_secrets(config)
-        print(
-            observe_list(
-                config.browser,
-                config.paths.credentials_dir,
-                coordinates.url("nav.candidate_list_url"),
-            ).render()
+        observed, capture = observe_list(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
         )
+        print(observed.render())
+        if capture is not None:
+            # **観測の丸ごとを持ち帰る。** 値が出なかった実行も、この保存があれば
+            # 手元で解析を直す材料になる (scout recon replay-list)。往復1回の価値を
+            # 「値が出たか」から「構造を持ち帰れたか」に引き上げるのが狙い。
+            path = save_capture(capture, config.paths.recon_dump_dir)
+            print()
+            print(render_snapshot_footer(path, capture))
+        return int(ExitCode.OK)
+
+    if args.recon_command == "replay-list":
+        from jobmedley_scout.recon.observe_list import analyze_candidate_list
+        from jobmedley_scout.recon.snapshot import load_capture
+
+        # オフライン再生。媒体へは一切接続しない。実行時と **同一の解析関数** を
+        # 保存された構造に対して走らせる -- 再生で直れば実行でも直る。
+        text = Path(args.snapshot).read_text(encoding="utf-8")
+        capture = load_capture(text)
+        if capture is None:
+            raise ConfigError(
+                f"スナップショットを読めませんでした: {args.snapshot}\n"
+                f"  observe-list が保存した JSON、またはそのログ出力"
+                f" (BEGIN/END ブロックを含むテキスト) を指定してください。"
+            )
+        observed = analyze_candidate_list(
+            capture,
+            drawer_skip_reason=(
+                "再生 (replay) ではクリックを行わないため、ドロワーは観測できません。"
+                "この座標は実行時のみ観測されます。"
+            ),
+        )
+        print("**再生 (replay)**: 保存された構造から再計算しました。媒体へは接続していません。")
+        print()
+        print(observed.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "verify-session":

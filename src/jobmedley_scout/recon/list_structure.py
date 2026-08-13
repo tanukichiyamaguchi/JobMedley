@@ -218,24 +218,6 @@ def maximal_groups(groups: Sequence[RowGroup], sizes: Sequence[int]) -> tuple[Ro
     )
 
 
-def heaviest_repeated_token(tree: DomTree, sizes: Sequence[int]) -> str:
-    """The token of the repeating group with the largest total subtree. ``""`` if none.
-
-    **0件ページが本物かを、行の同定結果に依存せずに問うための量である。**
-
-    一覧のある画面で最も「重い」繰り返しは、ほぼ必ず候補者の行である (実測では
-    カード25枚 × 約50節点)。ページャのリンクや装飾のチップは桁が違う。だから
-    「このトークンが0件ページで消えたか」は、行を確定する前に問える近似になる。
-
-    近似が外れても **安全側に倒れる**。外れた場合に起きるのは「0件ページを厳しく
-    拒否しすぎる」ことであり、その結果は UNRESOLVED = 見える失敗である。
-    """
-    groups = repeated_child_groups(tree, sizes)
-    if not groups:
-        return ""
-    return max(groups, key=lambda g: (g.subtree_total, len(g.members))).token
-
-
 def row_group_candidates(
     tree: DomTree,
     sizes: Sequence[int],
