@@ -342,6 +342,9 @@ def test_a_stuck_loader_zero_page_is_visible_in_the_diagnostics() -> None:
     値は出ない (0件表示を観測できていない) が、``loader_cleared=False`` の事実が
     診断として必ず印字されること。これが無いと「0件表示が無い媒体」と
     「読み込みが終わらなかった実行」を、報告から区別できない。
+
+    文言は「読み込み表示が残った」と **断定しない** -- 実測4回目で、残っていたのは
+    先に描画された0件表示で、ローダーは剥がれていた (待ちの対象が誤っていただけ)。
     """
     skeleton = _frame_only(LOADING)
     observed = _analyze(
@@ -358,13 +361,14 @@ def test_a_stuck_loader_zero_page_is_visible_in_the_diagnostics() -> None:
 
     assert observed.ready == ()
     report = observed.render()
-    assert "読み込み表示が消えませんでした" in report
+    assert "遷移直後からの要素が一部残りました" in report
 
 
-def test_a_container_observed_on_loaded_zero_pages_becomes_the_single_value() -> None:
-    """コンテナが「0件でも読み込み後に存在し、遷移直後には無い」と観測できた形。
+def test_a_post_load_marker_when_the_medium_has_no_empty_element() -> None:
+    """0件表示の専用要素が無い媒体の形 -- 一覧が空のコンテナだけを残して消える。
 
-    このとき値はペアではなくコンテナ単独になる -- 取得指針の理想形。
+    ペアは原理的に組めないので、「検索応答の描画後にのみ現れる要素」単独が
+    値になる -- 件数に依らず描画完了を待てる。
     """
     # 結果ページ: 一意なコンテナ div.result-body の中に行が並ぶ。
     results = _tree(
@@ -375,13 +379,12 @@ def test_a_container_observed_on_loaded_zero_pages_becomes_the_single_value() ->
         ("div", ("card",), 1),
         ("p", ("t",), 4),
     )
-    # 0件ページ (settled): 同じコンテナの中に0件表示。
+    # 0件ページ (settled): コンテナは残るが、中身も0件表示も無い。
     zero_settled = _tree(
         ("body", ("c-body",), -1),
         ("div", ("result-body",), 0),
-        ("div", ("no-hit",), 1),
     )
-    # 遷移直後: コンテナ自体がまだ無い (= 出現を待てる)。
+    # 遷移直後: コンテナ自体がまだ無い (= 出現を待てる)。ローダーは後で剥がれる。
     zero_early = _tree(
         ("body", ("c-body",), -1),
         ("div", ("c-loader",), 0),
@@ -406,9 +409,46 @@ def test_a_container_observed_on_loaded_zero_pages_becomes_the_single_value() ->
         ),
     )
 
-    assert observed.container_ready == "div.result-body"
+    assert observed.ready == ()
+    assert observed.loaded_marker == "div.result-body"
     report = observed.render()
     assert 'nav.list_ready_selector: "div.result-body"' in report
-    assert "0件の検索でも読み込み後に存在する" in report
-    # ペアは別案として残る (選択肢を奪わない)。
-    assert "別案" in report
+    assert "検索応答の描画後にのみ現れる要素" in report
+
+
+def test_a_zero_display_prerendered_at_the_early_snapshot_still_pairs() -> None:
+    """**実測4回目の形。** SPA が速く、age 変種の0件表示 (c-not-found) は遷移直後の
+    1枚に写り終わっていた。ローダーはその後に剥がれた。pagination 変種の直後の
+    1枚は起動前の骨組みで、settled はローダーが残ったまま (読み込み途中) だが、
+    0件表示は既に描画されていた。
+
+    「early に在る」を理由に0件表示を捨てると、実在する専用要素が UNRESOLVED に
+    なる (3回目の「この媒体に0件表示は無い」はこの取り違えから生まれた誤り)。
+    除外してよいのは「消えたことが観測された」ものだけである。
+    """
+    # 実際の媒体の形: 0件ページでは無限スクロール枠 (アンカー) ごと消える。
+    zero_frame: list[tuple[str, tuple[str, ...], int]] = [
+        ("body", ("c-body",), -1),
+        ("div", ("c-segment",), 0),
+        ("p", ("c-filter-text",), 1),
+        ("div", ("c-segment",), 0),
+    ]
+    zero_display = ("div", ("c-not-found", "c-not-found--searches"), 3)
+    loader = ("div", ("c-loader-view",), 3)
+    age_early = _tree(*zero_frame, loader, zero_display)  # ローダー + 0件表示が同居
+    age_settled = _tree(*zero_frame, zero_display)  # ローダーだけが剥がれた
+    thin_early = _tree(("body", ("c-body",), -1))  # 起動前の骨組み
+    pagination_settled = _tree(*zero_frame, loader, zero_display)  # 読み込み途中のまま
+
+    observed = _analyze(
+        _results_page(),
+        _zero("age", age_settled, age_early),
+        _zero("pagination", pagination_settled, thin_early),
+    )
+
+    assert observed.ready
+    assert observed.ready[0].row_token == "div.c-search-member-card"
+    assert observed.ready[0].empty_token in ("div.c-not-found", "div.c-not-found--searches")
+    # ローダーは値にも別案にも出ない (消えたことが観測された一時要素)。
+    assert all("c-loader" not in v.empty_token for v in observed.ready)
+    _assert_no_frame_in_values(observed)
