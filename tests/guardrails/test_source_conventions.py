@@ -214,3 +214,37 @@ def test_send_api_retry_is_documented_as_deliberate() -> None:
         "api/send.py にリトライ実装が入った可能性があります。"
         "送信APIへのリトライは二重送信に直結します (12.5)。"
     )
+
+
+def test_the_always_true_selector_predicate_never_comes_back() -> None:
+    """**同型のバグを3度作り込んだ。** 4度目を機械で止める (docs/incidents.md)。
+
+    ``observe-list`` は座標 ``nav.list_ready_selector`` に ``body.c-body`` を
+    推奨した。全ページに常時ある枠なので、待機が常に即座に成功し、一覧が描画
+    される前に0件と読む -- 原則2の静かなゼロ件そのものである。
+
+    原因は述語だった。「結果ページと0件ページの **両方に存在する**」を候補の条件に
+    すると、画面の枠がすべて合格する (実測で278トークン)。順位付けをどう直しても、
+    先頭の枠を落とせば次の枠が繰り上がるだけだった。
+
+    削除した3つの関数が戻ってくれば、その日から同じ推奨が復活する。**動いてしまう
+    種類の退行なので、レビューではなく機械で止める。** 置き換え先は
+    ``recon/list_structure.py`` にある。
+    """
+    banned = {
+        "list_ready_candidates": "「両ページに存在する」を候補の条件にしていた関数",
+        "rows_that_vanish_on_empty_results": "行を「最多出現」で選んでいた関数",
+        "class_frequency": "木を持たずに tag.class を数えていた関数",
+        "wait_for_more_clickables": "総数しか見ず、隠れたドロワーを検知できなかった関数",
+    }
+    hits = [
+        f"{name} ({why})"
+        for name, why in banned.items()
+        if _offenders(re.compile(rf"\bdef {name}\b"), allowed=set())
+    ]
+
+    assert not hits, (
+        "2026-08-13 に削除した関数が復活しています。これらは `body.c-body` のような"
+        "『常に真になる目印』を推奨する原因そのものです。\n"
+        "recon/list_structure.py の述語 (行側 XOR 0件側) を使ってください:\n  " + "\n  ".join(hits)
+    )

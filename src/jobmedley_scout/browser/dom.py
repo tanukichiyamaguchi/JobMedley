@@ -45,6 +45,7 @@ _CLICKABLE_SCRIPT = """
     : [],
   text: (el.innerText || el.textContent || '').trim(),
   ariaLabel: el.getAttribute('aria-label') || '',
+  visible: el.getClientRects().length > 0,
 }))
 """
 
@@ -67,6 +68,11 @@ class Clickable:
     #: (未観測ではなく「無かった」) -- 座標のUNRESOLVEDとは違う話なので、
     #: ここは Coord 型を使わない。
     aria_label: str = ""
+    #: ``getClientRects().length > 0``。ドロワーが「最初からDOMに在って隠れている」
+    #: 作りだと、開いても ``a, button`` の **総数** が増えない。可視性まで見ないと
+    #: 「開かなかった」と「開いたが数が変わらなかった」を取り違える。
+    #: 既定 ``True`` は未観測の意味ではなく、可視性を取らない呼び出し側との互換。
+    visible: bool = True
 
 
 def wait_for_interactive(page: Any, timeout_ms: int) -> bool:
@@ -121,21 +127,35 @@ def wait_for_structure_to_settle(page: Any, timeout_ms: int) -> bool:
 
 
 #: ドロワー/モーダルが開いたことの手掛かり。何が増えるかは媒体依存で分からないので、
-#: 汎用の目印 (a, button) の **個数の増加** という形でしか問えない。
-_MORE_CLICKABLES_SCRIPT = """
-(before) => document.querySelectorAll('a, button').length > before
+#: 汎用の目印 (a, button) の変化という形でしか問えない。
+#:
+#: **総数と可視数の両方を見る。** 総数だけだと、ドロワーが最初からDOMに在って
+#: 隠れているだけの作りで永久に増えない。可視数だけだと、遅延生成の作りで
+#: 生成直後のまだ描画されていない一瞬を取り逃す。どちらの作りかは観測していないので、
+#: 断定せずに両方を1つの述語で待つ (待機は1回、満了も1回)。
+_NEW_CLICKABLES_SCRIPT = """
+(arg) => {
+  const all = Array.from(document.querySelectorAll('a, button'));
+  const visible = all.filter((el) => el.getClientRects().length > 0).length;
+  return all.length > arg.total || visible > arg.visible;
+}
 """
 
 
-def wait_for_more_clickables(page: Any, before_count: int, timeout_ms: int) -> bool:
-    """Wait until the number of clickable elements exceeds ``before_count``.
+def wait_for_new_clickables(
+    page: Any, *, before_total: int, before_visible: int, timeout_ms: int
+) -> bool:
+    """Wait until clickable elements appear, or become visible, beyond the given counts.
 
-    候補者ドロワー/モーダルが開いたことを検知する。何のセレクタが増えるかは
-    媒体依存で分からないので、汎用の目印の個数という形でしか問えない (5.3 と同じ理屈:
-    待つのは「通信の静止」ではなく「要素の変化」)。
+    候補者ドロワー/モーダルが開いたことを検知する (5.3 と同じ理屈: 待つのは
+    「通信の静止」ではなく「要素の変化」)。
     """
     try:
-        page.wait_for_function(_MORE_CLICKABLES_SCRIPT, arg=before_count, timeout=timeout_ms)
+        page.wait_for_function(
+            _NEW_CLICKABLES_SCRIPT,
+            arg={"total": before_total, "visible": before_visible},
+            timeout=timeout_ms,
+        )
     except Exception:
         return False
     return True
@@ -180,6 +200,7 @@ def clickables(page: Any) -> tuple[Clickable, ...]:
                     # **ここで1行に潰す。** 以降どこへ埋め込まれても改行は出ない。
                     text=one_line(str(item.get("text") or "")),
                     aria_label=one_line(str(item.get("ariaLabel") or "")),
+                    visible=bool(item.get("visible", True)),
                 )
             )
         except AttributeError:  # pragma: no cover - defensive
@@ -228,45 +249,103 @@ def select_fields(page: Any) -> tuple[SelectField, ...]:
     return tuple(found)
 
 
-#: class属性を持つ全要素の tag/class を取り出す。段階2の ``nav.list_ready_selector``
-#: 探索 (行 vs コンテナの見分け) で使う。**文言は取らない** -- 個人データを含みうる
-#: 画面を無差別に数えるので、ここでは構造だけを見る (13.2)。
-_CLASSED_SCRIPT = """
-() => Array.from(document.querySelectorAll('[class]')).map((el) => ({
-  tag: el.tagName.toLowerCase(),
-  classes: typeof el.className === 'string'
-    ? el.className.split(/\\s+/).filter(Boolean)
-    : [],
-}))
+#: 木の節点数の上限。超えたら **値を出さない**。前順で切ると末尾の行が欠け、
+#: 行が欠けたまま共通祖先を計算しかねない -- 「一部しか見ていない」ことに
+#: 気づけない形の誤りになる。
+DOM_TREE_NODE_CAP = 60_000
+
+#: 要素の木を1往復で取る。前順 (pre-order) DFS で採番するのが要点である。
+#: 前順だと節点 ``i`` の子孫がちょうど添字区間 ``[i, i+size[i])`` を占めるので、
+#: 以降の包含判定が整数比較2回で済み、**判定を純粋関数へ追い出せる** (13.4)。
+#: **文言・id・href・属性値は取らない** (13.2)。この走査は指定された画面を
+#: 無差別に読むので、構造以外を持ち出さない。
+_DOM_TREE_SCRIPT = """
+(cap) => {
+  const out = [];
+  let truncated = false;
+  let shadow = 0;
+  const stack = [[document.documentElement, -1]];
+  while (stack.length) {
+    const entry = stack.pop();
+    const el = entry[0], parent = entry[1];
+    const i = out.length;
+    if (el.shadowRoot) shadow += 1;
+    out.push({
+      tag: el.tagName.toLowerCase(),
+      classes: typeof el.className === 'string'
+        ? el.className.split(/\\s+/).filter(Boolean)
+        : [],
+      parent: parent,
+    });
+    if (out.length >= cap) { truncated = true; break; }
+    const kids = el.children;
+    for (let k = kids.length - 1; k >= 0; k--) stack.push([kids[k], i]);
+  }
+  return { truncated: truncated, shadowRoots: shadow, nodes: out };
+}
 """
 
 
 @dataclass(frozen=True)
-class ClassedElement:
-    """One element with a ``class`` attribute. No text -- see :data:`_CLASSED_SCRIPT`."""
+class DomNode:
+    """One element. ``parent`` is an index into :attr:`DomTree.nodes` (root is ``-1``)."""
 
     tag: str
     class_names: tuple[str, ...]
+    parent: int
 
 
-def classed_elements(page: Any) -> tuple[ClassedElement, ...]:
-    """Every classed element on the page, read in a single round trip."""
+@dataclass(frozen=True)
+class DomTree:
+    """The element tree as plain data, in pre-order."""
+
+    nodes: tuple[DomNode, ...]
+    truncated: bool
+    #: 影DOMを持つ要素の数。**中は走査できない。** 見えなかったことを数として残す --
+    #: 「一覧が影DOMの中にあって空に見えた」を運用者が切り分けられるように。
+    shadow_root_count: int
+
+
+def dom_tree(page: Any, *, cap: int = DOM_TREE_NODE_CAP) -> DomTree | None:
+    """Read the whole element tree in a single round trip, or ``None``.
+
+    **``None`` は「読めなかった」であって「空だった」ではない。** この区別が
+    このモジュールの存在理由そのものである。読めなかったのを「何も無かった」と
+    読むと、いま塞ごうとしている静かなゼロ件 (原則2) を新しい経路で再生産する。
+    呼び出し側は ``None`` を必ず UNRESOLVED へ落とすこと。
+
+    前順採番の前提 (``0 <= parent < i``) はここで自己検査する。破れていたら
+    以降の包含判定が全部嘘になるので、**黙って先へ進まず ``None`` を返す**。
+    """
     try:
-        raw = page.evaluate(_CLASSED_SCRIPT)
+        raw = page.evaluate(_DOM_TREE_SCRIPT, cap)
     except Exception:
-        return ()
-    found: list[ClassedElement] = []
-    for item in raw or ():
+        return None
+    if not isinstance(raw, dict):
+        return None
+    items = raw.get("nodes") or ()
+    nodes: list[DomNode] = []
+    for index, item in enumerate(items):
         try:
-            found.append(
-                ClassedElement(
-                    tag=one_line(str(item.get("tag", ""))),
-                    class_names=tuple(one_line(str(name)) for name in item.get("classes") or ()),
-                )
-            )
-        except AttributeError:  # pragma: no cover - defensive
-            continue
-    return tuple(found)
+            parent = int(item.get("parent", -1))
+            tag = one_line(str(item.get("tag", "")))
+            classes = tuple(one_line(str(name)) for name in item.get("classes") or ())
+        except (AttributeError, TypeError, ValueError):
+            return None
+        # 前順採番の自己検査。根だけが -1、それ以外は必ず自分より小さい添字を指す。
+        if index == 0:
+            if parent != -1:
+                return None
+        elif not 0 <= parent < index:
+            return None
+        nodes.append(DomNode(tag=tag, class_names=classes, parent=parent))
+    if not nodes:
+        return None
+    return DomTree(
+        nodes=tuple(nodes),
+        truncated=bool(raw.get("truncated")),
+        shadow_root_count=int(raw.get("shadowRoots") or 0),
+    )
 
 
 def login_form_visible(page: Any, timeout_ms: int) -> bool:
