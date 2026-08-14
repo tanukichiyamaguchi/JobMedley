@@ -416,3 +416,76 @@ def test_navigation_is_reported_as_navigation_not_as_a_missing_drawer() -> None:
 
     assert "別画面へ遷移" in report
     assert "この座標は不要かもしれません" in report
+
+
+# --- 実測2回目 (capture-open) が暴いた2つの欠陥 --------------------------------
+
+
+def test_a_card_nested_inside_another_repeat_is_still_found(monkeypatch) -> None:
+    """**実測2回目の失敗。** 一覧は正しく描画され、座標での確認も通ったのに、
+    行が「取れない」と言われた。
+
+    原因は繰り返し構造の解析を経由していたこと。``row_group_candidates`` は
+    極大性の規則で「外側の繰り返しに含まれる群」を落とすので、カードが別の
+    繰り返し構造 (行を包む枠など) の内側にあると消える -- 実測2回目
+    (observe-list) で行が ``div.c-segment`` に化けたのと同じ規則である。
+
+    **座標が確定しているのだから、推定を経由せず直接指す。**
+    """
+    # カードが「繰り返す枠」の内側にある形。極大性ならカードが落ちる。
+    tree = _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("div", ("result-table__body",), 0),  # 1
+        ("div", ("row-wrap",), 1),  # 2  <- 繰り返す枠 (外側)
+        ("div", ("c-search-member-card",), 2),  # 3  <- 本当の行
+        ("button", ("c-button",), 3),  # 4
+        ("div", ("row-wrap",), 1),  # 5
+        ("div", ("c-search-member-card",), 5),  # 6
+        ("button", ("c-button",), 6),  # 7
+    )
+    from jobmedley_scout.recon.list_structure import (
+        indices_with_token,
+        row_group_candidates,
+        subtree_sizes,
+    )
+
+    # 旧実装が使っていた経路では、カードの群は極大性で落ちる。
+    groups = row_group_candidates(tree, subtree_sizes(tree), [])
+    assert all(g.token != "div.c-search-member-card" for g in groups)
+
+    # 座標のトークンで直接指せば取れる。
+    assert indices_with_token(tree, "div.c-search-member-card") == (3, 6)
+
+
+def test_a_run_that_could_not_take_rows_says_so_not_that_arming_failed() -> None:
+    """**報告の嘘を塞ぐ。** 実測2回目は「遮断を武装できなかったため」と印字したが、
+    武装はそもそも行を取った後に行われる。本当の理由は行を取れなかったことで、
+    それは補足行にしか出ていなかった。
+
+    検査は時系列の順に並べる -- 武装の検査を先に置くと、その前で止まった実行に
+    誤った理由が付く。
+    """
+    report = OpenObservation(
+        requested_url=URL,
+        list_rendered=True,
+        rows_found=False,
+        gate_armed=False,  # 武装まで到達していないので False のまま
+        note="行 div.c-search-member-card は画面に在りましたが、木からは取れませんでした。",
+    ).render()
+
+    assert "候補者の行を取れなかったため" in report
+    assert "遮断を武装できなかった" not in report
+    assert "木からは取れませんでした" in report
+
+
+def test_a_run_that_really_failed_to_arm_still_says_arming_failed() -> None:
+    """順序を入れ替えても、武装の失敗そのものは正しく報告される。"""
+    report = OpenObservation(
+        requested_url=URL,
+        list_rendered=True,
+        rows_found=True,
+        gate_armed=False,
+        note="武装の確認に失敗しました。",
+    ).render()
+
+    assert "遮断を武装できなかった" in report
