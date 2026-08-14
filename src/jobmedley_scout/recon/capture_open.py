@@ -38,7 +38,7 @@ from jobmedley_scout.browser.dom import (
     wait_for_interactive,
     wait_for_structure_to_settle,
 )
-from jobmedley_scout.browser.navigation import goto
+from jobmedley_scout.browser.navigation import goto, marker_present
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN, Coord, require
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.capture_send import install_gate
@@ -90,6 +90,8 @@ class AttemptResult:
     close_candidates: tuple[str, ...] = ()
     #: 閉じる操作を試して、開いた領域が実際に消えたか。None は試していない。
     close_verified: bool | None = None
+    #: この押下がドロワーではなく **別画面への遷移** だったか。
+    navigated: bool = False
 
     @property
     def opened(self) -> bool:
@@ -105,6 +107,10 @@ class OpenObservation:
     session_present: bool = True
     session_expired: bool = False
     tree_read: bool = True
+    #: 一覧が実際に描画されたか (確定済みの nav.list_ready_selector で確認)。
+    #: **False なら押す対象が存在しない画面である。** 実測1回目はここを確かめずに
+    #: 進み、描画に失敗した画面のヘッダ (サイトのロゴ) を押した。
+    list_rendered: bool = False
     rows_found: bool = False
     #: 武装が実際に効いていたか。**False なら値を1つも出さない** (後述)。
     gate_armed: bool = False
@@ -139,6 +145,13 @@ class OpenObservation:
             lines.append("  **セッションが効いていません。** 一覧URLにパスワード欄がありました。")
             lines.append(f"  到達URL: {self.landed_url or '(記録なし)'}")
             return "\n".join(lines)
+        if not self.list_rendered:
+            # **描画されていない画面で押さない** (実測1回目の失敗)。武装したまま
+            # 遷移すると一覧のデータ読み込みごと止まり、押す対象が存在しなくなる。
+            lines.append("  **一覧が描画されなかったため、ボタンを1つも押していません。**")
+            lines.append(f"  {self.note or '理由は記録されていません。'}")
+            lines.append(f"  到達URL: {self.landed_url or '(記録なし)'}")
+            return "\n".join(lines)
         if not self.gate_armed:
             # **武装できなかったら何も押していない。** 押していないなら報告する
             # 観測は無い。ここを「値なし」で済ませると、押していないのに押した
@@ -159,6 +172,9 @@ class OpenObservation:
             mark = " (クラス名がスカウト送信を名乗る部品)" if attempt.looks_like_send else ""
             state = "押せました" if attempt.clicked else "押せませんでした"
             lines.append(f"    - {attempt.selector} の {attempt.nth} 番目: {state}{mark}")
+            if attempt.navigated:
+                lines.append(f"        **別画面へ遷移しました** (到達URL: {self.landed_url})")
+                lines.append("        ここで探索を打ち切りました (知らない画面を押し進めない)。")
             if attempt.gained:
                 shown = ", ".join(attempt.gained[:6])
                 lines.append(f"        増えた構造 ({len(attempt.gained)}種): {shown}")
@@ -191,9 +207,11 @@ class OpenObservation:
             out.append(f"  nav.drawer_close_selectors: {UNRESOLVED_TOKEN}")
             if any(a.opened for a in self.attempts):
                 out.append("    # ドロワーは開きましたが、閉じる操作の効果を確認できませんでした。")
+            elif any(a.navigated for a in self.attempts):
+                out.append("    # ドロワーではなく **別画面へ遷移** する作りでした。")
+                out.append("    # 詳細が別画面で開くなら、この座標は不要かもしれません。")
             else:
                 out.append("    # どのボタンでもドロワーは開きませんでした。")
-                out.append("    # 別画面へ遷移する作りの可能性があります (到達URLを確認)。")
 
         sends = rank_send_candidates(self.all_blocked())
         with_sentinel = [entry for entry in sends if entry.carried_sentinel]
@@ -258,10 +276,19 @@ def explore_card_actions(
     **この関数は武装を行わない。** 武装は呼び出し側がループの外で済ませてある
     という前提で書かれている -- ここで武装/解除を扱うと、解除中に押す経路が
     生まれる。前提が崩れていないことは呼び出し側が ``gate.is_armed`` で確かめる。
+
+    **押した後に再遷移しない** (実測1回目の失敗から)。再遷移には一覧データの
+    読み込みが要るが、武装中は非GETが全て止まるので画面が戻らない。戻らない画面で
+    次を押せば、押しているのは別物である。代わりに:
+
+    * 開いた領域は、その中の閉じるボタンで閉じてから次へ進む
+    * URLが変わったら (別画面へ遷移する作りだった) **そこで打ち切る**。武装した
+      まま知らない画面を押し進めない
     """
     sizes = subtree_sizes(tree)
     candidates = card_action_candidates(tree, sizes, row_index)
     results: list[AttemptResult] = []
+    url_before_all = page.url
 
     for candidate in candidates[:max_attempts]:
         selector = candidate.selector()
@@ -279,10 +306,11 @@ def explore_card_actions(
         gained = opened_region(before, after)
         lost = vanished_region(before, after)
         blocked = _drain(gate, sentinel)
+        navigated = page.url != url_before_all
 
         closes: tuple[str, ...] = ()
         verified: bool | None = None
-        if gained and after_tree is not None:
+        if gained and after_tree is not None and not navigated:
             closes = close_candidates_in(after_tree, subtree_sizes(after_tree), gained)
             if closes:
                 verified = _try_close(page, closes, gained, config)
@@ -298,16 +326,21 @@ def explore_card_actions(
                 blocked=blocked,
                 close_candidates=closes,
                 close_verified=verified,
+                navigated=navigated,
             )
         )
-        # 次の1押しを独立させる。**再遷移で画面を戻す** -- 前の押下が残した状態の
-        # 上に重ねると、増えた構造がどちらの押下によるものか分からなくなる。
-        goto(page, list_url, config)
-        wait_for_interactive(page, config.selector_timeout_ms)
-        _dismiss_tour(page, config.selector_timeout_ms)
-        _close_landing_modals(page, config.selector_timeout_ms)
-        wait_for_structure_to_settle(page, config.selector_timeout_ms)
-        _drain(gate, sentinel)  # 再遷移中の非GETは観測対象ではない
+        if navigated:
+            # 別画面へ移ってしまった。武装したまま知らない画面を押し進めない。
+            break
+        if gained and verified is not True:
+            # 開いたものを閉じられていない。次を押すと、増えた構造がどちらの押下に
+            # よるものか分からなくなる。**Escape だけ試して、駄目なら打ち切る。**
+            with suppress(Exception):
+                page.keyboard.press("Escape")
+            wait_for_structure_to_settle(page, config.selector_timeout_ms)
+            still = _counts(page)
+            if any(still.get(token, 0) > 0 for token in gained):
+                break
     return tuple(results)
 
 
@@ -353,13 +386,35 @@ def capture_open(
     config: BrowserConfig,
     credentials_dir: Path,
     candidate_list_url: Coord[str],
+    list_ready_selector: Coord[str],
     *,
     run_id: str = "recon",
 ) -> tuple[OpenObservation, DomTree | None]:
-    """Explore one card's controls with the send gate armed the whole time."""
+    """Explore one card's controls, arming the gate once the list has rendered.
+
+    **武装の位置がこのコマンドの設計そのものである。**
+
+    最初の実装は「何よりも先に武装する」だった。安全側ではあるが **画面が
+    描画されない** -- 一覧のデータ読み込みは非GETで、それも遮断されるからである。
+    実測1回目はカードが1枚も出ず、「繰り返し構造」がヘッダの要素になり、
+    サイトのロゴを押した。送信は起きなかったが、観測としては無意味だった。
+
+    いまの順序:
+
+    1. 遮断は仕掛けるが **武装しない** ままページを開き、一覧が描画されるのを
+       ``nav.list_ready_selector`` (確定済みの座標) で確かめる
+    2. 行を **その座標の行トークンで** 選ぶ。「最も繰り返している構造」ではない --
+       描画に失敗した画面ではヘッダが勝つ
+    3. **押す直前に武装し**、探索の間ずっと武装したままにする
+    4. ``finally`` で必ず解除する
+
+    1と2が無いと、押す対象が「カードの中のボタン」である保証が消える。
+    """
     from jobmedley_scout.recon.sentinel import make_sentinel
 
     requested_url = require(candidate_list_url, used_by="recon.capture_open.capture_open")
+    ready_selector = require(list_ready_selector, used_by="recon.capture_open.capture_open")
+    row_token = ready_selector.split(",")[0].strip()
     sentinel = make_sentinel(run_id)
 
     session = session_store.session_path(credentials_dir)
@@ -368,28 +423,16 @@ def capture_open(
 
     gate = SendGate()
     with browser_context(config, storage_state=session) as (_context, page):
-        # **何よりも先に武装する。** 遷移や描画で走る非GETごと止まるが、それでよい --
-        # このコマンドの目的は観測であって、媒体側の状態を進めることではない。
+        # 遮断は仕掛けるが、**まだ武装しない**。武装したまま遷移すると一覧の
+        # データ読み込み (非GET) まで止まり、押す対象が存在しない画面になる。
         install_gate(page, gate)
-        gate.arm()
         try:
-            if not gate.is_armed:
-                return (
-                    OpenObservation(
-                        requested_url=requested_url,
-                        gate_armed=False,
-                        note="武装の確認に失敗しました。",
-                    ),
-                    None,
-                )
-
             goto(page, requested_url, config)
             wait_for_interactive(page, config.selector_timeout_ms)
             if login_form_visible(page, config.selector_timeout_ms):
                 return (
                     OpenObservation(
                         requested_url=requested_url,
-                        gate_armed=True,
                         session_expired=True,
                         landed_url=page.url,
                     ),
@@ -399,32 +442,64 @@ def capture_open(
             _dismiss_tour(page, config.selector_timeout_ms)
             _close_landing_modals(page, config.selector_timeout_ms)
             wait_for_structure_to_settle(page, config.selector_timeout_ms)
-            _drain(gate, sentinel)  # ここまでの非GETは観測対象ではない
+
+            # **一覧が本当に描画されたことを、確定済みの座標で確かめる。**
+            # ここを確かめずに進むと、描画に失敗した画面のヘッダを押す。
+            if not marker_present(page, row_token, timeout_ms=config.selector_timeout_ms):
+                return (
+                    OpenObservation(
+                        requested_url=requested_url,
+                        landed_url=page.url,
+                        list_rendered=False,
+                        note=f"一覧の行 ({row_token}) が現れませんでした。",
+                    ),
+                    dom_tree(page),
+                )
 
             tree = dom_tree(page)
             if tree is None or tree.truncated:
                 return (
                     OpenObservation(
                         requested_url=requested_url,
-                        gate_armed=True,
                         tree_read=False,
+                        list_rendered=True,
                         landed_url=page.url,
                     ),
                     tree,
                 )
 
             sizes = subtree_sizes(tree)
-            rows = row_group_candidates(tree, sizes, [])
+            # **行は座標の行トークンで選ぶ。** 「最も繰り返している構造」ではない。
+            rows = [
+                group for group in row_group_candidates(tree, sizes, []) if group.token == row_token
+            ]
             if not rows:
                 return (
                     OpenObservation(
                         requested_url=requested_url,
-                        gate_armed=True,
                         landed_url=page.url,
+                        list_rendered=True,
                         rows_found=False,
+                        note=f"行トークン {row_token} の繰り返し群を木から取れませんでした。",
                     ),
                     tree,
                 )
+
+            # **ここで武装する。押す直前であり、探索の間ずっと武装したままにする。**
+            gate.arm()
+            if not gate.is_armed:
+                return (
+                    OpenObservation(
+                        requested_url=requested_url,
+                        landed_url=page.url,
+                        list_rendered=True,
+                        rows_found=True,
+                        gate_armed=False,
+                        note="武装の確認に失敗しました。",
+                    ),
+                    tree,
+                )
+            _drain(gate, sentinel)  # 武装前の記録は無い。念のため空にしておく。
 
             attempts = explore_card_actions(
                 page,
@@ -439,6 +514,7 @@ def capture_open(
                 requested_url=requested_url,
                 landed_url=page.url,
                 gate_armed=True,
+                list_rendered=True,
                 rows_found=True,
                 attempts=attempts,
             )
