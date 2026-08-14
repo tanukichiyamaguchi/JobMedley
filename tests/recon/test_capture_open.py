@@ -12,10 +12,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from jobmedley_scout.browser.dom import DomNode, DomTree
 from jobmedley_scout.recon.capture_open import (
     AttemptResult,
     OpenObservation,
+    StopStage,
     explore_card_actions,
 )
 from jobmedley_scout.recon.gate import GateDecision, SendGate
@@ -266,6 +269,7 @@ def test_only_close_controls_whose_effect_was_observed_become_the_value() -> Non
     observed = OpenObservation(
         requested_url=URL,
         gate_armed=True,
+        tree_read=True,
         list_rendered=True,
         rows_found=True,
         attempts=(verified, unverified),
@@ -282,7 +286,12 @@ def test_a_drawer_that_never_opened_is_reported_as_unresolved() -> None:
         selector="button.c-button", nth=0, looks_like_send=False, clicked=True, gained=()
     )
     report = OpenObservation(
-        requested_url=URL, gate_armed=True, list_rendered=True, rows_found=True, attempts=(attempt,)
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
     ).render()
 
     assert "nav.drawer_close_selectors: UNRESOLVED" in report
@@ -304,7 +313,12 @@ def test_the_send_url_comes_from_the_request_that_carried_the_sentinel() -> None
         ),
     )
     report = OpenObservation(
-        requested_url=URL, gate_armed=True, list_rendered=True, rows_found=True, attempts=(attempt,)
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
     ).render()
 
     assert 'api.send.paid.url_pattern: "https://customers.job-medley.com/api/scouts"' in report
@@ -327,7 +341,12 @@ def test_printed_urls_hide_member_ids() -> None:
         ),
     )
     report = OpenObservation(
-        requested_url=URL, gate_armed=True, list_rendered=True, rows_found=True, attempts=(attempt,)
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
     ).render()
 
     assert "48211" not in report
@@ -408,6 +427,7 @@ def test_navigation_is_reported_as_navigation_not_as_a_missing_drawer() -> None:
     report = OpenObservation(
         requested_url=URL,
         gate_armed=True,
+        tree_read=True,
         list_rendered=True,
         rows_found=True,
         landed_url="https://customers.job-medley.com/customers/members/1",
@@ -467,6 +487,7 @@ def test_a_run_that_could_not_take_rows_says_so_not_that_arming_failed() -> None
     """
     report = OpenObservation(
         requested_url=URL,
+        tree_read=True,
         list_rendered=True,
         rows_found=False,
         gate_armed=False,  # 武装まで到達していないので False のまま
@@ -482,6 +503,7 @@ def test_a_run_that_really_failed_to_arm_still_says_arming_failed() -> None:
     """順序を入れ替えても、武装の失敗そのものは正しく報告される。"""
     report = OpenObservation(
         requested_url=URL,
+        tree_read=True,
         list_rendered=True,
         rows_found=True,
         gate_armed=False,
@@ -489,3 +511,91 @@ def test_a_run_that_really_failed_to_arm_still_says_arming_failed() -> None:
     ).render()
 
     assert "遮断を武装できなかった" in report
+
+
+# --- 反嘘の構造保証 (実測2回目の再発防止) --------------------------------------
+#
+# 「報告が事実と違う」を実測4回目・7回目・capture-open 2回目と繰り返した。
+# 共通の原因は、報告が独立したブール値を手で並べた順に検査していたこと。
+# いまは到達地点を1つの値 (reached) に集約し、報告はそれだけを見る。
+# ここでその集約が嘘をつけないことを固定する。
+
+
+def _stopped_at(stage: StopStage) -> OpenObservation:
+    """ちょうど ``stage`` で止まった、単調性を保った観測を作る。"""
+    flags = {
+        StopStage.NO_SESSION: {"session_present": False},
+        StopStage.SESSION_EXPIRED: {"session_expired": True},
+        StopStage.NOT_RENDERED: {"list_rendered": False},
+        StopStage.TREE_UNREAD: {"list_rendered": True, "tree_read": False},
+        StopStage.NO_ROWS: {"list_rendered": True, "tree_read": True, "rows_found": False},
+        StopStage.ARM_FAILED: {
+            "list_rendered": True,
+            "tree_read": True,
+            "rows_found": True,
+            "gate_armed": False,
+        },
+        StopStage.EXPLORED: {
+            "list_rendered": True,
+            "tree_read": True,
+            "rows_found": True,
+            "gate_armed": True,
+        },
+    }[stage]
+    return OpenObservation(requested_url=URL, **flags)  # type: ignore[arg-type]
+
+
+def test_each_stage_reports_itself_and_no_later_stage() -> None:
+    """**各停止地点は、自分の理由だけを出し、後の工程の失敗を語らない。**
+
+    実測2回目は「行を取れなかった」実行が「武装できなかった」と言った。ここで
+    全停止地点について、その理由が主文に出て、かつ **後の工程の理由が出ない**
+    ことを固定する。
+    """
+    # 各停止地点の主文に必ず出る語 (その工程を指す) と、出てはいけない語。
+    signature = {
+        StopStage.NO_SESSION: "保存セッションがありません",
+        StopStage.SESSION_EXPIRED: "セッションが効いていません",
+        StopStage.NOT_RENDERED: "一覧が描画されなかった",
+        StopStage.TREE_UNREAD: "DOMの木を読めませんでした",
+        StopStage.NO_ROWS: "候補者の行を取れなかった",
+        StopStage.ARM_FAILED: "遮断を武装できなかった",
+    }
+    for stage, phrase in signature.items():
+        observed = _stopped_at(stage)
+        assert observed.reached() is stage
+        report = observed.render()
+        assert phrase in report, f"{stage.value} の主文が出ていない"
+        # 後の工程の理由が混ざっていないこと。
+        for later_stage, later_phrase in signature.items():
+            if list(signature).index(later_stage) > list(signature).index(stage):
+                assert (
+                    later_phrase not in report
+                ), f"{stage.value} で止まったのに {later_stage.value} の理由が出ている"
+
+
+def test_the_row_stall_never_blames_arming() -> None:
+    """実測2回目そのもの: 行で止まった実行は武装を理由にしない。"""
+    report = _stopped_at(StopStage.NO_ROWS).render()
+    assert "候補者の行を取れなかった" in report
+    assert "武装できなかった" not in report
+
+
+def test_an_inconsistent_state_refuses_to_render_a_lie() -> None:
+    """**単調性を破る状態は嘘なので、報告せず例外にする** (握り潰さない)。
+
+    行を取れていない (rows_found=False) のに武装済み (gate_armed=True) を主張する
+    状態は、実行のどこかがブール値を事実と違えて立てている。この状態から
+    「もっともらしい報告」を出すと必ず嘘になる。
+    """
+    liar = OpenObservation(
+        requested_url=URL,
+        list_rendered=True,
+        tree_read=True,
+        rows_found=False,  # 行は取れていない
+        gate_armed=True,  # なのに武装済みを主張 = 事実と矛盾
+    )
+    with pytest.raises(ValueError, match="時系列と矛盾"):
+        liar.reached()
+    with pytest.raises(ValueError, match="時系列と矛盾"):
+        liar.render()
