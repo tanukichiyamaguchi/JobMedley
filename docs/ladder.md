@@ -327,18 +327,17 @@ scout preflight
 あわせて `nav.*` / `context.*` 座標を埋める。マイページ・候補者一覧のURLは段階1の
 観測時に確定済み。残る座標も、**開発者ツールで1つずつ読む必要はない。**
 
-> **2026-08-14 時点の進捗**: `observe-list` 5回の実測で `context.selection_required`
-> / `context.selector` / `nav.list_ready_selector` は記入済み。残りは
-> `nav.drawer_close_selectors` 1個のみ。5回目で、カードのクリックを遮っていたのは
-> **ツアー案内のオーバーレイ** (`a.c-tour-guide__overlay`) と確定した (覆い要素の
-> 直接観測)。次の `observe-list` はツアーを自分で閉じてから押す (`_dismiss_tour`:
-> 閉じる/スキップの文言を持つツアー領域内の部品のみ。scout を class に含む要素は
-> 押さない)。**6回目の実行がこの座標を確定させる見込み。**
+> **2026-08-14 時点の進捗**: `observe-list` 6回の実測で `context.selection_required`
+> / `context.selector` / `nav.list_ready_selector` は確定済み (6回目はライブの報告も
+> 記入済みの座標と整合する値を出した -- 5回目で入れた解析修正が実データで機能)。
+> 残りは `nav.drawer_close_selectors` 1個のみ。6回目のスナップショットで、ツアーの
+> 吹き出しには **汎用ボタン1つだけ** (「閉じる/スキップ」の部品は無い) と確定 --
+> 「次へ」型のツアーで、文言ヒントでは構造的に閉じられなかった。次の
+> `observe-list` は3段の梯子で閉じる (文言ヒント → 吹き出しの最後のボタンを
+> 押し続けて最後まで進める (上限10回) → 背景クリック1回。いずれも
+> div.c-tour-guide の中だけ・scout を class に含む要素は押さない)。
+> **7回目の実行がこの座標を確定させる見込み。**
 > 段階3 (`capture-send`) はドロワーの開き方が分かってから配線する。
->
-> なお5回目は、遅れてマウントされるツアーUIを0件表示として推奨する解析欠陥も
-> 露呈させた (実害なし・修正済み。docs/incidents.md 参照)。5回目の出力の
-> `nav.list_ready_selector` の値は貼ってはいけない -- 記入済みの値が正しい。
 
 **Actions → Recon (manual) → Run workflow → `observe-list`**
 

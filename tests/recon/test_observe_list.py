@@ -27,6 +27,7 @@ from jobmedley_scout.recon.observe_list import (
     STAGE_2_KEYS,
     ObservedList,
     ZeroPage,
+    _dismiss_tour,
     newly_visible_clickables,
     select_selector_candidates,
     selection_redirected,
@@ -605,3 +606,109 @@ def test_a_verified_row_still_gets_the_template() -> None:
 
     assert "0件検索で消えることを確認済み" in report
     assert "div.c-search-member-card, <0件表示のセレクタ>" in report
+
+
+# --- _dismiss_tour: 「次へ」型ツアーの梯子 -----------------------------------------
+
+
+class _FakeElement:
+    def __init__(self, page: _FakePage, class_attr: str, text: str, advances: bool) -> None:
+        self._page = page
+        self._class = class_attr
+        self._text = text
+        self._advances = advances
+        self.clicks = 0
+
+    def get_attribute(self, name: str) -> str:
+        return self._class if name == "class" else ""
+
+    def inner_text(self) -> str:
+        return self._text
+
+    def click(self, timeout: int = 0) -> None:
+        self.clicks += 1
+        if self._advances and self._page.steps > 0:
+            self._page.steps -= 1
+
+
+class _FakeLocator:
+    def __init__(self, elements: list[_FakeElement]) -> None:
+        self._elements = elements
+
+    def count(self) -> int:
+        return len(self._elements)
+
+    def nth(self, index: int) -> _FakeElement:
+        return self._elements[index]
+
+    @property
+    def first(self) -> _FakeElement:
+        return self._elements[0]
+
+
+class _FakePage:
+    """実測6回目の構造の縮約: 吹き出しに汎用ボタン1つ + 背景オーバーレイ。"""
+
+    def __init__(self, steps: int, tooltip_buttons: list[_FakeElement] | None = None) -> None:
+        self.steps = steps
+        self.overlay = _FakeElement(self, "c-tour-guide__overlay", "", advances=False)
+        self.next_button = _FakeElement(self, "c-button", "次へ", advances=True)
+        self._tooltip_buttons = (
+            tooltip_buttons if tooltip_buttons is not None else [self.next_button]
+        )
+
+    def locator(self, selector: str) -> _FakeLocator:
+        if self.steps <= 0:
+            return _FakeLocator([])
+        if selector == "div.c-tour-guide div.c-tour-guide__tooltip button":
+            return _FakeLocator(list(self._tooltip_buttons))
+        if selector == "a.c-tour-guide__overlay":
+            return _FakeLocator([self.overlay])
+        if selector == "div.c-tour-guide":
+            return _FakeLocator([self.overlay])  # 個数だけ見るので中身は何でもよい
+        if selector == "div.c-tour-guide a, div.c-tour-guide button":
+            return _FakeLocator([self.overlay, *self._tooltip_buttons])
+        return _FakeLocator([])
+
+    def wait_for_function(self, script: str, arg: object = None, timeout: int = 0) -> None:
+        if self.steps > 0:
+            raise TimeoutError("tour still present")
+
+
+def test_a_next_style_tour_is_advanced_to_the_end() -> None:
+    """実測6回目: 吹き出しには「閉じる/スキップ」が無く、汎用ボタン1つだけ。
+    文言ヒントでは閉じられない構造なので、最後まで進めて終わらせる。"""
+    page = _FakePage(steps=3)
+
+    assert _dismiss_tour(page, timeout_ms=100) is True
+    assert page.steps == 0
+    assert page.next_button.clicks == 3
+
+
+def test_the_scout_anchored_button_is_never_pressed_even_as_the_last_button() -> None:
+    """ツアーはスカウトボタンに係留される。吹き出し内に scout クラスの実体が
+    入り込んでも、文言や位置に関係なく押さない (13.6)。"""
+    page = _FakePage(steps=1)
+    scout = _FakeElement(page, "js-tour-guide-scout-button", "スカウトを送る", advances=False)
+    page._tooltip_buttons = [page.next_button, scout]  # scout が「最後のボタン」
+
+    assert _dismiss_tour(page, timeout_ms=100) is True
+    assert scout.clicks == 0
+    assert page.next_button.clicks == 1
+
+
+def test_a_tour_that_never_ends_terminates_and_reports_failure() -> None:
+    """押しても消えないツアーで無限ループしない。上限で切り上げ、失敗を返す
+    (報告側は tour_dismiss_failed として印字する)。"""
+    page = _FakePage(steps=99)
+    page.next_button._advances = False  # 押しても進まない
+
+    assert _dismiss_tour(page, timeout_ms=100) is False
+    assert page.next_button.clicks <= 10
+    assert page.overlay.clicks == 1  # 最後に背景を1度だけ試す
+
+
+def test_no_tour_present_returns_none() -> None:
+    page = _FakePage(steps=0)
+
+    assert _dismiss_tour(page, timeout_ms=100) is None
