@@ -264,7 +264,11 @@ def test_only_close_controls_whose_effect_was_observed_become_the_value() -> Non
         close_verified=False,
     )
     observed = OpenObservation(
-        requested_url=URL, gate_armed=True, rows_found=True, attempts=(verified, unverified)
+        requested_url=URL,
+        gate_armed=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(verified, unverified),
     )
 
     assert observed.confirmed_close_selectors() == ("a.c-side-cover__close-btn",)
@@ -278,7 +282,7 @@ def test_a_drawer_that_never_opened_is_reported_as_unresolved() -> None:
         selector="button.c-button", nth=0, looks_like_send=False, clicked=True, gained=()
     )
     report = OpenObservation(
-        requested_url=URL, gate_armed=True, rows_found=True, attempts=(attempt,)
+        requested_url=URL, gate_armed=True, list_rendered=True, rows_found=True, attempts=(attempt,)
     ).render()
 
     assert "nav.drawer_close_selectors: UNRESOLVED" in report
@@ -300,7 +304,7 @@ def test_the_send_url_comes_from_the_request_that_carried_the_sentinel() -> None
         ),
     )
     report = OpenObservation(
-        requested_url=URL, gate_armed=True, rows_found=True, attempts=(attempt,)
+        requested_url=URL, gate_armed=True, list_rendered=True, rows_found=True, attempts=(attempt,)
     ).render()
 
     assert 'api.send.paid.url_pattern: "https://customers.job-medley.com/api/scouts"' in report
@@ -323,8 +327,92 @@ def test_printed_urls_hide_member_ids() -> None:
         ),
     )
     report = OpenObservation(
-        requested_url=URL, gate_armed=True, rows_found=True, attempts=(attempt,)
+        requested_url=URL, gate_armed=True, list_rendered=True, rows_found=True, attempts=(attempt,)
     ).render()
 
     assert "48211" not in report
     assert "/customers/members/{id}/scouts" in report
+
+
+# --- 実測1回目 (capture-open) が暴いた2つの欠陥 --------------------------------
+
+
+def test_a_run_where_the_list_never_rendered_presses_nothing() -> None:
+    """**実測1回目の失敗。** 遷移の前に武装したせいで一覧のデータ読み込み (非GET)
+    まで止まり、カードが1枚も描画されなかった。それでも探索は進み、
+    「最も繰り返している構造」としてヘッダを選び、**サイトのロゴを押した**。
+
+    送信は起きなかった (遮断が効いていた) が、観測としては無意味である。
+    描画を確かめる前に押さない。
+    """
+    report = OpenObservation(
+        requested_url=URL,
+        list_rendered=False,
+        note="一覧の行 (div.c-search-member-card) が現れませんでした。",
+        landed_url=URL,
+    ).render()
+
+    assert "ボタンを1つも押していません" in report
+    assert "一覧が描画されなかった" in report
+    assert "div.c-search-member-card" in report
+
+
+def test_a_press_that_navigates_away_stops_the_exploration(monkeypatch) -> None:
+    """別画面へ遷移したら打ち切る。**武装したまま知らない画面を押し進めない。**
+
+    再遷移で戻すこともできない -- 武装中は一覧のデータ読み込みが止まるので、
+    戻った先には押す対象が無い (それが実測1回目の失敗そのものだった)。
+    """
+    tree = _card_page_tree()
+    gate = SendGate()
+    page = _FakePage(gate, tree)
+    _install(monkeypatch, page, tree)
+    # 1押し目でURLが変わる作りにする。
+    original = _FakeLocatorHandle.click
+
+    def _click_then_navigate(self, timeout: int = 0) -> None:
+        original(self, timeout)
+        type(self._page).url = "https://customers.job-medley.com/customers/members/1"
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click_then_navigate)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=tree,
+            row_index=1,
+            sentinel="S",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+        type(page).url = URL  # 他のテストへ漏らさない
+
+    assert len(results) == 1  # 2つ目は押していない
+    assert results[0].navigated is True
+
+
+def test_navigation_is_reported_as_navigation_not_as_a_missing_drawer() -> None:
+    """「開かなかった」と「別画面へ移った」は別の事実である (原則3)。"""
+    attempt = AttemptResult(
+        selector="button.c-button",
+        nth=0,
+        looks_like_send=False,
+        clicked=True,
+        gained=(),
+        navigated=True,
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        list_rendered=True,
+        rows_found=True,
+        landed_url="https://customers.job-medley.com/customers/members/1",
+        attempts=(attempt,),
+    ).render()
+
+    assert "別画面へ遷移" in report
+    assert "この座標は不要かもしれません" in report

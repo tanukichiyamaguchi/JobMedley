@@ -272,6 +272,7 @@ def _dispatch_recon(
             config.browser,
             config.paths.credentials_dir,
             coordinates.url("nav.candidate_list_url"),
+            coordinates.selector("nav.list_ready_selector"),
         )
         print(opened.render())
         if tree is not None:
