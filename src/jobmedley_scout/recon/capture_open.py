@@ -44,7 +44,7 @@ from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.capture_send import install_gate
 from jobmedley_scout.recon.gate import SendGate
 from jobmedley_scout.recon.list_structure import (
-    row_group_candidates,
+    indices_with_token,
     stable_tokens,
     subtree_sizes,
     token_counts,
@@ -152,19 +152,23 @@ class OpenObservation:
             lines.append(f"  {self.note or '理由は記録されていません。'}")
             lines.append(f"  到達URL: {self.landed_url or '(記録なし)'}")
             return "\n".join(lines)
+        # **時系列の順に検査する。** 武装は最後に起きるので、武装の検査を先に置くと、
+        # その前で止まった実行に「武装できなかった」という **誤った理由** を出す。
+        # capture-open の実測2回目の報告が正にそれで、本当の理由 (行を取れなかった)
+        # は補足行にしか出ていなかった。
+        if not self.tree_read:
+            lines.append("  DOMの木を読めませんでした (要素が無かったのではありません)。")
+            return "\n".join(lines)
+        if not self.rows_found:
+            lines.append("  **候補者の行を取れなかったため、ボタンを1つも押していません。**")
+            lines.append(f"  {self.note or '理由は記録されていません。'}")
+            return "\n".join(lines)
         if not self.gate_armed:
             # **武装できなかったら何も押していない。** 押していないなら報告する
             # 観測は無い。ここを「値なし」で済ませると、押していないのに押した
             # 前提の報告になる。
             lines.append("  **遮断を武装できなかったため、ボタンを1つも押していません。**")
             lines.append(f"  {self.note or '理由は記録されていません。'}")
-            return "\n".join(lines)
-        if not self.tree_read:
-            lines.append("  DOMの木を読めませんでした (要素が無かったのではありません)。")
-            return "\n".join(lines)
-        if not self.rows_found:
-            lines.append("  候補者の行を特定できませんでした。")
-            lines.append("  座標 nav.list_ready_selector を確認してください。")
             return "\n".join(lines)
 
         lines.append(f"  押した候補: {len(self.attempts)} 個")
@@ -468,11 +472,13 @@ def capture_open(
                     tree,
                 )
 
-            sizes = subtree_sizes(tree)
-            # **行は座標の行トークンで選ぶ。** 「最も繰り返している構造」ではない。
-            rows = [
-                group for group in row_group_candidates(tree, sizes, []) if group.token == row_token
-            ]
+            # **行は座標の行トークンを持つ節点そのもの。** 繰り返し構造の解析
+            # (row_group_candidates) を経由してはいけない -- あれは極大性の規則で
+            # 「外側の繰り返しに含まれる群」を落とすので、カードが別の繰り返し
+            # 構造の内側にあると消える (実測2回目で行が div.c-segment に化けた
+            # のと同じ規則)。capture-open の実測2回目はこれで行を取り逃した。
+            # 座標が確定しているのだから、推定を経由せず直接指す。
+            rows = indices_with_token(tree, row_token)
             if not rows:
                 return (
                     OpenObservation(
@@ -480,7 +486,10 @@ def capture_open(
                         landed_url=page.url,
                         list_rendered=True,
                         rows_found=False,
-                        note=f"行トークン {row_token} の繰り返し群を木から取れませんでした。",
+                        note=(
+                            f"行 {row_token} は画面に在りましたが、"
+                            "読んだDOMの木からは取れませんでした。"
+                        ),
                     ),
                     tree,
                 )
@@ -504,7 +513,7 @@ def capture_open(
             attempts = explore_card_actions(
                 page,
                 tree=tree,
-                row_index=rows[0].members[0],
+                row_index=rows[0],
                 sentinel=sentinel,
                 gate=gate,
                 config=config,
