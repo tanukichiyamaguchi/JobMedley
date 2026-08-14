@@ -20,6 +20,7 @@ on:
           - verify-session
           - observe-login
           - observe-list
+          - capture-open
           - preflight
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
@@ -99,6 +100,10 @@ jobs:
       # nav.drawer_close_selectors) を観測する。候補者の行を実際に1件開く
       # (ドロワーの閉じ方を観測するため) が、出力は要素の構造のみで
       # **画面の文言は出さない** (13.2、observe-login と同じ形)。
+      - name: Capture open (gate armed)
+        if: inputs.command == 'capture-open'
+        run: scout recon capture-open
+
       - name: Observe list
         if: inputs.command == 'observe-list'
         run: scout recon observe-list

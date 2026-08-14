@@ -73,6 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # こちらは機械判定なので既定はヘッドレスでよい。目で見たいときだけ開く。
     verify.add_argument("--headful", action="store_true", help="画面を開いて目視でも確認する")
     recon_sub.add_parser("capture-send", help="送信を中断しつつ内部APIを特定")
+    recon_sub.add_parser(
+        "capture-open", help="送信遮断を武装した状態でカードのボタンを押し、ドロワーと送信路を観測"
+    )
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
     recon_sub.add_parser("inbox", help="受信箱の構造を観測")
 
@@ -184,6 +187,7 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "observe-list": "recon-observe-list",
     "replay-list": "recon-replay",
     "capture-send": "recon-capture-send",
+    "capture-open": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
 }
@@ -256,6 +260,34 @@ def _dispatch_recon(
         print("**再生 (replay)**: 保存された構造から再計算しました。媒体へは接続していません。")
         print()
         print(observed.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "capture-open":
+        from jobmedley_scout.recon.capture_open import capture_open
+        from jobmedley_scout.recon.snapshot import encode_block
+
+        # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
+        _restore_session_from_secrets(config)
+        opened, tree = capture_open(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
+        )
+        print(opened.render())
+        if tree is not None:
+            from jobmedley_scout.recon.snapshot import ListCapture, save_capture
+
+            capture = ListCapture(
+                requested_url=opened.requested_url,
+                landed_url=opened.landed_url,
+                results=tree,
+                zeros=(),
+            )
+            path = save_capture(capture, config.paths.recon_dump_dir)
+            print()
+            print(f"--- 構造スナップショット ---\n読んだDOM構造を保存しました: {path}")
+            print("内容はタグ名・クラス名・親子関係のみです (13.2)。")
+            _ = encode_block
         return int(ExitCode.OK)
 
     if args.recon_command == "verify-session":
