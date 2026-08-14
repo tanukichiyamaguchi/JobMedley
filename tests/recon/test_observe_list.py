@@ -453,6 +453,23 @@ def test_a_click_that_never_completed_is_not_reported_as_pressed() -> None:
     assert "実画面で一度案内を閉じてから再実行" in report
 
 
+def test_a_failed_dismissal_of_the_tour_is_reported() -> None:
+    """閉じを試みて失敗した事実は、遅延マウントの形でも必ず印字される。
+
+    反証レビューで、2回目の閉じ試行の失敗 (False) が捨てられ、この診断行が
+    「それが書かれた当のシナリオで一度も印字されない」ことが確認された。
+    """
+    report = _found(
+        drawer_attempted=True,
+        drawer_click_locator=("div.c-search-member-card__main-content", 0),
+        drawer_click_failed=True,
+        drawer_covering=("a.c-tour-guide__overlay", "div.c-tour-guide"),
+        tour_dismiss_failed=True,
+    ).render()
+
+    assert "閉じられませんでした" in report
+
+
 def test_a_failed_click_without_covering_evidence_stays_honest() -> None:
     """遮り要素を読めなかったときに「遮り無し」と断定しない。"""
     report = _found(

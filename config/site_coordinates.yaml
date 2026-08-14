@@ -103,12 +103,12 @@ nav.list_ready_selector: "div.c-search-member-card, div.c-not-found--searches"
 # 2026-08-13 観測 (4回目) の記録: 結果ページのDOMに閉じ操作の器が実在する --
 #   div.c-side-cover (u-is-hidden で待機) の中に a.c-side-cover__close-btn
 #   複数の div.c-modal (js-modal) の中に a.c-modal__closer
-# 4回目の報告は「押したが新出要素なし」だったが、スナップショット解剖で
-# **クリック自体が完了していなかった** と判明 (ツアー案内 div.c-tour-guide__tooltip
-# と div.c-overlay が結果ページに常駐しており、遮った可能性が高い)。
-# つまりドロワーが開くかどうかはまだ一度も観測できていない。推測で埋めない (原則3)。
-# 次の observe-list (Escape で案内を閉じる試み + 遮り要素の特定 + 2枚目再試行を
-# 実装済み) で開閉を確認してから記入する。
+# 2026-08-14 観測 (5回目) で、クリックを遮っていたのはツアー案内
+# (a.c-tour-guide__overlay) と確定した (覆い要素の直接観測)。ドロワーが開くか
+# どうかはまだ一度も観測できていない。推測で埋めない (原則3)。
+# 次の observe-list はツアーを自分で閉じてから押す (閉じる/スキップの文言を持つ
+# ツアー領域内の部品のみ。scout を class に含む要素は押さない)。それでも
+# 開けなければ、遮り要素と失敗の瞬間の構造が報告に出る。
 nav.drawer_close_selectors: UNRESOLVED
 
 # ========================================================================

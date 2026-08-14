@@ -33,11 +33,13 @@ from jobmedley_scout.recon.list_structure import (
     ready_values,
     repeated_child_groups,
     row_group_candidates,
+    rows_present_union,
     safe_click_index,
     stable_tokens,
     subtree_sizes,
     token_counts,
     transient_tokens,
+    vanished_tokens,
     zero_page_finished,
 )
 
@@ -687,10 +689,71 @@ def test_transients_are_derived_from_observation_not_vocabulary() -> None:
     """
     navigations = [
         # ローダーは剥がれた。0件表示は遷移直後から居て、残った。
-        ({"div.c-loader-view": 1, "div.c-not-found": 1}, {"div.c-not-found": 1}),
+        ({"div.c-loader-view": 1, "div.c-not-found": 1}, {"div.c-not-found": 1}, None),
     ]
 
     assert transient_tokens(navigations) == frozenset({"div.c-loader-view"})
+
+
+def test_the_previous_pages_residue_is_not_evidence_of_a_transient() -> None:
+    """**実測5回目の形。** SPA遷移では前ページの内容が遷移直後の1枚に写り込み、
+    新しいページの描画で「消える」。pagination 変種の遷移直後の1枚には age 変種の
+    0件表示 (div.c-not-found) が残像として写っていた。素朴な定義だとそれが
+    一時要素として学ばれ、後続の遷移で本物の0件表示の消滅を待って満了する。
+
+    直前ページの settled に在ったトークンの消滅は「前のページが消えた」であって
+    「ローダーが剥がれた」ではない。
+    """
+    age_settled = {"div.c-not-found": 1, "body.c-body": 1}
+    navigations = [
+        # pagination 変種: 遷移直後 = age の残像 + ローダー。落ち着くと結果一覧。
+        (
+            {"div.c-not-found": 1, "div.c-loader-view": 1, "body.c-body": 1},
+            {"div.card": 25, "body.c-body": 1},
+            age_settled,
+        ),
+    ]
+
+    transients = transient_tokens(navigations)
+
+    assert "div.c-loader-view" in transients  # 本物のローダーは学ぶ
+    assert "div.c-not-found" not in transients  # 残像は学ばない
+
+
+def test_vanished_tokens_keep_the_residue_for_candidate_exclusion() -> None:
+    """候補除外用の語彙 (vanished_tokens) は残像も含む -- **見える失敗側に倒す。**
+
+    残像 (前ページの0件表示) と、前ページから残留したままのローダーは、件数の
+    列からは区別できないことがある。候補除外で残像を免除すると、settled に
+    ローダーが残った0件ページ + 差し戻しの組で「最後の防壁」からローダーが
+    抜ける (反証レビューが毒の経路を実際に再現した)。
+    """
+    age_settled = {"div.c-loader-view": 1, "body.c-body": 1}  # ローダー残留のまま
+    navigations = [
+        (
+            {"div.c-loader-view": 1, "body.c-body": 1},
+            {"div.card": 25, "body.c-body": 1},
+            age_settled,  # 直前 settled にも居る -- transient_tokens なら免除される
+        ),
+    ]
+
+    assert "div.c-loader-view" not in transient_tokens(navigations)
+    assert "div.c-loader-view" in vanished_tokens(navigations)
+
+
+def test_residue_shedding_does_not_unlock_the_liberal_exclusion_regime() -> None:
+    """残像が消えただけのページで、保守的な除外が解除されないこと。
+
+    解除されると、遷移直後から居座る骨組みが0件表示の候補に残る。
+    """
+    prev_settled = {"div.card": 2}
+    early = {"div.card": 2, "div.c-loading": 1}  # 前ページの残像 + 骨組み
+    settled = {"div.c-loading": 1, "div.c-search-empty": 1}  # 残像だけ消えた
+
+    excluded = empty_exclusions(early, settled, frozenset(), prev_settled)
+
+    assert "div.c-loading" in excluded  # 保守体制のまま = 骨組みは除外
+    assert "div.c-search-empty" not in excluded
 
 
 def test_a_thin_early_snapshot_borrows_the_other_navigations_vocabulary() -> None:
@@ -702,8 +765,8 @@ def test_a_thin_early_snapshot_borrows_the_other_navigations_vocabulary() -> Non
     見抜ける。
     """
     navigations = [
-        ({"div.c-loader-view": 1}, {"div.no-hit": 1}),  # age: 消滅を観測
-        ({}, {"div.c-loader-view": 1, "div.no-hit": 1}),  # pagination: 薄い1枚
+        ({"div.c-loader-view": 1}, {"div.no-hit": 1}, None),  # age: 消滅を観測
+        ({}, {"div.c-loader-view": 1, "div.no-hit": 1}, None),  # pagination: 薄い1枚
     ]
     transients = transient_tokens(navigations)
 
@@ -719,3 +782,42 @@ def test_no_early_snapshot_means_no_marker() -> None:
     finished = [{"body.c-body": 1, "div.c-search-conditions": 1}]
 
     assert post_load_markers(tree, rc, [], finished) == ()
+
+
+def test_rows_present_union_only_absorbs_pages_that_show_rows() -> None:
+    """行が見えているページだけを結果側に合流させる。
+
+    遷移途中の1枚には本物の0件表示が写っていることがある (実測5回目の
+    pagination 変種の直後の1枚)。行の見えないページまで合流させると、
+    本物まで「結果側に在る」ことにされて殺される。
+    """
+    primary = {"div.card": 25, "body.c-body": 1}
+    with_rows_and_tour = {"div.card": 25, "div.c-tour-guide": 1}  # クリック後の木
+    no_rows_with_empty = {"div.c-not-found": 1}  # 遷移途中の1枚
+
+    union = rows_present_union("div.card", primary, [with_rows_and_tour, no_rows_with_empty])
+
+    assert union["div.c-tour-guide"] == 1  # 遅延マウントの要素は結果側に合流
+    assert union.get("div.c-not-found", 0) == 0  # 行の見えないページは合流しない
+
+
+def test_the_empty_side_absence_is_checked_against_the_union() -> None:
+    """0件側の「結果ページに不在」は合流後の件数で判定する (実測5回目の穴)。"""
+    rows = (RowGroup(token="div.card", parent=1, members=(2, 3), subtree_total=2),)
+    empties = (
+        EmptyCandidate(
+            token="div.c-tour-guide", depth_from_anchor=1, counts_zero=(1,), scope="page"
+        ),
+        EmptyCandidate(
+            token="div.c-not-found", depth_from_anchor=1, counts_zero=(1,), scope="page"
+        ),
+    )
+    rc = {"div.card": 2}
+    zc = {"div.c-tour-guide": 1, "div.c-not-found": 1}
+    union = {"div.card": 2, "div.c-tour-guide": 1}  # クリック後の木にツアーが写った
+
+    without_union = ready_values(rows, empties, rc, [zc])
+    with_union = ready_values(rows, empties, rc, [zc], union)
+
+    assert without_union[0].empty_token == "div.c-tour-guide"  # 穴があると騙される
+    assert [v.empty_token for v in with_union] == ["div.c-not-found"]
