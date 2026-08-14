@@ -452,3 +452,105 @@ def test_a_zero_display_prerendered_at_the_early_snapshot_still_pairs() -> None:
     # ローダーは値にも別案にも出ない (消えたことが観測された一時要素)。
     assert all("c-loader" not in v.empty_token for v in observed.ready)
     _assert_no_frame_in_values(observed)
+
+
+def test_a_late_mounting_overlay_cannot_masquerade_as_the_empty_state() -> None:
+    """**実測5回目の形。** ツアー案内 (div.c-tour-guide) は結果ページの撮影時には
+    まだマウントされておらず、0件ページの撮影時には在った。settled 2枚のXORを
+    完璧に満たし、0件表示として **推奨されてしまった** -- 実際には数秒後の
+    結果ページにも出る (クリック後の木に行と同居して写っていた)。
+
+    行が1枚でも見えている観測ページ (クリック後の木・差し戻された0件ページ) を
+    全部「結果側」に合流させることで塞ぐ。本物の0件表示 (c-not-found) が値になる。
+    """
+    tour = ("div", ("c-tour-guide",), 0)
+    zero_display = ("div", ("c-not-found", "c-not-found--searches"), 3)
+    zero_frame: list[tuple[str, tuple[str, ...], int]] = [
+        ("body", ("c-body",), -1),
+        ("div", ("c-segment",), 0),
+        ("p", ("c-filter-text",), 1),
+        ("div", ("c-segment",), 0),
+    ]
+    results = _results_page()  # 撮影時: ツアー未マウント
+    age_settled = _tree(*zero_frame, zero_display, tour)  # 0件表示とツアーが同居
+    # クリック後の結果ページ: 行とツアーが同居 = ツアーは0件表示ではない証拠
+    after_click = _tree(
+        *[(n.tag, n.class_names, n.parent) for n in results.nodes],
+        ("div", ("c-tour-guide",), 0),
+    )
+
+    observed = analyze_candidate_list(
+        ListCapture(
+            requested_url=URL,
+            landed_url=URL,
+            results=results,
+            zeros=(_zero("age", age_settled),),
+            after_click=after_click,
+        )
+    )
+
+    assert observed.ready
+    assert observed.ready[0].empty_token in ("div.c-not-found", "div.c-not-found--searches")
+    emitted = [v.empty_token for v in observed.ready] + [v.row_token for v in observed.ready]
+    assert all("tour" not in token for token in emitted)
+
+
+def test_a_bounced_zero_page_joins_the_results_side_evidence() -> None:
+    """差し戻されて一覧が出たままの0件ページは「使えない」だけでなく、
+    行と同居している要素の **結果側の証拠** としては使える。そこにだけ写った
+    遅延マウント要素が、もう一方の0件ページで0件表示を名乗るのを防ぐ。"""
+    tour = ("div", ("c-tour-guide",), 0)
+    zero_display = ("div", ("c-not-found",), 3)
+    zero_frame: list[tuple[str, tuple[str, ...], int]] = [
+        ("body", ("c-body",), -1),
+        ("div", ("c-segment",), 0),
+        ("p", ("c-filter-text",), 1),
+        ("div", ("c-segment",), 0),
+    ]
+    age_settled = _tree(*zero_frame, zero_display, tour)
+    base = _results_page(cards=2, scouted_at=frozenset())
+    bounced = _tree(
+        *[(n.tag, n.class_names, n.parent) for n in base.nodes],
+        ("div", ("c-tour-guide",), 0),
+    )
+
+    observed = _analyze(_results_page(), _zero("age", age_settled), _zero("pagination", bounced))
+
+    assert observed.ready
+    assert observed.ready[0].empty_token == "div.c-not-found"
+    assert all("tour" not in v.empty_token for v in observed.ready)
+
+
+def test_a_lingering_loader_on_the_zero_page_never_becomes_the_empty_state() -> None:
+    """**反証レビューが再現した毒の経路。** age 変種の settled にローダーが残った
+    まま撮影され (カードは消えているので使用可能)、骨組み片は剥がれたので除外は
+    liberal 体制。次の pagination 遷移でローダーの消滅が観測されるが、直前 settled
+    (=ローダー残留の age settled) に居るため、残像ガード付きの語彙では免除される。
+    pagination 自体は差し戻しで使えない -- ページ間の突き合わせも働かない。
+
+    候補除外に残像ガード **無し** の語彙 (vanished_tokens) を使うことで、
+    ローダーが「最後の防壁」を抜けて値になる経路を塞ぐ。UNRESOLVED は許容する
+    (見える失敗)。ローダー入りの値は許容しない (静かなゼロ件)。
+    """
+    loader = ("div", ("c-loader-view",), 0)
+    splash = ("div", ("c-splash",), 0)  # 剥がれる骨組み片 (liberal 体制の鍵)
+    zero_frame: list[tuple[str, tuple[str, ...], int]] = [
+        ("body", ("c-body",), -1),
+        ("div", ("c-segment",), 0),
+        ("p", ("c-filter-text",), 1),
+        ("div", ("c-segment",), 0),
+    ]
+    age_early = _tree(*zero_frame, loader, splash)
+    age_settled = _tree(*zero_frame, loader)  # ローダーは残留、splash は剥がれた
+    base = _results_page(cards=2, scouted_at=frozenset())
+    pagination_early = _tree(*zero_frame, loader)  # age の続きに見える1枚
+    pagination_settled = _tree(*[(n.tag, n.class_names, n.parent) for n in base.nodes])
+
+    observed = _analyze(
+        _results_page(),
+        _zero("age", age_settled, age_early),
+        _zero("pagination", pagination_settled, pagination_early),
+    )
+
+    emitted = [v.empty_token for v in observed.ready] + [v.row_token for v in observed.ready]
+    assert all("loader" not in token for token in emitted)

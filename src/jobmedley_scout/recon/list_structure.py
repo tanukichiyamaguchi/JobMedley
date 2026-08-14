@@ -314,14 +314,15 @@ class EmptyCandidate:
 def empty_exclusions(
     early_counts: Mapping[str, int],
     settled_counts: Mapping[str, int],
-    transients: frozenset[str],
+    vanished: frozenset[str],
+    previous_settled_counts: Mapping[str, int] | None = None,
 ) -> frozenset[str]:
     """What one zero page must not adopt as its empty state. **Pure.**
 
     2つの体制がある。**どちらを使うかはこのページ自身の観測が決める。**
 
     * このページの遷移内で「消えた」を観測できた (ローダーが実際に剥がれた) --
-      除外は観測済みの一時要素だけでよい。遷移直後から在っても、剥がれた後に
+      除外は消滅を観測済みの語彙だけでよい。遷移直後から在っても、剥がれた後に
       残っているものは最終的な0件描画の一部である。実測4回目: 0件表示
       (``div.c-not-found--searches``) は遷移直後の1枚に写り終わっていた。
       「early に在る」を理由に捨てると、実在する専用要素が UNRESOLVED になる。
@@ -331,17 +332,26 @@ def empty_exclusions(
       完璧に満たすので、これが無いと0件表示として採用され、本番では行より
       先に現れて ``wait_for_selector`` が描画前に成功する (原則2)。
 
-    観測済みの一時要素は **どちらの体制でも** 除外する。0件ページが1枚しか
-    使えない実行では、ページ間の突き合わせ (すべての0件ページに在るものだけを
-    残す) が働かないので、他の遷移で消滅を観測済みのローダーがこのページに
-    残っていたら、ここが最後の防壁になる。
+    ``vanished`` は :func:`vanished_tokens` (残像ガード **無し** の消滅語彙) を渡す。
+    **どちらの体制でも除外する。** 0件ページが1枚しか使えない実行では、ページ間の
+    突き合わせ (すべての0件ページに在るものだけを残す) が働かないので、他の遷移で
+    消滅を観測済みのローダーがこのページに残っていたら、ここが最後の防壁になる。
+    残像ガード付きの語彙 (:func:`transient_tokens`) をここに使うと、settled に
+    ローダーが残った0件ページ + 差し戻しの組み合わせで防壁からローダーが抜ける
+    (反証レビューが毒の経路を実際に再現した)。
+
+    「剥がれた」の判定 (shed) には残像ガードを掛ける -- 直前ページの残像 (SPA遷移
+    では前ページの内容が遷移直後の1枚に写り込む) が消えたことは、このページが
+    chrome を剥がした証拠にならない。
     """
+    residue = previous_settled_counts or {}
     shed = any(
-        count > 0 and settled_counts.get(token, 0) == 0 for token, count in early_counts.items()
+        count > 0 and settled_counts.get(token, 0) == 0 and residue.get(token, 0) == 0
+        for token, count in early_counts.items()
     )
     if shed:
-        return transients
-    return transients | frozenset(token for token, count in early_counts.items() if count > 0)
+        return vanished
+    return vanished | frozenset(token for token, count in early_counts.items() if count > 0)
 
 
 def empty_state_candidates(
@@ -447,10 +457,12 @@ def click_locator(tree: DomTree, target: int) -> tuple[str, int] | None:
 
 
 def transient_tokens(
-    navigations: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
+    navigations: Sequence[tuple[Mapping[str, int], Mapping[str, int], Mapping[str, int] | None]],
 ) -> frozenset[str]:
     """Tokens observed to vanish within a navigation: present right after arrival,
     gone from the same navigation's settled tree. **Pure.**
+
+    各要素は ``(遷移直後, 落ち着いた後, 直前ページの落ち着いた後 | None)``。
 
     以前の定義は「遷移直後に在り、結果ページに無い」だった。実測4回目でそれが
     **0件表示そのもの** (``div.c-not-found--searches``) を一時要素と誤分類した --
@@ -462,9 +474,48 @@ def transient_tokens(
     和集合を取るのは、遷移直後の1枚が薄すぎて (アプリ起動前の骨組み26節点しか
     写らず) 自分の遷移からは語彙を導けないことがあるため -- 実測の pagination
     変種がそうだった。
+
+    **直前ページの残像は消滅の証拠にしない** (第3要素のガード)。SPA の遷移では
+    前のページの内容が遷移直後の1枚に写り込み、新しいページの描画で「消える」。
+    実測5回目: pagination 変種の遷移直後の1枚には age 変種の0件表示が残留して
+    おり、ガード無しだと ``div.c-not-found`` が一時要素として学ばれ、後続の遷移で
+    **本物の0件表示の消滅を待って満了する** ことになる。この語彙の用途は完了判定
+    (:func:`zero_page_finished`) とライブの待機である。0件表示候補の除外には
+    残像ガードの無い :func:`vanished_tokens` を使うこと -- 用途で倒す方向が違う。
     """
     found: set[str] = set()
-    for early, settled in navigations:
+    for early, settled, previous_settled in navigations:
+        residue = previous_settled or {}
+        for token, count in early.items():
+            if count > 0 and settled.get(token, 0) == 0 and residue.get(token, 0) == 0:
+                found.add(token)
+    return frozenset(found)
+
+
+def vanished_tokens(
+    navigations: Sequence[tuple[Mapping[str, int], Mapping[str, int], Mapping[str, int] | None]],
+) -> frozenset[str]:
+    """Every token seen vanishing within any navigation, residue included. **Pure.**
+
+    :func:`transient_tokens` との違いは残像ガードの有無だけ。**用途が違う。**
+
+    直前ページの残像 (前ページの0件表示など) と、前ページから残留したままの
+    ローダーは、件数の列からは区別できないことがある。区別できないとき、
+    どちらへ倒すかは用途で決める:
+
+    * **0件表示候補の除外** (この関数): 消えたことが一度でも観測された要素は
+      候補にしない。本物の0件表示が残像として消えた実行では候補ごと消えて
+      UNRESOLVED になるが、それは **見える失敗** で、綺麗な実行1回で回復する。
+      逆に取りこぼすと座標に毒が入り、静かなゼロ件になる (原則2)。反証レビューが
+      実際にその毒の経路を再現した -- settled にローダーが残った0件ページと
+      差し戻しの組み合わせで、残像ガード付きの語彙は「最後の防壁」から
+      ローダーを取りこぼした。
+    * **完了判定・ライブの待機** (:func:`transient_tokens`): 残像を一時要素として
+      学ぶと、後続の遷移で本物の0件表示の消滅を待って満了する。こちらは
+      残像ガード付きの語彙を使う。
+    """
+    found: set[str] = set()
+    for early, settled, _previous_settled in navigations:
         for token, count in early.items():
             if count > 0 and settled.get(token, 0) == 0:
                 found.add(token)
@@ -552,11 +603,41 @@ def _empty_side_holds(
     return results.get(token, 0) == 0 and bool(zeros) and all(z.get(token, 0) >= 1 for z in zeros)
 
 
+def rows_present_union(
+    row_token: str,
+    primary_counts: Mapping[str, int],
+    other_counts_list: Sequence[Mapping[str, int]],
+) -> dict[str, int]:
+    """Union (max) of token counts over every observation that shows rows. **Pure.**
+
+    「0件表示」を名乗る資格は「結果ページに不在」だが、その **結果ページ** を
+    settled 1枚に限ると、撮影後に遅れてマウントされる要素にすり抜けられる。
+    実測5回目: ツアー案内 ``div.c-tour-guide`` は結果ページの撮影時にはまだ無く、
+    0件ページの撮影時には在った -- 2枚のXORを完璧に満たし、0件表示として推奨
+    された。実際には数秒後の結果ページにも出る (クリック後の木で観測)。
+
+    そこで「行 (``row_token``) が1枚でも見えている観測ページ」を全部 **結果側**
+    に合流させる。差し戻されて一覧が出たままの0件ページもここに入る。行が
+    見えていないページ (遷移途中の1枚など) は入れない -- そこには本物の0件表示が
+    写っていることがあり、合流させると本物まで殺す (実測5回目の pagination 変種の
+    遷移直後の1枚が正にそれだった)。
+    """
+    union = dict(primary_counts)
+    for counts in other_counts_list:
+        if counts.get(row_token, 0) < 1:
+            continue
+        for token, count in counts.items():
+            if count > union.get(token, 0):
+                union[token] = count
+    return union
+
+
 def ready_values(
     rows: Sequence[RowGroup],
     empties: Sequence[EmptyCandidate],
     results_counts: Mapping[str, int],
     zero_counts: Sequence[Mapping[str, int]],
+    rows_present_counts: Mapping[str, int] | None = None,
 ) -> tuple[ReadyValue, ...]:
     """The recommended value and up to :data:`MAX_ALTERNATIVES` alternatives.
 
@@ -564,9 +645,14 @@ def ready_values(
     各トークンが行側か0件側かの **どちらか一方だけ** を満たすことを検査する。
     破れていたら値を出さない -- 破れるのはプログラミングエラーなので、握り潰すと
     ``body.c-body`` の再来になる。
+
+    ``rows_present_counts`` -- 0件側の「結果ページに不在」の判定に使う件数
+    (:func:`rows_present_union`)。省略時は ``results_counts``。行側の「結果ページに
+    存在」は常に ``results_counts`` (主観測) で判定する。
     """
     if not rows or not empties:
         return ()
+    absence_counts = results_counts if rows_present_counts is None else rows_present_counts
 
     # **トークンで重複を潰す。** 同じトークンの群が親ごとに複数生き残るので、
     # 素朴に並べると別案3件が全部同じ文字列になり、選択肢を出したつもりで
@@ -584,7 +670,7 @@ def ready_values(
             break
         if not _row_side_holds(value.row_token, results_counts, zero_counts):
             continue
-        if not _empty_side_holds(value.empty_token, results_counts, zero_counts):
+        if not _empty_side_holds(value.empty_token, absence_counts, zero_counts):
             continue
         if value not in kept:
             kept.append(value)

@@ -52,6 +52,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from jobmedley_scout.browser import session_store
@@ -85,11 +86,13 @@ from jobmedley_scout.recon.list_structure import (
     ready_values,
     repeated_child_groups,
     row_group_candidates,
+    rows_present_union,
     safe_click_index,
     stable_tokens,
     subtree_sizes,
     token_counts,
     transient_tokens,
+    vanished_tokens,
     zero_page_finished,
 )
 from jobmedley_scout.recon.manual_login import (
@@ -390,6 +393,8 @@ class ObservedList:
     #: クリック地点 (対象の中心) を覆っていた要素とその祖先の構造トークン。
     #: クリックが遮られたときの一次証拠。文言は含まない (13.2)。
     drawer_covering: tuple[str, ...] = ()
+    #: ツアー案内の閉じ操作を試みたが閉じられなかったか。
+    tour_dismiss_failed: bool = False
     #: クリック後に新しい要素の出現を検知できたか。
     drawer_opened: bool = False
     #: クリックがドロワーではなくページ遷移だったか。
@@ -679,6 +684,12 @@ class ObservedList:
                         "    # ツアー案内らしき要素が画面を覆っています。実画面で一度"
                         "案内を閉じてから再実行すると通る可能性があります。"
                     )
+            if self.tour_dismiss_failed:
+                out.append(
+                    "    # ツアーの閉じる操作を試みましたが、閉じられませんでした"
+                    " (閉じる/スキップの文言を持つ部品が見つからないか、押しても"
+                    "消えませんでした)。"
+                )
             return out
         if self.drawer_url_changed:
             return [
@@ -771,15 +782,24 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
     # に経緯)。結果ページで繰り返していたトークンの集合は、結果ページだけから決まる。
     repeated_tokens = {g.token for g in repeated_child_groups(tree, sizes)}
 
-    # 一時要素の語彙は「同じ遷移の中で消えたことを観測された」ものだけ (経緯は
-    # list_structure.transient_tokens)。結果ページの遷移も語彙の供給源に含める。
-    navigations: list[tuple[Mapping[str, int], Mapping[str, int]]] = []
+    # 消滅語彙は2系統 (経緯と使い分けは list_structure.transient_tokens /
+    # vanished_tokens)。結果ページの遷移も語彙の供給源に含める。第3要素は
+    # **直前ページの settled** -- SPA遷移では前ページの内容が遷移直後の1枚に
+    # 写り込んで「消える」ため、残像の消滅を完了判定の証拠から外す (実測5回目)。
+    navigations: list[tuple[Mapping[str, int], Mapping[str, int], Mapping[str, int] | None]] = []
     if capture.results_early is not None:
-        navigations.append((token_counts(capture.results_early), counts))
+        navigations.append((token_counts(capture.results_early), counts, None))
+    previous_settled: Mapping[str, int] | None = counts  # 0件変種の直前は結果ページ
+    zero_prev: dict[str, Mapping[str, int] | None] = {}
     for z in capture.zeros:
-        if z.early is not None and z.settled is not None:
-            navigations.append((token_counts(z.early), token_counts(z.settled)))
-    transients = transient_tokens(navigations)
+        zero_prev[z.kind] = previous_settled
+        if z.settled is not None:
+            settled_counts = token_counts(z.settled)
+            if z.early is not None:
+                navigations.append((token_counts(z.early), settled_counts, previous_settled))
+            previous_settled = settled_counts
+    transients = transient_tokens(navigations)  # 完了判定用 (残像ガード付き)
+    vanished = vanished_tokens(navigations)  # 0件表示候補の除外用 (ガード無し)
 
     zero_reports: list[tuple[str, bool, str]] = []
     usable_counts: list[Mapping[str, int]] = []
@@ -814,11 +834,25 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
                 DomTreeSnapshot(
                     zero.settled,
                     subtree_sizes(zero.settled),
-                    empty_exclusions(early_counts, zero_counts, transients),
+                    empty_exclusions(early_counts, zero_counts, vanished, zero_prev.get(zero.kind)),
                 )
             )
 
     rows = row_group_candidates(tree, sizes, usable_counts)
+
+    # --- 行が見えている観測ページの和 (0件側の「結果ページに不在」判定用) ------
+    # 実測5回目: ツアー案内 div.c-tour-guide は結果ページの撮影時にはまだ無く、
+    # 0件ページの撮影時には在った。settled 2枚のXORを完璧に満たし、0件表示として
+    # 推奨された -- 実際には数秒後の結果ページにも出る (クリック後の木で観測)。
+    # 「行が1枚でも見えている観測」を全部結果側に合流させて、これを塞ぐ。
+    rows_present = dict(counts)
+    if rows:
+        aux_counts: list[Mapping[str, int]] = []
+        for aux in (capture.results_early, capture.after_click):
+            if aux is not None:
+                aux_counts.append(token_counts(aux))
+        aux_counts.extend(token_counts(z.settled) for z in capture.zeros if z.settled is not None)
+        rows_present = rows_present_union(rows[0].token, counts, aux_counts)
 
     # --- 0件表示 ---------------------------------------------------------------
     empties: tuple[EmptyCandidate, ...] = ()
@@ -832,7 +866,11 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
             rows_outside = region.rows_outside_group
         for snapshot in usable_pages:
             found = empty_state_candidates(
-                snapshot.tree, snapshot.sizes, counts, anchor_token, snapshot.excluded_tokens
+                snapshot.tree,
+                snapshot.sizes,
+                rows_present,
+                anchor_token,
+                snapshot.excluded_tokens,
             )
             if not found:
                 continue
@@ -845,7 +883,7 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
                 keep = {c.token for c in found}
                 empties = tuple(c for c in empties if c.token in keep)
 
-    ready = ready_values(rows, empties, counts, usable_counts)
+    ready = ready_values(rows, empties, counts, usable_counts, rows_present)
 
     # 読み込み後マーカー (ペアが組めない媒体のための控え。recon/list_structure.
     # post_load_markers 参照)。根拠に使う0件ページは **使用可能なものだけ**。
@@ -915,6 +953,50 @@ def _wait_out_transients(
     if not transients:
         return None
     return wait_for_all_detached(page, transients, timeout_ms)
+
+
+#: ツアー案内の「閉じる」系の文言。部分一致で探す (小文字化して比較)。
+TOUR_DISMISS_TEXTS = ("スキップ", "閉じる", "とじる", "終了", "あとで", "後で", "close", "skip")
+#: ツアー案内のUI部品を指すセレクタ (実測5回目の覆い要素から)。
+TOUR_SHELL_SELECTORS = ("a.c-tour-guide__overlay", "div.c-tour-guide")
+
+
+def _dismiss_tour(page: Any, timeout_ms: int) -> bool | None:
+    """Try to close the on-page tour guide. Returns None when no tour is present.
+
+    実測5回目で、ツアー案内 (``div.c-tour-guide``) がカードを覆ってクリックを
+    遮っていたことが確定した (覆い要素の直接観測)。**閉じる操作は外向きの送信では
+    ない** (画面案内のUIをこのアカウントの画面から消すだけ) ので、偵察が自分で
+    押してよい数少ない操作に入る。ただし二重のガードを課す:
+
+    * 押すのはツアー領域の中の a/button だけ。かつ文言が「閉じる/スキップ」系に
+      部分一致するものだけ (文言は読むが印字しない, 13.2)
+    * class に ``scout`` を含む要素は文言に関係なく押さない -- ツアーは
+      スカウトボタンを対象に係留されており (``js-tour-guide-scout-button``)、
+      領域内にボタン実体が入り込む可能性を潰す (13.6)
+
+    見つからなければ押さずに False 側へ倒す (Escape は呼び出し側が送信済み)。
+    """
+    try:
+        if not any(page.locator(s).count() > 0 for s in TOUR_SHELL_SELECTORS):
+            return None
+        candidates = page.locator(
+            "div.c-tour-guide a, div.c-tour-guide button, "
+            "div.c-tour-guide__tooltip a, div.c-tour-guide__tooltip button"
+        )
+        for index in range(min(candidates.count(), 12)):
+            element = candidates.nth(index)
+            class_attr = (element.get_attribute("class") or "").lower()
+            if "scout" in class_attr:
+                continue
+            text = (element.inner_text() or "").strip().lower()
+            if not text or not any(hint in text for hint in TOUR_DISMISS_TEXTS):
+                continue
+            element.click(timeout=timeout_ms)
+            return wait_for_all_detached(page, list(TOUR_SHELL_SELECTORS), timeout_ms)
+        return False
+    except Exception:
+        return False
 
 
 def _covering_tokens(page: object, locator: tuple[str, int]) -> tuple[str, ...]:
@@ -1005,6 +1087,9 @@ def observe_list(
         # 「消えたことを観測済み」のローダー語彙。遷移をまたいで蓄積する --
         # 遷移直後の1枚が薄いページ (起動前の骨組みだけ) では自分の語彙を導けず、
         # 待ち無しで読み込み途中を撮影してしまう (実測4回目の pagination 変種)。
+        # **直前ページの残像の消滅は学ばない** -- SPA遷移では前ページの内容が
+        # 遷移直後の1枚に写り込んで「消える」。それを学ぶと、以後の遷移で本物の
+        # 0件表示の消滅を待って満了する (実測5回目で c-not-found がそうなりかけた)。
         learned: set[str] = set()
         if tree is not None and not tree.truncated:
             reference_counts = token_counts(tree)
@@ -1014,6 +1099,7 @@ def observe_list(
                     for token, count in token_counts(results_early).items()
                     if count > 0 and reference_counts.get(token, 0) == 0
                 }
+            previous_settled_counts: Mapping[str, int] = reference_counts
             for variant in zero_result_variants(requested_url):
                 goto(page, variant.url, config)
                 wait_for_interactive(page, config.selector_timeout_ms)
@@ -1030,13 +1116,20 @@ def observe_list(
                 )
                 wait_for_structure_to_settle(page, config.selector_timeout_ms)
                 settled_tree = dom_tree(page)
-                if early_tree is not None and settled_tree is not None:
+                if settled_tree is not None:
                     settled_counts = token_counts(settled_tree)
-                    learned |= {
-                        token
-                        for token, count in token_counts(early_tree).items()
-                        if count > 0 and settled_counts.get(token, 0) == 0
-                    }
+                    if early_tree is not None:
+                        learned |= {
+                            token
+                            for token, count in token_counts(early_tree).items()
+                            if count > 0
+                            and settled_counts.get(token, 0) == 0
+                            and previous_settled_counts.get(token, 0) == 0
+                        }
+                    # 直前ページは early の有無に依らず更新する。ここを怠ると、
+                    # early を読めなかった変種を挟んだとき残像ガードが古いページと
+                    # 比較して誤る。
+                    previous_settled_counts = settled_counts
                 zeros.append(
                     ZeroCapture(
                         kind=variant.kind,
@@ -1123,50 +1216,67 @@ def observe_list(
                 capture,
             )
 
-        # ツアー案内の吹き出しが画面を覆い、クリックが完了しないことがある
-        # (実測4回目: div.c-tour-guide__tooltip + div.c-overlay が結果ページに常駐)。
-        # Escape はキー入力1つで、外向きの送信を起こさない閉じる試みとして安全。
+        # ツアー案内がカードを覆い、クリックが完了しないことがある (実測5回目:
+        # a.c-tour-guide__overlay が遮っていた)。Escape はキー入力1つで安全な
+        # 閉じる試み。ツアーが居れば専用の閉じ操作も試す (_dismiss_tour)。
         with suppress(Exception):
             page.keyboard.press("Escape")
+        tour_dismissed = _dismiss_tour(page, config.selector_timeout_ms)
 
         before = clickables(page)
         before_visible = sum(1 for c in before if c.visible)
         url_before = page.url
         covering: tuple[str, ...] = ()
-        try:
-            page.locator(locator[0]).nth(locator[1]).click(timeout=config.selector_timeout_ms)
-        except Exception:
+
+        def _try_click(target_locator: tuple[str, int]) -> bool:
+            try:
+                page.locator(target_locator[0]).nth(target_locator[1]).click(
+                    timeout=config.selector_timeout_ms
+                )
+            except Exception:
+                return False
+            return True
+
+        clicked = _try_click(locator)
+        if not clicked:
             # **押せなかった事実を「押したが無反応」にすり替えない** (実測4回目の
             # 報告がこれをやり、診断を誤導した)。何が遮っていたかを DOM から直接
             # 読み、クリック時点の木ごと持ち帰る。
             covering = _covering_tokens(page, locator)
-            retry = _second_row_locator(fresh_tree, fresh_sizes, members[0].members)
-            if retry is None:
-                return (
-                    replace(
-                        observed,
-                        drawer_attempted=True,
-                        drawer_click_locator=locator,
-                        drawer_click_failed=True,
-                        drawer_covering=covering,
-                    ),
-                    replace(capture, after_click=dom_tree(page)),
-                )
+            # ツアーが撮影後に遅れてマウントされることがある (実測5回目)。
+            # 遮られたと分かったこの時点でもう一度閉じを試す。**失敗 (False) も
+            # 捨てずに記録する** -- 捨てると「閉じを試みたが閉じられなかった」が
+            # 報告から消える (反証レビューで確認された欠落)。
+            second_dismiss = _dismiss_tour(page, config.selector_timeout_ms)
+            if second_dismiss is not None:
+                tour_dismissed = second_dismiss
+            if second_dismiss:
+                clicked = _try_click(locator)
+        if not clicked:
             # 吹き出しは1枚目のカードに係留されがちなので、2枚目で1度だけ再試行。
-            try:
-                page.locator(retry[0]).nth(retry[1]).click(timeout=config.selector_timeout_ms)
+            retry = _second_row_locator(fresh_tree, fresh_sizes, members[0].members)
+            if retry is not None and _try_click(retry):
+                clicked = True
                 locator = retry
-            except Exception:
-                return (
-                    replace(
-                        observed,
-                        drawer_attempted=True,
-                        drawer_click_locator=locator,
-                        drawer_click_failed=True,
-                        drawer_covering=covering,
-                    ),
-                    replace(capture, after_click=dom_tree(page)),
-                )
+        if not clicked:
+            # **クリック後の木を加えた最終形で解析をやり直す。** 行が見えている
+            # ページの合流 (rows_present_union) はクリック後の木も証拠に使う。
+            # クリック前の解析のまま報告すると、遅延マウントの要素 (ツアー) を
+            # 0件表示として推奨する欠陥がライブの報告にだけ残る (replay では
+            # 直っているのに)。報告と replay は必ず同じ解析を通す。
+            capture = replace(capture, after_click=dom_tree(page))
+            final, _ = _analyze(capture)
+            return (
+                replace(
+                    final,
+                    drawer_attempted=True,
+                    drawer_click_locator=locator,
+                    drawer_click_failed=True,
+                    drawer_covering=covering,
+                    tour_dismiss_failed=tour_dismissed is False,
+                ),
+                capture,
+            )
 
         opened = wait_for_new_clickables(
             page,
@@ -1176,11 +1286,12 @@ def observe_list(
         )
         after = clickables(page)
         delta = tuple(c for c in newly_visible_clickables(before, after) if c.visible)
-        # クリック後の木も持ち帰る。閉じるボタンの再解析を手元でやり直せるように。
+        # クリック後の木も持ち帰り、最終形で解析をやり直す (上の分岐と同じ理由)。
         capture = replace(capture, after_click=dom_tree(page))
+        final, _ = _analyze(capture)
         return (
             replace(
-                observed,
+                final,
                 landed_url=page.url,
                 drawer_attempted=True,
                 drawer_click_locator=locator,
