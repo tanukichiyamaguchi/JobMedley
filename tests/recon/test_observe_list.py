@@ -203,6 +203,33 @@ def test_a_redirected_zero_page_is_refused() -> None:
     assert "転送" in why
 
 
+def test_a_non_rendered_skeleton_is_refused_even_when_all_repeats_vanished() -> None:
+    """**実測7回目の形。** pagination 変種が26節点の起動前スケルトンのまま撮影された
+    (別URLへ転送された可能性)。繰り返しは全滅するので旧判定は「使える」と誤判定し、
+    正しく0件表示を見つけた age 側を交差で全否定していた。
+
+    「繰り返しが全滅 = 0件」とは限らない -- 描画されていないページも全滅する。
+    サイトの共通要素をほとんど含まないなら、0件を返したのではなく読み込まれて
+    いない。
+    """
+    usable, why = zero_page_is_usable(
+        _zero(vanished_repeated_count=51, remaining_repeated_count=3, chrome_overlap=0.05),
+        REQUESTED,
+    )
+
+    assert usable is False
+    assert "共通要素" in why
+    assert "5%" in why
+
+
+def test_a_rendered_zero_page_with_partial_chrome_loss_is_usable() -> None:
+    """実ページは結果領域ごと消えるので共通要素の一部は失う (実測 age は残存77%)。
+    それでも描画済みなので使える -- 閾値は起動前スケルトンだけを弾く。"""
+    usable, _why = zero_page_is_usable(_zero(chrome_overlap=0.77), REQUESTED)
+
+    assert usable is True
+
+
 def test_an_unreadable_zero_page_is_refused_and_says_it_was_not_empty() -> None:
     """**「読めなかった」を「空だった」と読まない。** それが原則2の再生産になる。"""
     usable, why = zero_page_is_usable(_zero(tree_read=False), REQUESTED)
