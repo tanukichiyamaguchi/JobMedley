@@ -180,6 +180,27 @@ def test_a_zero_page_captured_before_anything_rendered() -> None:
     assert "nav.list_ready_selector: UNRESOLVED" in observed.render()
 
 
+def test_one_non_rendered_variant_does_not_veto_the_one_that_loaded() -> None:
+    """**実測7回目の形。** age は本物の0件を返したが、pagination は起動前スケルトンの
+    まま撮影された (別URLへ転送された可能性。サイトの共通要素をほとんど含まない)。
+
+    旧実装ではスケルトンの「繰り返し全滅」が使用可能と誤判定され、``ready_values``
+    が「0件表示は全使用可能0件ページに存在」を要求するために age の
+    ``div.c-search-empty`` を全否定して UNRESOLVED になった。スケルトンを弾けば、
+    ちゃんと描画された age 側から値が出る (1種のみの注記付き)。
+    """
+    loaded = _frame_only(EMPTY_STATE)  # age: 共通要素を保持した本物の0件
+    skeleton = _tree(("body", ("c-skeleton",), -1), ("div", ("c-boot",), 0))  # 未描画
+
+    observed = _analyze(_results_page(), _zero("age", loaded), _zero("pagination", skeleton))
+
+    assert observed.ready
+    assert observed.ready[0].empty_token == "div.c-search-empty"
+    report = observed.render()
+    assert "共通要素" in report  # スケルトンは非ロードとして診断
+    assert "1種類しか使えませんでした" in report  # 1変種のみの注記
+
+
 # --- variant: 0件ページが読めない・木が壊れる ------------------------------------
 
 

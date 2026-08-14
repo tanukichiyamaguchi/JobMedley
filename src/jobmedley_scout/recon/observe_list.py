@@ -110,6 +110,10 @@ CLOSE_TEXT_HINTS: tuple[str, ...] = ("閉じる", "close", "Close", "×", "✕",
 #: クラス名が「閉じるための要素」と名乗っているか。
 CLOSE_CLASS_TOKENS: tuple[str, ...] = ("close", "dismiss")
 
+#: 0件ページが「描画された」と認めるための、サイト共通要素の最低残存率。
+#: 実測: 実ページ0.77 vs 起動前スケルトン0.05。桁が違うので境界は鋭敏でない。
+CHROME_OVERLAP_MIN = 0.15
+
 #: このモジュールが埋める段階2の座標キー。**この4個より多くも少なくも出さない。**
 STAGE_2_KEYS: tuple[str, ...] = (
     "context.selection_required",
@@ -264,6 +268,13 @@ class ZeroPage:
     remaining_repeated_count: int
     #: 描画される前 (遷移直後) のトークン件数。0件表示の候補から読み込み表示を外す。
     early_counts: Mapping[str, int]
+    #: 結果ページの **非繰り返し** トークン (サイトの共通要素 = ヘッダ・サイド
+    #: バー・検索条件など) のうち、このページにも在る割合。**「そもそも描画された
+    #: か」の信号。** 実測7回目で pagination 変種が26節点の起動前スケルトンのまま
+    #: 撮影され (別URLへ転送された可能性)、繰り返しは全滅したので「使える」と
+    #: 誤判定された。共通要素をほとんど含まないページは、0件を返したのではなく
+    #: **読み込まれていない**。実ページは0.77、スケルトンは0.05と桁で違う。
+    chrome_overlap: float = 1.0
 
 
 def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
@@ -290,6 +301,14 @@ def zero_page_is_usable(page: ZeroPage, requested_url: str) -> tuple[bool, str]:
         return False, (
             "結果ページで繰り返していた要素が1つも消えていません "
             "(遷移が失敗したか、条件が差し戻されて一覧が出たままの可能性)"
+        )
+    if page.chrome_overlap < CHROME_OVERLAP_MIN:
+        # **繰り返しが全滅 = 0件、とは限らない。** ページごと読み込まれていない
+        # (起動前の骨組み or 転送) 場合も繰り返しは全滅する。サイトの共通要素を
+        # ほとんど含まないなら、0件を返したのではなく描画されていない (実測7回目)。
+        return False, (
+            f"サイトの共通要素をほとんど含みません (残存率 {page.chrome_overlap:.0%}) "
+            "-- 読み込まれなかったか別画面へ転送された可能性。0件ページとして使いません"
         )
     return (
         True,
@@ -781,6 +800,9 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
     # **行の同定にも入れ子の形にも依存しない量で判定する** (ZeroPage の docstring
     # に経緯)。結果ページで繰り返していたトークンの集合は、結果ページだけから決まる。
     repeated_tokens = {g.token for g in repeated_child_groups(tree, sizes)}
+    # サイトの共通要素 (繰り返さないトークン = 什器)。0件ページがこれを保持して
+    # いるかで「そもそも描画されたか」を測る (ZeroPage.chrome_overlap)。
+    chrome_tokens = {token for token in counts if token not in repeated_tokens}
 
     # 消滅語彙は2系統 (経緯と使い分けは list_structure.transient_tokens /
     # vanished_tokens)。結果ページの遷移も語彙の供給源に含める。第3要素は
@@ -820,6 +842,12 @@ def _analyze(capture: ListCapture) -> tuple[ObservedList, list[Mapping[str, int]
                 1 for token in repeated_tokens if zero_counts.get(token, 0) > 0
             ),
             early_counts=early_counts,
+            chrome_overlap=(
+                sum(1 for token in chrome_tokens if zero_counts.get(token, 0) > 0)
+                / len(chrome_tokens)
+                if chrome_tokens
+                else 1.0
+            ),
         )
         usable, why = zero_page_is_usable(report, zero.url)
         if zero.loader_cleared is False:

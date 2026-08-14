@@ -327,17 +327,21 @@ scout preflight
 あわせて `nav.*` / `context.*` 座標を埋める。マイページ・候補者一覧のURLは段階1の
 観測時に確定済み。残る座標も、**開発者ツールで1つずつ読む必要はない。**
 
-> **2026-08-14 時点の進捗**: `observe-list` 6回の実測で `context.selection_required`
-> / `context.selector` / `nav.list_ready_selector` は確定済み (6回目はライブの報告も
-> 記入済みの座標と整合する値を出した -- 5回目で入れた解析修正が実データで機能)。
-> 残りは `nav.drawer_close_selectors` 1個のみ。6回目のスナップショットで、ツアーの
-> 吹き出しには **汎用ボタン1つだけ** (「閉じる/スキップ」の部品は無い) と確定 --
-> 「次へ」型のツアーで、文言ヒントでは構造的に閉じられなかった。次の
-> `observe-list` は3段の梯子で閉じる (文言ヒント → 吹き出しの最後のボタンを
-> 押し続けて最後まで進める (上限10回) → 背景クリック1回。いずれも
-> div.c-tour-guide の中だけ・scout を class に含む要素は押さない)。
-> **7回目の実行がこの座標を確定させる見込み。**
-> 段階3 (`capture-send`) はドロワーの開き方が分かってから配線する。
+> **2026-08-14 時点の進捗**: `observe-list` 7回の実測で `context.selection_required`
+> / `context.selector` / `nav.list_ready_selector` は確定済み。残りは
+> `nav.drawer_close_selectors` 1個のみ。7回目でツアーの自動完走が機能し、カードの
+> クリックが初めて完了した (前進) が、`div.c-search-member-card__main-content` を
+> 押しても新しい要素は出なかった -- **カードの本体クリックはドロワーを開かない**
+> ことがほぼ確定した。ドロワーは「レジュメを見る」等のボタンで開くが、カードには
+> ボタンが2つあり、片方は `js-tour-guide-scout-button` (スカウト送信 = 押しては
+> いけない)、もう片方は文言を読まない限り用途を確定できない (13.2/13.6)。この
+> 座標は **段階3の capture-send (どのみち手動・実画面) で、送信路と一緒に確認する**
+> のが安全。observe-list の追加往復では確定できない見込み。
+>
+> なお7回目は解析の回帰も1件出した (読み込まれなかった0件ページが読み込まれた方を
+> 全否定する。実害は list_ready の一時的 UNRESOLVED のみ・修正済み。
+> docs/incidents.md 参照)。ランディング時にアプリDL促進モーダルが開いていることも
+> 判明した (list_ready には無害だが、ドロワー観測時は閉じる必要がある)。
 
 **Actions → Recon (manual) → Run workflow → `observe-list`**
 
