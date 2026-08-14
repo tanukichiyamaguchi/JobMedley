@@ -965,25 +965,36 @@ def _dismiss_tour(page: Any, timeout_ms: int) -> bool | None:
     """Try to close the on-page tour guide. Returns None when no tour is present.
 
     実測5回目で、ツアー案内 (``div.c-tour-guide``) がカードを覆ってクリックを
-    遮っていたことが確定した (覆い要素の直接観測)。**閉じる操作は外向きの送信では
-    ない** (画面案内のUIをこのアカウントの画面から消すだけ) ので、偵察が自分で
-    押してよい数少ない操作に入る。ただし二重のガードを課す:
+    遮っていたことが確定した (覆い要素の直接観測)。実測6回目のスナップショットで
+    吹き出しの中身も確定した: **汎用の ``button.c-button`` が1つだけ** で、
+    「閉じる/スキップ」の部品は存在しない = 「次へ」型のツアーである。だから
+    文言ヒントだけでは構造的に閉じられなかった。
 
-    * 押すのはツアー領域の中の a/button だけ。かつ文言が「閉じる/スキップ」系に
-      部分一致するものだけ (文言は読むが印字しない, 13.2)
-    * class に ``scout`` を含む要素は文言に関係なく押さない -- ツアーは
-      スカウトボタンを対象に係留されており (``js-tour-guide-scout-button``)、
-      領域内にボタン実体が入り込む可能性を潰す (13.6)
+    **閉じる操作は外向きの送信ではない** (画面案内のUIをこのアカウントの画面から
+    消すだけ) ので、偵察が自分で押してよい数少ない操作に入る。3段の梯子で試す:
 
-    見つからなければ押さずに False 側へ倒す (Escape は呼び出し側が送信済み)。
+    1. 文言が「閉じる/スキップ」系の部品 (文言は読むが印字しない, 13.2)
+    2. **進めて終わらせる**: 吹き出しの最後のボタン (戻る/次へ の並びなら次へ) を
+       押し続ける。ツアーは有限の段数なので、最後まで進めれば消える。上限10回
+    3. 背景 (``a.c-tour-guide__overlay``) を1度だけ押す
+
+    どの段でも: 探索は **マウントされたツアー領域 (div.c-tour-guide) の中だけ**。
+    ツアー本体の外に同じ吹き出しの隠しテンプレートが常駐しており (実測6回目)、
+    範囲を広げるとそれを押そうとして満了する。class に ``scout`` を含む要素は
+    文言に関係なく押さない -- ツアーはスカウトボタンを対象に係留されており
+    (``js-tour-guide-scout-button``)、領域内にボタン実体が入り込む可能性を潰す
+    (13.6)。ツアーの各段は対象を強調するだけで、対象そのものを押すことはない。
     """
     try:
         if not any(page.locator(s).count() > 0 for s in TOUR_SHELL_SELECTORS):
             return None
-        candidates = page.locator(
-            "div.c-tour-guide a, div.c-tour-guide button, "
-            "div.c-tour-guide__tooltip a, div.c-tour-guide__tooltip button"
-        )
+
+        def shell_gone(wait_ms: int) -> bool:
+            return wait_for_all_detached(page, list(TOUR_SHELL_SELECTORS), wait_ms)
+
+        # 1) 閉じる/スキップの文言を持つ部品 (最優先。現状の媒体には無いが、
+        #    画面が変わって現れたら「進めて終わらせる」より1手で済む)
+        candidates = page.locator("div.c-tour-guide a, div.c-tour-guide button")
         for index in range(min(candidates.count(), 12)):
             element = candidates.nth(index)
             class_attr = (element.get_attribute("class") or "").lower()
@@ -993,8 +1004,32 @@ def _dismiss_tour(page: Any, timeout_ms: int) -> bool | None:
             if not text or not any(hint in text for hint in TOUR_DISMISS_TEXTS):
                 continue
             element.click(timeout=timeout_ms)
-            return wait_for_all_detached(page, list(TOUR_SHELL_SELECTORS), timeout_ms)
-        return False
+            return shell_gone(timeout_ms)
+
+        # 2) 進めて終わらせる。押すのは吹き出しの中のボタンだけ (オーバーレイや
+        #    強調対象は押さない)。毎回セレクタを引き直す -- 段が進むと吹き出しは
+        #    作り直される。
+        for _ in range(10):
+            buttons = page.locator("div.c-tour-guide div.c-tour-guide__tooltip button")
+            advanced = False
+            for index in range(buttons.count() - 1, -1, -1):
+                element = buttons.nth(index)
+                if "scout" in (element.get_attribute("class") or "").lower():
+                    continue
+                element.click(timeout=timeout_ms)
+                advanced = True
+                break
+            if not advanced:
+                break
+            if shell_gone(1500):
+                return True
+
+        # 3) 背景を1度だけ押す (作りによっては背景クリックで閉じる)。
+        overlay = page.locator("a.c-tour-guide__overlay")
+        if overlay.count() > 0:
+            with suppress(Exception):
+                overlay.first.click(timeout=timeout_ms)
+        return shell_gone(timeout_ms)
     except Exception:
         return False
 
