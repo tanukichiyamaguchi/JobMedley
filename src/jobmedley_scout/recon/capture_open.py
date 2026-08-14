@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,24 @@ CAPTURE_OPEN_KEYS: tuple[str, ...] = (
 LANDING_MODAL_CLOSERS: tuple[str, ...] = ("a.c-modal__closer",)
 
 
+class StopStage(StrEnum):
+    """探索が実際に到達した地点。**時系列の順に並んでいる。**
+
+    報告はこの1つの値だけを見る。独立したブール値を手で並べた順に検査すると、
+    順序を1つ間違えるだけで「まだ起きていない工程の失敗」を理由に出してしまう
+    (実測2回目の嘘)。順序は :meth:`OpenObservation.reached` の1箇所に閉じ込め、
+    テストで固定する。
+    """
+
+    NO_SESSION = "no_session"
+    SESSION_EXPIRED = "session_expired"
+    NOT_RENDERED = "not_rendered"
+    TREE_UNREAD = "tree_unread"
+    NO_ROWS = "no_rows"
+    ARM_FAILED = "arm_failed"
+    EXPLORED = "explored"
+
+
 @dataclass(frozen=True)
 class AttemptResult:
     """One button press, and everything it revealed."""
@@ -106,7 +125,11 @@ class OpenObservation:
     landed_url: str = ""
     session_present: bool = True
     session_expired: bool = False
-    tree_read: bool = True
+    #: **既定は「未到達」= False。** どのブール値も「その工程を通過した証拠」を
+    #: 意味し、未到達なら False であること -- そうでないと reached() の単調性が
+    #: 既定値で破れる (tree_read の既定が True だと、描画前で止まった実行が
+    #: 「木を読めた」ことになる)。実行側は通過した工程を明示的に立てる。
+    tree_read: bool = False
     #: 一覧が実際に描画されたか (確定済みの nav.list_ready_selector で確認)。
     #: **False なら押す対象が存在しない画面である。** 実測1回目はここを確かめずに
     #: 進み、描画に失敗した画面のヘッダ (サイトのロゴ) を押した。
@@ -117,6 +140,47 @@ class OpenObservation:
     attempts: tuple[AttemptResult, ...] = ()
     note: str = ""
     trees: dict[str, DomTree] = field(default_factory=dict)
+
+    def reached(self) -> StopStage:
+        """The single stage the run actually reached. **報告はこれだけを見る。**
+
+        これがこのモジュールの反嘘の要である。報告が独立したブール値を手で並べた
+        順に検査すると、順序を1つ間違えるだけで、途中で止まった実行に **まだ
+        起きていない工程の失敗** が理由として付く (実測2回目: 行を取れなかった
+        実行に「武装できなかった」と書いた)。
+
+        代わりに、工程を **時系列で1本の鎖** にする。各工程には「そこを通過した
+        証拠となるブール値」がある。実際に到達した地点は「鎖の中で最初に False に
+        なる工程」ちょうど1つに決まる -- 後の工程は前の工程を通らないと始まらない
+        からである。報告はこの1つの値だけを見るので、順序を二度と間違えない。
+
+        **鎖の単調性を破る状態は嘘である。** 後の工程の証拠が True なのに前の工程が
+        False なら、実行のどこかがブール値を事実と違えて立てている。その状態で
+        報告を出すと必ず嘘になるので、**報告せず例外にする** (握り潰さない)。
+        """
+        chain: tuple[tuple[StopStage, bool], ...] = (
+            (StopStage.NO_SESSION, self.session_present),
+            # 期限切れの検査は「セッションがある」ときにしか通過しえない。
+            # ``not session_expired`` 単体だと、セッションが無い実行 (後の工程は
+            # すべて未到達) でこの工程だけ「通過」に見え、単調性が既定値で破れる。
+            (StopStage.SESSION_EXPIRED, self.session_present and not self.session_expired),
+            (StopStage.NOT_RENDERED, self.list_rendered),
+            (StopStage.TREE_UNREAD, self.tree_read),
+            (StopStage.NO_ROWS, self.rows_found),
+            (StopStage.ARM_FAILED, self.gate_armed),
+        )
+        stopped: StopStage | None = None
+        for stage, passed in chain:
+            if not passed and stopped is None:
+                stopped = stage
+            elif passed and stopped is not None:
+                # 前の工程で止まったはずなのに、後の工程の証拠が立っている。
+                raise ValueError(
+                    f"OpenObservation の状態が時系列と矛盾しています: "
+                    f"{stopped.value} で止まったのに {stage.value} を通過した証拠がある。"
+                    " どこかがブール値を事実と違えて立てています (報告を嘘にしないため停止)。"
+                )
+        return stopped or StopStage.EXPLORED
 
     def confirmed_close_selectors(self) -> tuple[str, ...]:
         """Close controls whose effect was **observed**, best first.
@@ -138,32 +202,30 @@ class OpenObservation:
     def render(self) -> str:
         lines = ["段階3の探索結果 (送信遮断を武装した状態で観測)", ""]
 
-        if not self.session_present:
+        # **報告は「実際に到達した地点」1つだけを見る** (reached の docstring)。
+        stage = self.reached()
+        if stage is StopStage.NO_SESSION:
             lines.append("  保存セッションがありません。シークレットを設定してください。")
             return "\n".join(lines)
-        if self.session_expired:
+        if stage is StopStage.SESSION_EXPIRED:
             lines.append("  **セッションが効いていません。** 一覧URLにパスワード欄がありました。")
             lines.append(f"  到達URL: {self.landed_url or '(記録なし)'}")
             return "\n".join(lines)
-        if not self.list_rendered:
+        if stage is StopStage.NOT_RENDERED:
             # **描画されていない画面で押さない** (実測1回目の失敗)。武装したまま
             # 遷移すると一覧のデータ読み込みごと止まり、押す対象が存在しなくなる。
             lines.append("  **一覧が描画されなかったため、ボタンを1つも押していません。**")
             lines.append(f"  {self.note or '理由は記録されていません。'}")
             lines.append(f"  到達URL: {self.landed_url or '(記録なし)'}")
             return "\n".join(lines)
-        # **時系列の順に検査する。** 武装は最後に起きるので、武装の検査を先に置くと、
-        # その前で止まった実行に「武装できなかった」という **誤った理由** を出す。
-        # capture-open の実測2回目の報告が正にそれで、本当の理由 (行を取れなかった)
-        # は補足行にしか出ていなかった。
-        if not self.tree_read:
+        if stage is StopStage.TREE_UNREAD:
             lines.append("  DOMの木を読めませんでした (要素が無かったのではありません)。")
             return "\n".join(lines)
-        if not self.rows_found:
+        if stage is StopStage.NO_ROWS:
             lines.append("  **候補者の行を取れなかったため、ボタンを1つも押していません。**")
             lines.append(f"  {self.note or '理由は記録されていません。'}")
             return "\n".join(lines)
-        if not self.gate_armed:
+        if stage is StopStage.ARM_FAILED:
             # **武装できなかったら何も押していない。** 押していないなら報告する
             # 観測は無い。ここを「値なし」で済ませると、押していないのに押した
             # 前提の報告になる。
@@ -484,6 +546,7 @@ def capture_open(
                     OpenObservation(
                         requested_url=requested_url,
                         landed_url=page.url,
+                        tree_read=True,
                         list_rendered=True,
                         rows_found=False,
                         note=(
@@ -501,6 +564,7 @@ def capture_open(
                     OpenObservation(
                         requested_url=requested_url,
                         landed_url=page.url,
+                        tree_read=True,
                         list_rendered=True,
                         rows_found=True,
                         gate_armed=False,
@@ -523,6 +587,7 @@ def capture_open(
                 requested_url=requested_url,
                 landed_url=page.url,
                 gate_armed=True,
+                tree_read=True,
                 list_rendered=True,
                 rows_found=True,
                 attempts=attempts,
