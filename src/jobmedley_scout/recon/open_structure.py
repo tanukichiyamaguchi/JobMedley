@@ -166,8 +166,34 @@ def _safest_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidat
 
     遮断を武装した状態では送信部品こそ押して正体を見たい -- 中断された非GETが
     そのまま ``api.send.*`` の観測になる。ここが決めるのは順序だけである。
+
+    **ただし1種類だけ除外する。** 押せば偵察そのものが終わる部品
+    (:data:`FORBIDDEN_CLASS_HINTS`) は、順序ではなく除外で扱う。遮断は送信を
+    止めるが、ログアウトは止めない。
     """
-    return tuple(sorted(candidates, key=lambda c: (c.looks_like_send, c.index)))
+    allowed = [c for c in candidates if not is_forbidden(c)]
+    return tuple(sorted(allowed, key=lambda c: (c.looks_like_send, c.index)))
+
+
+#: **絶対に押してはいけない部品のクラス断片。**
+#:
+#: 実測9回目、探索はヘッダのログアウトリンク
+#: (``a.c-link.c-link--alert.c-header-menu__logout-link``) を押した。セッションが
+#: 切れ、以降の観測は全て無意味になり、運用者の実行を1回まるごと消費した。
+#:
+#: これは「安全そうかどうか」の判断ではない。**押せば偵察そのものが終わる操作**
+#: であり、押す理由が1つも無い。同じ理由で退会・解約に類する語も入れてある。
+#:
+#: 押す順の判断 (:data:`SEND_CLASS_HINTS`) とは性質が違うことに注意。あちらは
+#: 「後ろに回す」であって除外ではない -- 遮断があるので押して正体を見たい。
+#: こちらは **除外** である。遮断は送信を止めるが、ログアウトは止めない。
+FORBIDDEN_CLASS_HINTS: tuple[str, ...] = ("logout", "signout", "sign-out", "withdraw")
+
+
+def is_forbidden(candidate: ActionCandidate) -> bool:
+    """Whether pressing this would end the reconnaissance itself. **Pure.**"""
+    blob = " ".join(candidate.tokens).lower()
+    return any(hint in blob for hint in FORBIDDEN_CLASS_HINTS)
 
 
 def card_action_candidates(
@@ -257,6 +283,28 @@ def opened_region(
     """
     gained = [token for token, count in after.items() if count - before.get(token, 0) >= minimum]
     return tuple(sorted(gained))
+
+
+def newly_present(before: Mapping[str, int], after: Mapping[str, int]) -> tuple[str, ...]:
+    """Tokens that **did not exist at all** before the press. **Pure.**
+
+    :func:`opened_region` との違いが、実測9回目の事故そのものである。
+
+    ``opened_region`` は「数が増えたトークン」を返す。報告にはそれで良い --
+    何が変わったかの事実だからである。**しかし押しに行く先を決めるのに使うと
+    破綻する。** ``a.c-link`` のように画面の至る所に在るトークンは、押した結果
+    どこかで1つ増えれば「現れた」に入る。するとページ中の ``a.c-link`` が
+    ぜんぶ「現れた領域」の根になり、探索は画面全体へ散る。
+
+    実測9回目はそれで **ヘッダのログアウトリンクを押した**。セッションが切れ、
+    探索はそこで終わった。「書き込める部品が38個」も同じ原因である -- 38個は
+    ドロワーの中の数ではなく、ページ全体の数だった。
+
+    **押しに行く先は「前には1つも無かった構造」に限る。** 押して初めて生まれた
+    ものだけが、その押下が開いた領域を指している。
+    """
+    fresh = (token for token, count in after.items() if count > 0 and not before.get(token))
+    return tuple(sorted(fresh))
 
 
 def vanished_region(before: Mapping[str, int], after: Mapping[str, int]) -> tuple[str, ...]:

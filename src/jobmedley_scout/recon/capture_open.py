@@ -59,6 +59,7 @@ from jobmedley_scout.recon.open_structure import (
     card_action_candidates,
     click_failure_kind,
     close_candidates_in,
+    newly_present,
     opened_region,
     rank_send_candidates,
     redact_url,
@@ -513,15 +514,21 @@ def explore_card_actions(
         after_tree, after = _measure_after_press(page, before, config)
         gained = opened_region(before, after)
         lost = vanished_region(before, after)
+        # **報告と、押しに行く先は別物である。**
+        # gained は「数が増えたもの」= 何が変わったかの事実 (報告用)。
+        # region は「前には1つも無かったもの」= その押下が開いた領域 (探索用)。
+        # 混ぜると、画面の至る所に在るトークンが1つ増えただけでページ全体が
+        # 「開いた領域」になる (実測9回目: ヘッダのログアウトリンクを押した)。
+        region = newly_present(before, after)
         blocked = _drain(gate, sentinel)
         navigated = page.url != url_before_all
 
         closes: tuple[str, ...] = ()
         verified: bool | None = None
-        if gained and after_tree is not None and not navigated:
-            closes = close_candidates_in(after_tree, subtree_sizes(after_tree), gained)
+        if region and after_tree is not None and not navigated:
+            closes = close_candidates_in(after_tree, subtree_sizes(after_tree), region)
             if closes:
-                verified = _try_close(page, closes, gained, config)
+                verified = _try_close(page, closes, region, config)
 
         results.append(
             AttemptResult(
@@ -548,7 +555,7 @@ def explore_card_actions(
             # **現れたものを次に押す。** これが送信路への導線である (docstring)。
             current_tree = after_tree
             current_sizes = subtree_sizes(after_tree)
-            if gained and verified is not True:
+            if region and verified is not True:
                 # 閉じられなかった = 閉じるものではなかった (選択バー等)。
                 # 打ち切らずに、現れた領域の中を次の候補として積む。
                 # **いま開いたものの中を先に押す (深さ優先)。**
@@ -561,8 +568,8 @@ def explore_card_actions(
                 # 導線は「開いたものの中へ入っていく」形をしている。前に足せば
                 # その形に沿って進む -- 送信フォームは、開いた領域の奥にある。
                 queue[:0] = [
-                    (control, gained)
-                    for control in revealed_controls(current_tree, current_sizes, gained)
+                    (control, region)
+                    for control in revealed_controls(current_tree, current_sizes, region)
                 ]
     return tuple(results)
 
