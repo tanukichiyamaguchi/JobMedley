@@ -81,31 +81,71 @@ class ActionCandidate:
         return self.tag + "".join("." + token.split(".", 1)[1] for token in self.tokens)
 
 
-def card_action_candidates(
-    tree: DomTree, sizes: Sequence[int], row_index: int
-) -> tuple[ActionCandidate, ...]:
-    """Clickables inside one card, **safest-looking first**. **Pure.**
-
-    並びは (送信を名乗るものは後ろ, 文書順)。**除外はしない。** 遮断を武装した
-    状態では送信部品こそ押して正体を見たい -- 中断された非GETがそのまま
-    ``api.send.*`` の観測になる。ここが決めるのは順序だけである。
-    """
+def _candidates_in(tree: DomTree, sizes: Sequence[int], root: int) -> list[ActionCandidate]:
+    """Clickables inside one subtree, in document order. **Pure.**"""
     found: list[ActionCandidate] = []
-    for index in range(row_index, row_index + sizes[row_index]):
+    for index in range(root, root + sizes[root]):
         node = tree.nodes[index]
         if node.tag not in ACTION_TAGS:
             continue
-        tokens = stable_tokens(node.tag, node.class_names)
         blob = " ".join(node.class_names).lower()
         found.append(
             ActionCandidate(
                 index=index,
                 tag=node.tag,
-                tokens=tokens,
+                tokens=stable_tokens(node.tag, node.class_names),
                 looks_like_send=any(hint in blob for hint in SEND_CLASS_HINTS),
             )
         )
-    return tuple(sorted(found, key=lambda c: (c.looks_like_send, c.index)))
+    return found
+
+
+def _safest_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, ...]:
+    """並びは (送信を名乗るものは後ろ, 文書順)。**除外はしない。**
+
+    遮断を武装した状態では送信部品こそ押して正体を見たい -- 中断された非GETが
+    そのまま ``api.send.*`` の観測になる。ここが決めるのは順序だけである。
+    """
+    return tuple(sorted(candidates, key=lambda c: (c.looks_like_send, c.index)))
+
+
+def card_action_candidates(
+    tree: DomTree, sizes: Sequence[int], row_index: int
+) -> tuple[ActionCandidate, ...]:
+    """Clickables inside one card, **safest-looking first**. **Pure.**"""
+    return _safest_first(_candidates_in(tree, sizes, row_index))
+
+
+def revealed_controls(
+    tree: DomTree, sizes: Sequence[int], region_tokens: Iterable[str]
+) -> tuple[ActionCandidate, ...]:
+    """Clickables inside the region that a press just revealed. **Pure.**
+
+    **これが送信路への導線である。** 実測3回目で分かった形: カードの
+    チェックボックスを押すと一括スカウト用のバー (``div.c-sticky-scout-bar``) が
+    現れ、その中にスカウトボタンがある。押した結果現れたものを押さない限り、
+    送信画面には到達しない。
+
+    探索は現れた領域の中だけに限る。画面全体へ広げると、常駐している無関係な
+    UI (ヘッダやサイドバー) まで押しに行く -- 実測1回目でサイトのロゴを押した
+    のと同じ失敗になる。
+
+    並びは :func:`_safest_first` と同じ (送信を名乗るものは後ろ)。ただし
+    **除外はしない** -- 遮断があるので、送信ボタンこそ押して正体を見る。
+    """
+    wanted = set(region_tokens)
+    if not wanted:
+        return ()
+    found: list[ActionCandidate] = []
+    seen: set[int] = set()
+    for root, node in enumerate(tree.nodes):
+        if not wanted.intersection(stable_tokens(node.tag, node.class_names)):
+            continue
+        for candidate in _candidates_in(tree, sizes, root):
+            if candidate.index not in seen:
+                seen.add(candidate.index)
+                found.append(candidate)
+    return _safest_first(found)
 
 
 def opened_region(

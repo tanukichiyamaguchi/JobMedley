@@ -23,6 +23,7 @@ from jobmedley_scout.recon.open_structure import (
     opened_region,
     rank_send_candidates,
     redact_url,
+    revealed_controls,
     vanished_region,
 )
 
@@ -221,3 +222,47 @@ def test_ranking_keeps_everything_even_without_a_sentinel() -> None:
     beacon = BlockedRequest("POST", "https://analytics.example/collect", carried_sentinel=False)
 
     assert rank_send_candidates([beacon]) == (beacon,)
+
+
+# --- revealed_controls (実測3回目で分かった導線) --------------------------------
+
+
+def test_controls_revealed_by_a_press_become_the_next_candidates() -> None:
+    """**実測3回目の形。** カードのチェックボックスを押すと一括スカウト用のバー
+    (``div.c-sticky-scout-bar``) が現れ、その中にスカウトボタンがある。
+    押した結果現れたものを辿らない限り、送信画面には到達しない。
+    """
+    after = _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("div", ("c-search-member-card",), 0),  # 1
+        ("label", ("c-checkbox",), 1),  # 2  さっき押したもの
+        ("div", ("c-sticky-scout-bar",), 0),  # 3  <- 現れた領域
+        ("div", ("c-search-count-display",), 3),  # 4
+        ("button", ("c-button", "c-sticky-scout-bar__scout-button"), 3),  # 5  <- これが欲しい
+    )
+
+    found = revealed_controls(after, subtree_sizes(after), ["div.c-sticky-scout-bar"])
+
+    assert [c.selector() for c in found] == ["button.c-button.c-sticky-scout-bar__scout-button"]
+    # 送信を名乗る部品でも **落とさない** -- 遮断があるので押して正体を見る。
+    assert found[0].looks_like_send is True
+
+
+def test_revealed_controls_stay_inside_the_region_that_appeared() -> None:
+    """画面全体へ広げない。広げるとヘッダ等を押しに行く (実測1回目のロゴと同じ失敗)。"""
+    after = _tree(
+        ("body", ("c-body",), -1),
+        ("a", ("c-logo__image",), 0),  # 常駐しているヘッダのリンク
+        ("div", ("c-sticky-scout-bar",), 0),
+        ("button", ("c-sticky-scout-bar__scout-button",), 2),
+    )
+
+    found = revealed_controls(after, subtree_sizes(after), ["div.c-sticky-scout-bar"])
+
+    assert [c.selector() for c in found] == ["button.c-sticky-scout-bar__scout-button"]
+    assert all("logo" not in c.selector() for c in found)
+
+
+def test_an_empty_region_reveals_nothing() -> None:
+    after = _tree(("body", ("c-body",), -1), ("div", ("c-bar",), 0))
+    assert revealed_controls(after, subtree_sizes(after), []) == ()

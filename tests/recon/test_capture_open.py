@@ -599,3 +599,137 @@ def test_an_inconsistent_state_refuses_to_render_a_lie() -> None:
         liar.reached()
     with pytest.raises(ValueError, match="時系列と矛盾"):
         liar.render()
+
+
+# --- 実測3回目 (capture-open): 現れたものを辿って送信路へ ------------------------
+
+
+class _ChainPage(_FakePage):
+    """チェックボックス → 一括スカウトバー → スカウトボタン、という実測の導線。
+
+    押した結果 DOM が変わる作りを最小限に再現する。``dom_tree`` はテスト側で
+    ``page.tree`` を返すよう差し替える。
+    """
+
+    def __init__(self, gate: SendGate) -> None:
+        self._card_only = _tree(
+            ("body", ("c-body",), -1),
+            ("div", ("c-search-member-card",), 0),
+            ("label", ("c-checkbox",), 1),
+        )
+        self._with_bar = _tree(
+            ("body", ("c-body",), -1),
+            ("div", ("c-search-member-card",), 0),
+            ("label", ("c-checkbox",), 1),
+            ("div", ("c-sticky-scout-bar",), 0),
+            ("button", ("c-sticky-scout-bar__scout-button",), 3),
+        )
+        super().__init__(gate, self._card_only)
+        self.tree = self._card_only
+
+    def locator(self, selector: str) -> _FakeLocator:  # type: ignore[override]
+        return _FakeLocator(self, selector)
+
+
+def test_the_exploration_follows_the_chain_to_the_scout_button(monkeypatch) -> None:
+    """**実測3回目そのもの。** チェックボックスを押すと一括スカウトバーが現れる。
+
+    以前はここで「閉じられないから」打ち切っていたので、導線の1歩目で止まった。
+    閉じられないのはバグではなく **閉じるものではなかったから** である。
+    現れたものを次に押すことで、送信路のボタンまで到達する。
+    """
+    import jobmedley_scout.recon.capture_open as module
+
+    gate = SendGate()
+    page = _ChainPage(gate)
+
+    def _click(self, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "checkbox" in self._selector:
+            page.tree = page._with_bar  # 選択するとバーが現れる
+        if "scout" in self._selector:
+            page.fire_request("POST", "https://customers.job-medley.com/api/scouts", "S")
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_interactive", lambda *a, **k: None)
+    monkeypatch.setattr(module, "goto", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_dismiss_tour", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_close_landing_modals", lambda *a, **k: None)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=page._card_only,
+            row_index=1,
+            sentinel="S",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+
+    pressed = [r.selector for r in results]
+    assert any("checkbox" in s for s in pressed)  # 1歩目
+    assert any("scout-button" in s for s in pressed), "現れたバーのボタンまで辿れていない"
+    assert page.sent == []  # **送信は起きない** (遮断が効いている)
+    # 遮断した通信が観測として返る = 送信路の正体が分かる。
+    assert any(e.carried_sentinel for r in results for e in r.blocked)
+
+
+# --- 報告の正直さ (実測3回目が露呈させた2点) ------------------------------------
+
+
+def test_a_failed_click_that_changed_the_page_reports_both_facts() -> None:
+    """**どちらの事実も消さない。** 実測3回目はクリックが完了しなかったのに
+    画面の構造が17種増えた。「押せなかった」だけだと変化を、「押せた」だけだと
+    完了しなかった事実を握り潰す。
+    """
+    attempt = AttemptResult(
+        selector="label.c-checkbox",
+        nth=1,
+        looks_like_send=False,
+        clicked=False,
+        gained=("div.c-sticky-scout-bar",),
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
+    ).render()
+
+    assert "クリックは完了しませんでした" in report
+    assert "画面の構造は変化しました" in report
+
+
+def test_an_unverified_region_is_not_called_a_drawer() -> None:
+    """観測したのは「構造が増えた」であって、それがドロワーかは分かっていない。
+
+    実測3回目で増えたのは一括スカウト用の選択バーで、閉じるものですらなかった。
+    """
+    attempt = AttemptResult(
+        selector="label.c-checkbox",
+        nth=1,
+        looks_like_send=False,
+        clicked=True,
+        gained=("div.c-sticky-scout-bar",),
+        close_verified=None,
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
+    ).render()
+
+    assert "nav.drawer_close_selectors: UNRESOLVED" in report
+    assert "ドロワーは開きました" not in report
+    assert "閉じられる領域 (ドロワー/モーダル) かは確認できていません" in report
