@@ -43,7 +43,7 @@ from jobmedley_scout.browser.navigation import goto, marker_present
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN, Coord, require
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.capture_send import install_gate
-from jobmedley_scout.recon.gate import SendGate
+from jobmedley_scout.recon.gate import GateMode, SendGate
 from jobmedley_scout.recon.list_structure import (
     indices_with_token,
     stable_tokens,
@@ -59,6 +59,7 @@ from jobmedley_scout.recon.open_structure import (
     close_candidates_in,
     opened_region,
     rank_send_candidates,
+    redact_url,
     revealed_controls,
     revealed_text_fields,
     vanished_region,
@@ -149,6 +150,9 @@ class OpenObservation:
     #: 武装が実際に効いていたか。**False なら値を1つも出さない** (後述)。
     gate_armed: bool = False
     attempts: tuple[AttemptResult, ...] = ()
+    #: 武装中に **通した** 読み取り (URLは伏せ字済み)。通した事実も報告する --
+    #: 緩和が黙って効いていると、運用者は何が守られているのか確かめられない。
+    reads_allowed: tuple[str, ...] = ()
     note: str = ""
     trees: dict[str, DomTree] = field(default_factory=dict)
 
@@ -286,9 +290,21 @@ class OpenObservation:
         lines.append("")
         lines.extend(self._coordinate_lines())
         lines.append("")
-        lines.append("**このコマンドは送信を1件も行っていません。** 武装中の非GETは全て")
-        lines.append("中断されています (fail-closed)。中断された通信は上に構造だけを印字し、")
-        lines.append("URLの会員ID・クエリ値は伏せてあります (13.2)。原文は構造ダンプにあります。")
+        lines.append("**このコマンドは送信を1件も行っていません。**")
+        if self.reads_allowed:
+            # **通したものを黙らない。** 緩和が効いた実行で「非GETは全て止めた」と
+            # 書けば、それは事実と違う。何を通したかを数と実物で述べる。
+            lines.append(
+                f"武装中に **通した読み取り** (GraphQL の query): {len(self.reads_allowed)} 件"
+            )
+            for url in self.reads_allowed[:5]:
+                lines.append(f"  通した: {url}")
+            lines.append("書き込み (mutation・その他の非GET) は全て止めて記録しました。")
+            lines.append("止めた通信は媒体のサーバへ到達していません。")
+        else:
+            lines.append("武装中の非GETは全て止めています (fail-closed)。")
+        lines.append("止めた通信は上に構造だけを印字し、URLの会員ID・クエリ値は")
+        lines.append("伏せてあります (13.2)。原文は構造ダンプにあります。")
         return "\n".join(lines)
 
     def _coordinate_lines(self) -> list[str]:
@@ -634,7 +650,14 @@ def capture_open(
     if not session.exists():
         return OpenObservation(requested_url=requested_url, session_present=False), None
 
-    gate = SendGate()
+    # **書き込みだけを止める。** 媒体は GraphQL の単一ページアプリで、画面を
+    # 開くための読み取りも POST で来る。全ての非GETを止めると、モーダルは中身を
+    # 得られず共通エラー処理で ``/customers/network_error/`` へ飛ばされ、探索は
+    # そこで終わる (実測5回目)。緩和の範囲と根拠は :mod:`recon.graphql` に書いた。
+    #
+    # **送信は依然として物理的に起こらない。** スカウト送信は GraphQL の
+    # ``mutation`` (状態変更) なので、通す条件 (``query`` のみ) に当たらない。
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
     with browser_context(config, storage_state=session) as (_context, page):
         # 遮断は仕掛けるが、**まだ武装しない**。武装したまま遷移すると一覧の
         # データ読み込み (非GET) まで止まり、押す対象が存在しない画面になる。
@@ -738,6 +761,7 @@ def capture_open(
                 list_rendered=True,
                 rows_found=True,
                 attempts=attempts,
+                reads_allowed=tuple(redact_url(entry.url) for entry in gate.passed_reads),
             )
             return observed, dom_tree(page)
         finally:

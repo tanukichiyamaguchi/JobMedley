@@ -76,6 +76,12 @@ def install_gate(page: Any, gate: SendGate) -> None:
         decision = gate.decide(request.method, request.url, body, dict(request.headers))
         if decision is GateDecision.RECORD_AND_ABORT:
             route.abort()
+        elif decision is GateDecision.RECORD_AND_STUB:
+            # **中断ではなく空の応答を返す。** リクエストは媒体のサーバへ到達しない
+            # ので安全性は中断と同じだが、媒体から見ると「通信は成立したが中身が
+            # 無い」になる。中断だと共通エラー処理が働いて画面ごと
+            # ``/customers/network_error/`` へ飛び、探索がそこで終わる (実測5回目)。
+            route.fulfill(status=200, content_type="application/json", body="{}")
         else:
             route.continue_()
 

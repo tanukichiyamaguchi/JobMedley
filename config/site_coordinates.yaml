@@ -117,6 +117,16 @@ nav.list_ready_selector: "div.c-search-member-card, div.c-not-found--searches"
 # 旧メモ: 次の observe-list は3段の梯子でツアーを閉じてから押す (文言ヒント →
 # 吹き出しの最後のボタンで最後まで進める (上限10回) → 背景クリック1回。
 # いずれも div.c-tour-guide の中だけ・scout を class に含む要素は押さない)。
+#
+# 2026-08-18 capture-open 5回目で **ドロワーの正体が分かった**。
+# カードの button.c-button.u-wd-100p.c-button--small (スカウトでない方) を押すと
+#   POST /api/customers/graphql/MemberOnScoutProfileModalOfDesktop
+# が飛ぶ。名前のとおり **候補者プロフィールのモーダル** を開くための読み取りで
+# ある。つまりドロワーは在るが、**中身をGraphQLで取ってから描画される**。
+# この回はその読み取りごと遮断していたため、媒体の共通エラー処理が働いて
+# /customers/network_error/ へ飛ばされ、モーダルは一度も開かなかった。
+# 次の capture-open は読み取り (GraphQL の query) を通すので、開いたモーダルの
+# 中から閉じる部品を観測できる見込み。
 nav.drawer_close_selectors: UNRESOLVED
 
 # ========================================================================

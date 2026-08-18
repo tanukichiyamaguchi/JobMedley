@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from jobmedley_scout.recon.gate import SAFE_METHODS, GateDecision, SendGate
+import json
+
+from jobmedley_scout.recon.gate import SAFE_METHODS, GateDecision, GateMode, SendGate
 
 SEND_URL = "https://example.invalid/api/v2/scout/messages"
 TELEMETRY_URL = "https://beacon.example.invalid/collect"
@@ -152,3 +154,79 @@ def test_safe_methods_never_grows_to_include_a_mutating_method() -> None:
     """SAFE_METHODS に POST が入った時点で、このモジュールの存在意義が消える。"""
     expected = frozenset({"GET", "HEAD"})
     assert SAFE_METHODS == expected
+
+
+# --- 緩和モード (実測5回目: 媒体が GraphQL の単一ページアプリだった) -------------
+
+
+GRAPHQL_URL = "https://customers.job-medley.com/api/customers/graphql/MemberOnScoutProfile"
+
+
+def _query_body(document: str = "query A { a }") -> str:
+    return json.dumps({"query": document})
+
+
+def test_the_default_mode_still_blocks_every_non_get() -> None:
+    """**既定は変わっていない。** 緩和は名前で明示したときだけ効く。
+
+    このテストが落ちたら、既定の安全性が黙って緩んだということである。
+    """
+    gate = SendGate()
+    gate.arm()
+    assert gate.mode is GateMode.BLOCK_ALL
+    assert gate.decide("POST", GRAPHQL_URL, _query_body()) is GateDecision.RECORD_AND_ABORT
+    assert gate.passed_reads == ()
+
+
+def test_block_writes_lets_a_graphql_read_through() -> None:
+    """これを通さないと画面が開かず、段階3は原理的に終われない。"""
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    gate.arm()
+    assert gate.decide("POST", GRAPHQL_URL, _query_body()) is GateDecision.PASS
+    # **通した事実も観測として残る。**
+    assert [entry.url for entry in gate.passed_reads] == [GRAPHQL_URL]
+    assert gate.recorded == ()
+
+
+def test_block_writes_never_lets_a_mutation_through() -> None:
+    """**スカウト送信はここに来る。** 緩和しても、ここは絶対に通さない。"""
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    gate.arm()
+    decision = gate.decide(
+        "POST", GRAPHQL_URL, _query_body("mutation SendScout { sendScout { id } }")
+    )
+    assert decision is GateDecision.RECORD_AND_STUB
+    assert gate.passed_reads == ()
+    assert [entry.url for entry in gate.recorded] == [GRAPHQL_URL]
+
+
+def test_block_writes_never_lets_a_plain_post_through() -> None:
+    """GraphQL でない更新系は緩和の対象外である。"""
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    gate.arm()
+    decision = gate.decide("POST", "https://customers.job-medley.com/api/customers/scouts", "{}")
+    assert decision is GateDecision.RECORD_AND_STUB
+
+
+def test_block_writes_blocks_with_a_stub_not_an_abort() -> None:
+    """中断だと媒体が共通エラー処理で画面ごと飛ばす (実測5回目)。
+
+    空の応答なら画面が残り、探索を続けられる。**サーバへ到達しない点は同じ。**
+    """
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    gate.arm()
+    assert gate.decide("PUT", "https://example.com/x") is GateDecision.RECORD_AND_STUB
+
+
+def test_the_relaxation_does_nothing_before_arming() -> None:
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    assert gate.decide("POST", GRAPHQL_URL, _query_body()) is GateDecision.PASS
+    assert gate.passed_reads == ()  # 武装していないので「通した」記録も無い
+
+
+def test_a_passed_read_keeps_no_body() -> None:
+    """通した読み取りの本文には画面の値が載りうる。**持たない** (13.2)。"""
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    gate.arm()
+    gate.decide("POST", GRAPHQL_URL, _query_body())
+    assert gate.passed_reads[0].body is None

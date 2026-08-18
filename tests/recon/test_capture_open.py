@@ -1044,3 +1044,97 @@ def test_writing_the_sentinel_never_touches_the_page_outside_the_revealed_region
 
     assert page.fills == []
     assert all(not r.sentinel_written for r in results)
+
+
+# --- 実測5回目: 媒体が GraphQL の単一ページアプリだった --------------------------
+
+
+def test_the_relaxed_gate_still_stops_the_scout_mutation(monkeypatch) -> None:
+    """**緩和しても送信は通らない。**
+
+    媒体は画面を開くための読み取りも POST で送る。全部止めると探索が
+    ``/customers/network_error/`` で終わるので、読み取り (GraphQL の ``query``)
+    だけを通すようにした。**スカウト送信は ``mutation`` なので通らない。**
+    """
+    import jobmedley_scout.recon.capture_open as module
+    from jobmedley_scout.recon.gate import GateMode
+
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    page = _ChainPage(gate)
+    graphql = "https://customers.job-medley.com/api/customers/graphql/MemberOnScoutProfile"
+
+    def _click(self, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "checkbox" in self._selector:
+            page.tree = page._with_bar
+            # 画面を開くための読み取り。**通らないと画面が出ない。**
+            page.fire_request("POST", graphql, '{"query": "query Profile { member { id } }"}')
+        if "scout" in self._selector:
+            # スカウト送信。**絶対に通ってはいけない。**
+            page.fire_request(
+                "POST", graphql, '{"query": "mutation SendScout { sendScout { id } }"}'
+            )
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=page._card_only,
+            row_index=1,
+            sentinel="S",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+
+    # 読み取りは通った (これが無いと画面が開かない)。
+    assert page.sent == [graphql]
+    assert [e.url for e in gate.passed_reads] == [graphql]
+    # **送信は止まった。** 止めた通信が観測として返る。
+    scout = [r for r in results if "scout-button" in r.selector]
+    assert scout, "現れたバーのボタンまで辿れていない"
+    assert scout[0].blocked, "送信が記録されていない"
+    assert page.sent.count(graphql) == 1, "**送信まで通ってしまった**"
+
+
+def test_the_report_says_what_the_gate_let_through() -> None:
+    """緩和が黙って効いていると、運用者は何が守られているのか確かめられない。"""
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(
+            AttemptResult(selector="label.c-checkbox", nth=0, looks_like_send=False, clicked=True),
+        ),
+        reads_allowed=("POST https://customers.job-medley.com/api/customers/graphql/Profile",),
+    ).render()
+
+    assert "通した読み取り" in report
+    assert "1 件" in report
+    assert "graphql/Profile" in report
+    # 通した実行で「全て止めた」と書かない。
+    assert "武装中の非GETは全て止めています" not in report
+
+
+def test_a_run_that_let_nothing_through_still_says_it_blocked_everything() -> None:
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(
+            AttemptResult(selector="label.c-checkbox", nth=0, looks_like_send=False, clicked=True),
+        ),
+    ).render()
+
+    assert "武装中の非GETは全て止めています" in report
+    assert "通した読み取り" not in report
