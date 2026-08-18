@@ -36,6 +36,7 @@ from jobmedley_scout.browser.dom import (
     DomTree,
     dom_tree,
     login_form_visible,
+    wait_for_content_to_arrive,
     wait_for_interactive,
     wait_for_structure_to_settle,
 )
@@ -272,7 +273,10 @@ class OpenObservation:
                 lines.append(f"        **別画面へ遷移しました** (到達URL: {self.landed_url})")
                 lines.append("        ここで探索を打ち切りました (知らない画面を押し進めない)。")
             if attempt.gained:
-                shown = ", ".join(attempt.gained[:6])
+                # **多めに出す。** クラス名は構造であってページの文言ではない
+                # (13.2)。6件で切ると、実測6回目のように読み込み表示だけが並んで
+                # 「その後ろに何が現れたのか」が報告から落ちる。
+                shown = ", ".join(attempt.gained[:14])
                 lines.append(f"        増えた構造 ({len(attempt.gained)}種): {shown}")
             if attempt.sentinel_written:
                 lines.append("        押す前に、現れた領域の入力欄へ目印を書き込みました。")
@@ -480,7 +484,10 @@ def explore_card_actions(
             with suppress(Exception):
                 target.dispatch_event("click", timeout=config.selector_timeout_ms)
                 dispatched = True
-        wait_for_structure_to_settle(page, config.selector_timeout_ms)
+        # **中身が届くまで待ってから測る。** 構造の静止だけを見ると、読み込み
+        # 表示 (``div.c-loader``) が出ている間も「落ち着いた」になり、押して
+        # 現れたものが読み込み表示そのものになる (実測6回目)。
+        wait_for_content_to_arrive(page, config.selector_timeout_ms)
         after_tree = dom_tree(page)
         after = token_counts(after_tree) if after_tree is not None else {}
         gained = opened_region(before, after)
@@ -601,7 +608,7 @@ def _try_close(
     for selector in closes:
         with suppress(Exception):
             page.locator(selector).first.click(timeout=config.selector_timeout_ms)
-            wait_for_structure_to_settle(page, config.selector_timeout_ms)
+            wait_for_content_to_arrive(page, config.selector_timeout_ms)
             after_tree = dom_tree(page)
             if after_tree is None:
                 continue

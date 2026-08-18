@@ -127,6 +127,15 @@ nav.list_ready_selector: "div.c-search-member-card, div.c-not-found--searches"
 # /customers/network_error/ へ飛ばされ、モーダルは一度も開かなかった。
 # 次の capture-open は読み取り (GraphQL の query) を通すので、開いたモーダルの
 # 中から閉じる部品を観測できる見込み。
+#
+# 2026-08-18 capture-open 6回目で **実際に開いた**。通した読み取りが証拠:
+#   graphql/MemberOnScoutProfileModalOfDesktop  候補者プロフィールのモーダル
+#   graphql/GetScoutSideCoverInfo               スカウトのサイドカバー (= ドロワー)
+#   graphql/JobOfferSearchOnScoutMessageForm    スカウト送信メッセージフォーム
+# ドロワーは「サイドカバー」と呼ばれる作りで、開くと body に
+# c-body--fixed-by-sidecover が付く (背面のスクロールを止めるため)。
+# ただしこの回は測る時機が早すぎ (読み込み表示を領域と誤認)、閉じる部品までは
+# 観測できなかった。次回は中身が届いてから測る。
 nav.drawer_close_selectors: UNRESOLVED
 
 # ========================================================================
