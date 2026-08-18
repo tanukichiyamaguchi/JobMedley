@@ -1243,3 +1243,107 @@ def test_the_report_shows_what_vanished_too() -> None:
     ).render()
 
     assert "消えた構造 (1種): div.u-is-hidden" in report
+
+
+# --- 実測8回目: 開いたのに、その中へ入らず迷子になった --------------------------
+
+
+def test_the_exploration_enters_what_it_just_opened_first(monkeypatch) -> None:
+    """**いま開いたものの中を先に押す (深さ優先)。**
+
+    実測8回目: スカウトのサイドカバーが開いた (150種の新出) のに、次に押したのは
+    1つ前に開いたプロフィールモーダルの部品だった。3手のうちに別画面へ遷移して
+    探索は終わり、送信フォームには一度も触れていない。
+
+    後ろに足すと「先に開いた領域を全部押してから次へ」になる。導線は
+    「開いたものの中へ入っていく」形をしているので、前に足さないと沿えない。
+    """
+    import jobmedley_scout.recon.capture_open as module
+
+    card = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-open-modal",), 1),
+        ("button", ("c-open-cover",), 1),
+    )
+    with_modal = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-open-modal",), 1),
+        ("button", ("c-open-cover",), 1),
+        ("div", ("c-modal",), 0),
+        ("button", ("c-modal__stray",), 4),
+    )
+    with_cover = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-open-modal",), 1),
+        ("button", ("c-open-cover",), 1),
+        ("div", ("c-modal",), 0),
+        ("button", ("c-modal__stray",), 4),
+        ("div", ("c-side-cover",), 0),
+        ("button", ("c-side-cover__next",), 6),
+    )
+
+    gate = SendGate()
+    page = _FakePage(gate, card)
+    page.tree = card
+
+    def _click(self, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "c-open-modal" in self._selector:
+            page.tree = with_modal
+        elif "c-open-cover" in self._selector:
+            page.tree = with_cover
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_any_detached", lambda *a, **k: True)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=card,
+            row_index=1,
+            sentinel="ZZRECON-TEST",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+            max_attempts=4,
+        )
+    finally:
+        gate.disarm()
+
+    pressed = [r.selector for r in results]
+    cover_open = next(i for i, s in enumerate(pressed) if "c-open-cover" in s)
+    inside_cover = next((i for i, s in enumerate(pressed) if "c-side-cover__next" in s), None)
+
+    assert inside_cover is not None, "開いたサイドカバーの中に入っていない"
+    # **開いた直後に、その中へ入る。** 間に別の領域の部品が挟まらないこと --
+    # 挟まると導線から外れ、実測8回目のように別画面へ流れて終わる。
+    assert inside_cover == cover_open + 1, f"開いた直後に中へ入っていない: {pressed}"
+
+
+def test_the_report_separates_no_field_from_could_not_write() -> None:
+    """**「無かった」と「在ったが書けなかった」は別の事実である。**"""
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(
+            AttemptResult(
+                selector="button.c-side-cover__send",
+                nth=0,
+                looks_like_send=True,
+                clicked=True,
+                sentinel_written=False,
+                text_fields_seen=2,
+            ),
+        ),
+    ).render()
+
+    assert "書き込める部品が 2 個" in report
