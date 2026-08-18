@@ -26,6 +26,7 @@ from jobmedley_scout.recon.open_structure import (
     rank_send_candidates,
     redact_url,
     revealed_controls,
+    revealed_text_fields,
     vanished_region,
 )
 
@@ -302,3 +303,42 @@ def test_the_classification_never_leaks_page_text() -> None:
 
     assert kind in CLICK_FAILURE_KINDS
     assert "山田" not in kind
+
+
+# --- 現れた領域の入力欄 ---------------------------------------------------------
+
+
+def test_text_fields_are_taken_only_from_the_region_that_just_appeared() -> None:
+    """**画面全体から集めない。**
+
+    書き込みの目的は「遮断した非GETのどれが送信路かを見分けること」だけである。
+    常駐している検索欄まで書き換えると、一覧そのものが変わって、以降に押している
+    ものが別物になる (実測1回目でサイトのロゴを押したのと同じ種類の失敗)。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("form", ("c-search-form",), 0),  # 1  常駐している検索欄
+        ("input", ("c-search-form__keyword",), 1),  # 2
+        ("div", ("c-sticky-scout-bar",), 0),  # 3  押して現れた領域
+        ("input", ("c-scout-form__subject",), 3),  # 4
+        ("textarea", ("c-scout-form__body",), 3),  # 5
+        ("button", ("c-sticky-scout-bar__scout-button",), 3),  # 6
+    )
+    sizes = subtree_sizes(tree)
+
+    fields = revealed_text_fields(tree, sizes, ("div.c-sticky-scout-bar",))
+
+    assert [f.index for f in fields] == [4, 5], "領域の外の入力欄を拾っている"
+    assert [f.selector() for f in fields] == [
+        "input.c-scout-form__subject",
+        "textarea.c-scout-form__body",
+    ]
+
+
+def test_no_region_means_no_text_fields() -> None:
+    """領域が空なら書き込む先も無い (カードの中の候補を押すとき)。"""
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("textarea", ("c-scout-form__body",), 0),
+    )
+    assert revealed_text_fields(tree, subtree_sizes(tree), ()) == ()

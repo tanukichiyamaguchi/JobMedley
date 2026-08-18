@@ -60,6 +60,7 @@ from jobmedley_scout.recon.open_structure import (
     opened_region,
     rank_send_candidates,
     revealed_controls,
+    revealed_text_fields,
     vanished_region,
 )
 from jobmedley_scout.recon.yaml_paste import yaml_scalar as _scalar
@@ -118,6 +119,9 @@ class AttemptResult:
     failure_kind: str = ""
     #: 通常のクリックが満了したので、DOMイベントを直接発火して押下を届けたか。
     dispatched: bool = False
+    #: この押下の直前に、現れた領域の入力欄へ目印を書き込めたか。
+    #: **False なら、この押下で遮断された非GETが送信路かどうかは判別できない。**
+    sentinel_written: bool = False
 
     @property
     def opened(self) -> bool:
@@ -266,10 +270,13 @@ class OpenObservation:
             if attempt.gained:
                 shown = ", ".join(attempt.gained[:6])
                 lines.append(f"        増えた構造 ({len(attempt.gained)}種): {shown}")
+            if attempt.sentinel_written:
+                lines.append("        押す前に、現れた領域の入力欄へ目印を書き込みました。")
             if attempt.blocked:
                 lines.append(f"        遮断した非GET: {len(attempt.blocked)} 件")
                 for entry in rank_send_candidates(attempt.blocked)[:3]:
-                    tag = " **目印を含む = 送信路の可能性が高い**" if entry.carried_sentinel else ""
+                    carried = entry.carried_sentinel
+                    tag = " **書き込んだ目印を運んでいる = 送信路**" if carried else ""
                     lines.append(f"          {entry.redacted()}{tag}")
             if attempt.close_verified is not None:
                 verdict = (
@@ -308,14 +315,32 @@ class OpenObservation:
 
         sends = rank_send_candidates(self.all_blocked())
         with_sentinel = [entry for entry in sends if entry.carried_sentinel]
+        wrote_sentinel = any(attempt.sentinel_written for attempt in self.attempts)
         if with_sentinel:
             out.append(f"  api.send.paid.url_pattern: {_scalar(with_sentinel[0].url)}")
-            out.append("    # 件名・本文に混ぜた目印を運んでいた非GET = 送信路。")
+            out.append("    # 押す直前に、現れた領域の入力欄へ書き込んだ目印を、")
+            out.append("    # この非GETが本文に載せて運んでいました = 送信路。")
             out.append("    # **この通信は中断済みで、送信は行われていません。**")
-        elif sends:
+        elif sends and wrote_sentinel:
+            # **目印を書いたうえで運ばれなかった** のは意味のある観測である。
+            # 送信は別の押下の先にある (画面遷移した等)。
             out.append(f"  api.send.paid.url_pattern: {UNRESOLVED_TOKEN}")
-            out.append("    # 目印を運ぶ非GETはありませんでした (送信画面まで到達していない)。")
-            out.append("    # 遮断した非GETの一覧は上のとおりです。")
+            out.append("    # 入力欄に目印を書き込んだうえで押しましたが、それを")
+            out.append("    # 運ぶ非GETはありませんでした。遮断した非GETの候補:")
+            for entry in sends[:3]:
+                out.append(f"    #   {entry.redacted()}")
+        elif sends:
+            # **ここで「送信画面まで到達していない」と書いてはいけない。**
+            # 目印を書き込めなかった実行では、到達したかどうか自体が分からない。
+            # 分からないことを理由として述べれば、それは上に並んでいる遮断済み
+            # 非GETの一覧と矛盾しうる -- 報告が嘘になる。
+            out.append(f"  api.send.paid.url_pattern: {UNRESOLVED_TOKEN}")
+            out.append("    # 非GETは遮断しましたが、**目印を1文字も書き込めていません**")
+            out.append("    # (押す直前に現れた領域に、書き込める入力欄が無かった)。")
+            out.append("    # 目印が無ければ、下の候補のどれが送信路かを **観測では**")
+            out.append("    # 決められません。推測で埋めない (原則3) ため未確定のままにします。")
+            for entry in sends[:3]:
+                out.append(f"    #   候補: {entry.redacted()}")
         else:
             out.append(f"  api.send.paid.url_pattern: {UNRESOLVED_TOKEN}")
             out.append("    # 非GETは1件も発生しませんでした。")
@@ -388,7 +413,13 @@ def explore_card_actions(
     押し進めない。
     """
     sizes = subtree_sizes(tree)
-    queue: list[ActionCandidate] = list(card_action_candidates(tree, sizes, row_index))
+    # 待ち行列は (押す候補, その候補が現れた領域のトークン) の対。領域を覚えて
+    # おくのは、**押す直前にその領域の入力欄へ目印を書き込む** ためである
+    # (revealed_text_fields の docstring)。カードの中の候補は最初から在るので
+    # 「現れた領域」を持たない。
+    queue: list[tuple[ActionCandidate, tuple[str, ...]]] = [
+        (candidate, ()) for candidate in card_action_candidates(tree, sizes, row_index)
+    ]
     results: list[AttemptResult] = []
     url_before_all = page.url
     pressed: set[str] = set()
@@ -396,12 +427,18 @@ def explore_card_actions(
     current_sizes = sizes
 
     while queue and len(results) < max_attempts:
-        candidate = queue.pop(0)
+        candidate, region = queue.pop(0)
         selector = candidate.selector()
         nth = _nth_within_page(current_tree, current_sizes, candidate, selector)
         if (fingerprint := f"{selector}#{nth}") in pressed:
             continue  # 同じものを二度押さない (現れた領域が重なると重複しうる)
         pressed.add(fingerprint)
+        # **押す前に目印を書き込む。** これをしないと、遮断した非GETのどれが
+        # 送信路かを区別する根拠が無く、座標を推測で埋めることになる (原則3)。
+        # 書き込みは送信ではない。遮断は武装したままである。
+        sentinel_written = _write_sentinel(
+            page, current_tree, current_sizes, region, sentinel, config
+        )
         before = _counts(page)
         clicked = False
         failure_kind = ""
@@ -456,6 +493,7 @@ def explore_card_actions(
                 navigated=navigated,
                 failure_kind=failure_kind,
                 dispatched=dispatched,
+                sentinel_written=sentinel_written,
             )
         )
         if navigated:
@@ -468,8 +506,55 @@ def explore_card_actions(
             if gained and verified is not True:
                 # 閉じられなかった = 閉じるものではなかった (選択バー等)。
                 # 打ち切らずに、現れた領域の中を次の候補として積む。
-                queue.extend(revealed_controls(current_tree, current_sizes, gained))
+                queue.extend(
+                    (control, gained)
+                    for control in revealed_controls(current_tree, current_sizes, gained)
+                )
     return tuple(results)
+
+
+def _write_sentinel(
+    page: Any,
+    tree: DomTree,
+    sizes: Sequence[int],
+    region: Sequence[str],
+    sentinel: str,
+    config: BrowserConfig,
+) -> bool:
+    """Write the sentinel into the revealed region's text fields. **押下ではない。**
+
+    書き込みは送信ではない。フォームに文字を入れても外向きの通信は起きないし、
+    下書き保存のような通信が走ったとしても、それは非GETなので遮断されている。
+
+    **なぜやるのか** は :func:`recon.open_structure.revealed_text_fields` の
+    docstring にある -- 目印が本文に載っていることだけが、遮断した非GETの中から
+    送信路を **観測で** 選び出す根拠になる。
+
+    書けなくても続ける (チェックボックスや hidden に当たれば ``fill`` は失敗する)。
+    失敗は探索の失敗ではないので握り潰してよい -- ここで落とす事実は「書けた/
+    書けなかった」の一点で、それは返り値として必ず報告に届く。
+    """
+    from jobmedley_scout.recon.sentinel import sentinel_body
+
+    if not region:
+        return False
+    text = sentinel_body(sentinel)
+    wrote = False
+    for field_ in revealed_text_fields(tree, sizes, region):
+        selector = field_.selector()
+        try:
+            locator = page.locator(selector)
+            total = min(locator.count(), 3)
+        except Exception:  # noqa: BLE001 -- 数えられないだけ。探索は続ける
+            continue
+        for index in range(total):
+            with suppress(Exception):
+                element = locator.nth(index)
+                if not element.is_visible():
+                    continue
+                element.fill(text, timeout=config.selector_timeout_ms)
+                wrote = True
+    return wrote
 
 
 def _nth_within_page(
