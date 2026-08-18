@@ -217,6 +217,42 @@ def wait_for_all_detached(page: Any, selectors: list[str], timeout_ms: int) -> b
     return True
 
 
+#: 与えられたセレクタの **どれか1つ** が0件になるのを待つ。
+_ANY_DETACHED_SCRIPT = """
+(sels) => sels.some((s) => {
+  try { return document.querySelectorAll(s).length === 0; }
+  catch (e) { return false; }
+})
+"""
+
+
+def wait_for_any_detached(page: Any, selectors: list[str], timeout_ms: int) -> bool:
+    """Wait until **at least one** of ``selectors`` stops matching anything.
+
+    押下の直後に現れたものの中には、読み込み表示のように **すぐ消えるもの** が
+    混ざる。全部が消えるのを待つと、残るべきもの (開いた領域そのもの) がある
+    以上いつまでも満たされず、必ず満了する。逆に何も待たなければ、読み込み表示を
+    「押して現れたもの」として測ってしまう (capture-open 6・7回目)。
+
+    **「どれか1つが消えた」は、消えるものが消え終わった合図として使える。**
+    残るものは残ったまま先へ進めるので、良い場合は即座に返る。
+
+    どのセレクタが読み込み表示かは **推測しない**。呼び出し側が「押す前には無く、
+    押した直後に現れた」という観測から渡す。名前で当てにいかないのは、媒体が
+    クラス名を変えても壊れないようにするためである。
+
+    満了しても例外にしない。消えるものが無い押下 (静的に開くだけの領域) は
+    正常にありうる。
+    """
+    if not selectors:
+        return True
+    try:
+        page.wait_for_function(_ANY_DETACHED_SCRIPT, arg=selectors, timeout=timeout_ms)
+    except Exception:
+        return False
+    return True
+
+
 #: クリック対象の中心に実際に居る要素 (= ポインタを受け取る要素) と、その祖先を
 #: たどって [タグ, クラス配列] の列で返す。**タグとクラスしか読まない** (13.2)。
 _COVERING_SCRIPT = """
