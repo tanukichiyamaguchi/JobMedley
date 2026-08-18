@@ -125,6 +125,10 @@ class AttemptResult:
     #: この押下の直前に、現れた領域の入力欄へ目印を書き込めたか。
     #: **False なら、この押下で遮断された非GETが送信路かどうかは判別できない。**
     sentinel_written: bool = False
+    #: 押す直前に、現れた領域の中に在った書き込める部品の数。
+    #: **0 と「在ったが書けなかった」は別の事実である。** 区別せずに
+    #: 「書き込めていません」とだけ報告すると、次に何を直すか決められない。
+    text_fields_seen: int = 0
 
     @property
     def opened(self) -> bool:
@@ -287,6 +291,12 @@ class OpenObservation:
                 lines.append(f"        消えた構造 ({len(attempt.lost)}種): {shown}")
             if attempt.sentinel_written:
                 lines.append("        押す前に、現れた領域の入力欄へ目印を書き込みました。")
+            elif attempt.text_fields_seen:
+                # **「無かった」と「在ったが書けなかった」を区別する。**
+                lines.append(
+                    f"        現れた領域に書き込める部品が {attempt.text_fields_seen} 個"
+                    " ありましたが、1つも書き込めませんでした。"
+                )
             if attempt.blocked:
                 lines.append(f"        遮断した非GET: {len(attempt.blocked)} 件")
                 for entry in rank_send_candidates(attempt.blocked)[:3]:
@@ -463,9 +473,8 @@ def explore_card_actions(
         # **押す前に目印を書き込む。** これをしないと、遮断した非GETのどれが
         # 送信路かを区別する根拠が無く、座標を推測で埋めることになる (原則3)。
         # 書き込みは送信ではない。遮断は武装したままである。
-        sentinel_written = _write_sentinel(
-            page, current_tree, current_sizes, region, sentinel, config
-        )
+        fields = revealed_text_fields(current_tree, current_sizes, region)
+        sentinel_written = _write_sentinel(page, fields, sentinel, config)
         before = _counts(page)
         clicked = False
         failure_kind = ""
@@ -529,6 +538,7 @@ def explore_card_actions(
                 failure_kind=failure_kind,
                 dispatched=dispatched,
                 sentinel_written=sentinel_written,
+                text_fields_seen=len(fields),
             )
         )
         if navigated:
@@ -541,18 +551,25 @@ def explore_card_actions(
             if gained and verified is not True:
                 # 閉じられなかった = 閉じるものではなかった (選択バー等)。
                 # 打ち切らずに、現れた領域の中を次の候補として積む。
-                queue.extend(
+                # **いま開いたものの中を先に押す (深さ優先)。**
+                #
+                # 後ろに足すと、先に開いた領域の残りを全部押してから次へ進む。
+                # 実測8回目はそれで迷子になった: スカウトのサイドカバーが開いた
+                # (150種の新出) のに、次に押したのは1つ前に開いたプロフィール
+                # モーダルの部品で、3手のうちに別画面へ遷移して終わった。
+                #
+                # 導線は「開いたものの中へ入っていく」形をしている。前に足せば
+                # その形に沿って進む -- 送信フォームは、開いた領域の奥にある。
+                queue[:0] = [
                     (control, gained)
                     for control in revealed_controls(current_tree, current_sizes, gained)
-                )
+                ]
     return tuple(results)
 
 
 def _write_sentinel(
     page: Any,
-    tree: DomTree,
-    sizes: Sequence[int],
-    region: Sequence[str],
+    fields: Sequence[ActionCandidate],
     sentinel: str,
     config: BrowserConfig,
 ) -> bool:
@@ -571,11 +588,11 @@ def _write_sentinel(
     """
     from jobmedley_scout.recon.sentinel import sentinel_body
 
-    if not region:
+    if not fields:
         return False
     text = sentinel_body(sentinel)
     wrote = False
-    for field_ in revealed_text_fields(tree, sizes, region):
+    for field_ in fields:
         selector = field_.selector()
         try:
             locator = page.locator(selector)
