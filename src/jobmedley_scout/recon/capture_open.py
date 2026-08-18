@@ -58,6 +58,7 @@ from jobmedley_scout.recon.open_structure import (
     close_candidates_in,
     opened_region,
     rank_send_candidates,
+    revealed_controls,
     vanished_region,
 )
 from jobmedley_scout.recon.yaml_paste import yaml_scalar as _scalar
@@ -236,8 +237,14 @@ class OpenObservation:
         lines.append(f"  押した候補: {len(self.attempts)} 個")
         for attempt in self.attempts:
             mark = " (クラス名がスカウト送信を名乗る部品)" if attempt.looks_like_send else ""
-            state = "押せました" if attempt.clicked else "押せませんでした"
+            state = "押せました" if attempt.clicked else "クリックは完了しませんでした"
             lines.append(f"    - {attempt.selector} の {attempt.nth} 番目: {state}{mark}")
+            if not attempt.clicked and (attempt.gained or attempt.lost):
+                # **どちらの事実も消さない。** クリックが完了しなかったのに画面が
+                # 変わったのは実際に起きる (押下は伝わり、その直後の安定性検査で
+                # 満了する)。「押せなかった」だけだと変化を、「押せた」だけだと
+                # 完了しなかった事実を、それぞれ握り潰すことになる。
+                lines.append("        ただし画面の構造は変化しました (押下は伝わった可能性)。")
             if attempt.navigated:
                 lines.append(f"        **別画面へ遷移しました** (到達URL: {self.landed_url})")
                 lines.append("        ここで探索を打ち切りました (知らない画面を押し進めない)。")
@@ -272,7 +279,12 @@ class OpenObservation:
         else:
             out.append(f"  nav.drawer_close_selectors: {UNRESOLVED_TOKEN}")
             if any(a.opened for a in self.attempts):
-                out.append("    # ドロワーは開きましたが、閉じる操作の効果を確認できませんでした。")
+                # **「ドロワーが開いた」と言わない。** 観測したのは「構造が増えた」
+                # であって、それがドロワーかは分かっていない。実測3回目で増えたのは
+                # 一括スカウト用の選択バーで、閉じるものですらなかった。
+                out.append("    # 押した結果、新しい構造は現れましたが、それが")
+                out.append("    # 閉じられる領域 (ドロワー/モーダル) かは確認できていません。")
+                out.append("    # 現れた構造は上の一覧のとおりです。")
             elif any(a.navigated for a in self.attempts):
                 out.append("    # ドロワーではなく **別画面へ遷移** する作りでした。")
                 out.append("    # 詳細が別画面で開くなら、この座標は不要かもしれません。")
@@ -335,7 +347,7 @@ def explore_card_actions(
     gate: SendGate,
     config: BrowserConfig,
     list_url: str,
-    max_attempts: int = 4,
+    max_attempts: int = 8,
 ) -> tuple[AttemptResult, ...]:
     """Press each control in one card, gate already armed. Returns what was seen.
 
@@ -345,21 +357,37 @@ def explore_card_actions(
 
     **押した後に再遷移しない** (実測1回目の失敗から)。再遷移には一覧データの
     読み込みが要るが、武装中は非GETが全て止まるので画面が戻らない。戻らない画面で
-    次を押せば、押しているのは別物である。代わりに:
+    次を押せば、押しているのは別物である。
 
-    * 開いた領域は、その中の閉じるボタンで閉じてから次へ進む
-    * URLが変わったら (別画面へ遷移する作りだった) **そこで打ち切る**。武装した
-      まま知らない画面を押し進めない
+    **現れたものを次に押す** (実測3回目で分かった形)。カードのチェックボックスを
+    押すと一括スカウト用のバー (``div.c-sticky-scout-bar``) が現れ、その中に
+    スカウトボタンがある。押した結果現れたものを辿らない限り送信画面には
+    到達しない。だから、増えた領域の中のコントロールを待ち行列に足して続ける。
+
+    以前はここで「閉じられなければ打ち切る」としていた。閉じられなかったのは
+    バグではなく **閉じるものではなかったから** である (選択バーはモーダルでは
+    ない)。閉じる試みは続けるが、閉じられないことを打ち切りの理由にはしない --
+    それをすると導線の途中で必ず止まる。
+
+    打ち切るのは **別画面へ遷移したとき** だけ。武装したまま知らない画面を
+    押し進めない。
     """
     sizes = subtree_sizes(tree)
-    candidates = card_action_candidates(tree, sizes, row_index)
+    queue: list[ActionCandidate] = list(card_action_candidates(tree, sizes, row_index))
     results: list[AttemptResult] = []
     url_before_all = page.url
+    pressed: set[str] = set()
+    current_tree = tree
+    current_sizes = sizes
 
-    for candidate in candidates[:max_attempts]:
+    while queue and len(results) < max_attempts:
+        candidate = queue.pop(0)
         selector = candidate.selector()
+        nth = _nth_within_page(current_tree, current_sizes, candidate, selector)
+        if (fingerprint := f"{selector}#{nth}") in pressed:
+            continue  # 同じものを二度押さない (現れた領域が重なると重複しうる)
+        pressed.add(fingerprint)
         before = _counts(page)
-        nth = _nth_within_page(tree, sizes, candidate, selector)
         clicked = False
         try:
             page.locator(selector).nth(nth).click(timeout=config.selector_timeout_ms)
@@ -398,15 +426,14 @@ def explore_card_actions(
         if navigated:
             # 別画面へ移ってしまった。武装したまま知らない画面を押し進めない。
             break
-        if gained and verified is not True:
-            # 開いたものを閉じられていない。次を押すと、増えた構造がどちらの押下に
-            # よるものか分からなくなる。**Escape だけ試して、駄目なら打ち切る。**
-            with suppress(Exception):
-                page.keyboard.press("Escape")
-            wait_for_structure_to_settle(page, config.selector_timeout_ms)
-            still = _counts(page)
-            if any(still.get(token, 0) > 0 for token in gained):
-                break
+        if after_tree is not None:
+            # **現れたものを次に押す。** これが送信路への導線である (docstring)。
+            current_tree = after_tree
+            current_sizes = subtree_sizes(after_tree)
+            if gained and verified is not True:
+                # 閉じられなかった = 閉じるものではなかった (選択バー等)。
+                # 打ち切らずに、現れた領域の中を次の候補として積む。
+                queue.extend(revealed_controls(current_tree, current_sizes, gained))
     return tuple(results)
 
 
