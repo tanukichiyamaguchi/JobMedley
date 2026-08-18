@@ -169,12 +169,38 @@ def test_two_send_candidates_stay_unresolved() -> None:
     assert "CreateScoutDraft" in report
 
 
-def test_no_send_candidate_says_the_bundle_may_hide_them() -> None:
-    """「無かった」で終わらせない -- persisted query の可能性を述べる。"""
+def test_a_run_that_read_almost_nothing_says_so_instead_of_blaming_the_bundle() -> None:
+    """**読んでいない場所について述べない。**
+
+    実測1回目は script を2個しか読めていないのに「素の GraphQL 文がバンドルに
+    残っていない (persisted query) 可能性」と述べた。読んでいない範囲についての
+    推測であり、運用者を媒体の作りの議論へ誘導する -- 実際の原因はこちらの
+    読み方 (素のHTMLの script タグしか見ていなかった) だった。
+    """
     report = _observation(GraphQLOperation(kind="query", name="Whatever")).render()
 
     assert "api.send.paid.url_pattern: UNRESOLVED" in report
+    assert "読めていない" in report
+    assert "persisted query" not in report, "読んでいない場所について推測している"
+
+
+def test_a_run_that_read_enough_may_name_the_possibilities() -> None:
+    """十分読んだうえで無ければ、**どちらかに決められない** と述べる。"""
+    report = BundleObservation(
+        requested_url=LIST_URL,
+        origin=ORIGIN,
+        html_read=True,
+        scripts_found=30,
+        scripts_read=30,
+        scripts_from_page=28,
+        operations=(GraphQLOperation(kind="query", name="Whatever"),),
+    ).render()
+
+    assert "api.send.paid.url_pattern: UNRESOLVED" in report
     assert "persisted query" in report
+    # 押下0回のコマンドの視野の限界も述べる。
+    assert "ドロワーを開いたときにだけ" in report
+    assert "この観測だけでは決まりません" in report
 
 
 def test_a_run_that_could_not_read_the_html_says_it_read_nothing() -> None:
