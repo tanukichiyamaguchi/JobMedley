@@ -36,6 +36,7 @@ from jobmedley_scout.browser.dom import (
     DomTree,
     dom_tree,
     login_form_visible,
+    wait_for_any_detached,
     wait_for_content_to_arrive,
     wait_for_interactive,
     wait_for_structure_to_settle,
@@ -278,6 +279,12 @@ class OpenObservation:
                 # 「その後ろに何が現れたのか」が報告から落ちる。
                 shown = ", ".join(attempt.gained[:14])
                 lines.append(f"        増えた構造 ({len(attempt.gained)}種): {shown}")
+            if attempt.lost:
+                # **消えたものも観測である。** 待機していた領域は
+                # ``u-is-hidden`` が外れる形で開くので、増えるのではなく消える。
+                # 出さないと「何も起きなかった」に見える。
+                shown = ", ".join(attempt.lost[:14])
+                lines.append(f"        消えた構造 ({len(attempt.lost)}種): {shown}")
             if attempt.sentinel_written:
                 lines.append("        押す前に、現れた領域の入力欄へ目印を書き込みました。")
             if attempt.blocked:
@@ -487,9 +494,14 @@ def explore_card_actions(
         # **中身が届くまで待ってから測る。** 構造の静止だけを見ると、読み込み
         # 表示 (``div.c-loader``) が出ている間も「落ち着いた」になり、押して
         # 現れたものが読み込み表示そのものになる (実測6回目)。
-        wait_for_content_to_arrive(page, config.selector_timeout_ms)
-        after_tree = dom_tree(page)
-        after = token_counts(after_tree) if after_tree is not None else {}
+        # **2回測る。** 1回目には読み込み表示が写り込む -- 構造の静止だけを見ても
+        # 区別できない (読み込み中も要素数は変わらない)。実測6・7回目はどちらも
+        # 「増えた構造」が div.c-loader 一色で、その後ろに現れたものが見えなかった。
+        #
+        # 1回目に現れたものの中から **どれか1つが消える** のを待ってから測り直す。
+        # 消えるのは読み込み表示であり、残るのが開いた領域である。全部が消えるのを
+        # 待つと必ず満了し、何も待たないと読み込み表示を測る -- その中間が要る。
+        after_tree, after = _measure_after_press(page, before, config)
         gained = opened_region(before, after)
         lost = vanished_region(before, after)
         blocked = _drain(gate, sentinel)
@@ -578,6 +590,39 @@ def _write_sentinel(
                 element.fill(text, timeout=config.selector_timeout_ms)
                 wrote = True
     return wrote
+
+
+def _measure_after_press(
+    page: Any, before: Mapping[str, int], config: BrowserConfig
+) -> tuple[DomTree | None, Mapping[str, int]]:
+    """Read the DOM after a press, **once the transient part has gone**.
+
+    手順は3つ。
+
+    1. 構造が落ち着くのを待って1回目を測る (ここには読み込み表示が写る)
+    2. 1回目に **新しく現れたもの** のうち、どれか1つが消えるのを待つ --
+       消えるのが読み込み表示、残るのが開いた領域である
+    3. もう一度落ち着くのを待って測り直す
+
+    2 を「全部が消える」にすると、開いた領域は残るので必ず満了する。
+    2 を省くと読み込み表示を「押して現れたもの」として測る (実測6・7回目)。
+    **どちらでもない条件が要る。**
+
+    待てなくても失敗にしない。消えるものが無い押下は正常にありうるので、その
+    ときは1回目の測定がそのまま答えになる。
+    """
+    wait_for_structure_to_settle(page, config.selector_timeout_ms)
+    early_tree = dom_tree(page)
+    early = token_counts(early_tree) if early_tree is not None else {}
+
+    appeared = opened_region(before, early)
+    if appeared:
+        wait_for_any_detached(page, list(appeared), config.selector_timeout_ms)
+        wait_for_structure_to_settle(page, config.selector_timeout_ms)
+        settled_tree = dom_tree(page)
+        if settled_tree is not None:
+            return settled_tree, token_counts(settled_tree)
+    return early_tree, early
 
 
 def _nth_within_page(

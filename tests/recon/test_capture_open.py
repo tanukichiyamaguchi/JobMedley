@@ -1138,3 +1138,108 @@ def test_a_run_that_let_nothing_through_still_says_it_blocked_everything() -> No
 
     assert "武装中の非GETは全て止めています" in report
     assert "通した読み取り" not in report
+
+
+# --- 実測7回目: 読み込み表示を「押して現れたもの」として測っていた ---------------
+
+
+def test_the_loader_does_not_become_the_revealed_region(monkeypatch) -> None:
+    """**押した直後に現れるのは読み込み表示である。** その後ろを測る。
+
+    実測6・7回目はどちらも「増えた構造」が div.c-loader 一色で、サイドカバーの
+    中身は一度も見えなかった。構造の静止だけでは足りない -- 読み込み中も要素数は
+    変わらないので「落ち着いた」と答える。
+
+    だから2回測る。1回目に現れたものの **どれか1つが消える** のを待ってから
+    測り直す。消えるのが読み込み表示で、残るのが開いた領域である。
+    """
+    import jobmedley_scout.recon.capture_open as module
+
+    card_only = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-button", "js-tour-guide-scout-button"), 1),
+    )
+    loading = _tree(
+        ("body", ("c-body", "c-body--fixed-by-sidecover"), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-button", "js-tour-guide-scout-button"), 1),
+        ("div", ("c-loader-view",), 0),
+        ("div", ("c-loader",), 3),
+    )
+    loaded = _tree(
+        ("body", ("c-body", "c-body--fixed-by-sidecover"), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-button", "js-tour-guide-scout-button"), 1),
+        ("div", ("c-scout-form",), 0),
+        ("textarea", ("c-scout-form__body",), 3),
+        ("button", ("c-scout-form__submit",), 3),
+    )
+
+    gate = SendGate()
+    page = _FakePage(gate, card_only)
+    page.tree = card_only
+
+    def _click(self, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "scout-button" in self._selector:
+            page.tree = loading  # まず読み込み表示が出る
+
+    def _any_detached(p, selectors, timeout_ms):
+        # 読み込み表示が消え、中身に差し替わった瞬間。
+        if p.tree is loading:
+            p.tree = loaded
+            return True
+        return False
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_any_detached", _any_detached)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=card_only,
+            row_index=1,
+            sentinel="ZZRECON-TEST",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+            max_attempts=1,
+        )
+    finally:
+        gate.disarm()
+
+    assert results
+    gained = results[0].gained
+    # **読み込み表示は「現れたもの」ではない。**
+    assert not any("loader" in token for token in gained), f"読み込み表示を測っている: {gained}"
+    # その後ろに現れた送信フォームが見えている。
+    assert "div.c-scout-form" in gained
+    assert "textarea.c-scout-form__body" in gained
+
+
+def test_the_report_shows_what_vanished_too() -> None:
+    """待機していた領域は ``u-is-hidden`` が外れる形で開く = **消える**。
+
+    消えたものを出さないと、その押下は「何も起きなかった」に見える。
+    """
+    attempt = AttemptResult(
+        selector="button.c-button",
+        nth=0,
+        looks_like_send=False,
+        clicked=True,
+        lost=("div.u-is-hidden",),
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
+    ).render()
+
+    assert "消えた構造 (1種): div.u-is-hidden" in report
