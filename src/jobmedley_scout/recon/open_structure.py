@@ -43,6 +43,32 @@ SEND_CLASS_HINTS: tuple[str, ...] = ("scout", "send", "offer")
 #: 操作部品とみなすタグ。``label`` はチェックボックスの当たり判定を兼ねるので含める。
 ACTION_TAGS: frozenset[str] = frozenset({"a", "button", "label", "input", "select", "textarea"})
 
+#: 「現れた領域」の根になれない要素。**ページそのものは領域ではない。**
+_PAGE_TAGS: frozenset[str] = frozenset({"html", "body"})
+
+#: 領域として扱ってよい広さの上限 (木全体に対する割合)。
+#:
+#: capture-open 6回目: スカウトのサイドカバーが開いたとき、増えたトークンに
+#: ``body.c-body--fixed-by-sidecover`` が含まれていた。body の部分木は **ページ
+#: 全体** なので、そこを領域として探索すると画面中のボタンを片端から押すことに
+#: なる -- 実際にそうなり、最後は別画面へ遷移して探索が終わった。
+#:
+#: 「ほとんど全部を含むもの」は、現れた領域ではなく **ページの状態が変わったこと**
+#: を指す目印である。目印は目印として役に立つが、押しに行く先ではない。
+REGION_MAX_SHARE = 0.5
+
+#: 広さの割合を持ち出してよい木の大きさ。
+#:
+#: **小さな木で「半分以上」と言っても何も言っていない。** 数個の要素しか無い
+#: 画面では、正当な領域が簡単に半分を超える。この規則が防ごうとしているのは
+#: 「画面中の押せるものを片端から押す」ことなので、押すものが沢山ある木でだけ
+#: 意味を持つ。下回る木では :data:`_PAGE_TAGS` だけで判断する。
+REGION_MIN_NODES = 40
+
+#: ツアー案内。押して現れても **そこは探索先ではない** (閉じる対象であって、
+#: ドロワーでも送信フォームでもない)。
+_TOUR_TOKEN = "tour-guide"
+
 #: 文字を書き込めるかもしれないタグ。``input`` の種別 (text / checkbox / hidden) は
 #: 木からは分からない -- 書き込みは失敗しうるが、**失敗しても何も起きない** ので
 #: 種別で絞らずに試す。書き込みは送信ではない。
@@ -105,6 +131,36 @@ def _candidates_in(tree: DomTree, sizes: Sequence[int], root: int) -> list[Actio
     return found
 
 
+def region_roots(
+    tree: DomTree, sizes: Sequence[int], region_tokens: Iterable[str]
+) -> tuple[int, ...]:
+    """Indices that a press's revealed region actually starts at. **Pure.**
+
+    増えたトークンに一致する要素のうち、**領域として意味を持つものだけ** を返す。
+    落とすのは2種類:
+
+    * ページ全体を覆うもの (``body`` / 木の半分以上を占める部分木)。これは
+      「領域が現れた」ではなく「ページの状態が変わった」の目印である
+      (:data:`REGION_MAX_SHARE`)
+    * ツアー案内。現れても探索先ではない
+
+    落とした結果 **空になることはありうる**。そのときは「押した結果として探索を
+    続けられる領域は無かった」が事実であり、無理に広い領域を採らない。
+    """
+    wanted = {token for token in region_tokens if _TOUR_TOKEN not in token}
+    if not wanted:
+        return ()
+    total = len(tree.nodes)
+    limit = total * REGION_MAX_SHARE if total >= REGION_MIN_NODES else float("inf")
+    found: list[int] = []
+    for index, node in enumerate(tree.nodes):
+        if node.tag in _PAGE_TAGS or sizes[index] > limit:
+            continue
+        if wanted.intersection(stable_tokens(node.tag, node.class_names)):
+            found.append(index)
+    return tuple(found)
+
+
 def _safest_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, ...]:
     """並びは (送信を名乗るものは後ろ, 文書順)。**除外はしない。**
 
@@ -138,14 +194,9 @@ def revealed_controls(
     並びは :func:`_safest_first` と同じ (送信を名乗るものは後ろ)。ただし
     **除外はしない** -- 遮断があるので、送信ボタンこそ押して正体を見る。
     """
-    wanted = set(region_tokens)
-    if not wanted:
-        return ()
     found: list[ActionCandidate] = []
     seen: set[int] = set()
-    for root, node in enumerate(tree.nodes):
-        if not wanted.intersection(stable_tokens(node.tag, node.class_names)):
-            continue
+    for root in region_roots(tree, sizes, region_tokens):
         for candidate in _candidates_in(tree, sizes, root):
             if candidate.index not in seen:
                 seen.add(candidate.index)
@@ -174,14 +225,9 @@ def revealed_text_fields(
     画面全体へ広げると、常駐している検索欄のような無関係な入力まで書き換えて
     しまい、一覧そのものが変わって探索が別物になる。
     """
-    wanted = set(region_tokens)
-    if not wanted:
-        return ()
     found: list[ActionCandidate] = []
     seen: set[int] = set()
-    for root, node in enumerate(tree.nodes):
-        if not wanted.intersection(stable_tokens(node.tag, node.class_names)):
-            continue
+    for root in region_roots(tree, sizes, region_tokens):
         for index in range(root, root + sizes[root]):
             child = tree.nodes[index]
             if child.tag not in TEXT_FIELD_TAGS or index in seen:
@@ -239,14 +285,7 @@ def close_candidates_in(
     (13.2)、媒体の言い回し変更で壊れる。クラス名が用途を名乗っているものだけを
     採る。見つからなければ空を返す (推測で埋めない, 原則3)。
     """
-    wanted = set(region_tokens)
-    if not wanted:
-        return ()
-    roots = [
-        index
-        for index, node in enumerate(tree.nodes)
-        if any(token in wanted for token in stable_tokens(node.tag, node.class_names))
-    ]
+    roots = region_roots(tree, sizes, region_tokens)
     found: list[str] = []
     for root in roots:
         for index in range(root, root + sizes[root]):

@@ -25,6 +25,7 @@ from jobmedley_scout.recon.open_structure import (
     opened_region,
     rank_send_candidates,
     redact_url,
+    region_roots,
     revealed_controls,
     revealed_text_fields,
     vanished_region,
@@ -342,3 +343,81 @@ def test_no_region_means_no_text_fields() -> None:
         ("textarea", ("c-scout-form__body",), 0),
     )
     assert revealed_text_fields(tree, subtree_sizes(tree), ()) == ()
+
+
+# --- 実測6回目: 「現れた領域」がページ全体になっていた --------------------------
+
+
+def _big_tree(*rows: tuple[str, tuple[str, ...], int], filler_parent: int = 0) -> DomTree:
+    """REGION_MIN_NODES を超える大きさの木 (割合の規則が効く大きさ)。
+
+    詰め物を ``filler_parent`` にぶら下げることで、「どの部分木がページの大半を
+    占めるか」をテストごとに決められる。
+    """
+    nodes = list(rows)
+    while len(nodes) < 60:
+        nodes.append(("span", (f"c-filler-{len(nodes)}",), filler_parent))
+    return _tree(*nodes)
+
+
+def test_a_region_that_spans_the_whole_page_is_not_a_region() -> None:
+    """**body にクラスが付いただけのものを領域にしない。**
+
+    実測6回目: スカウトのサイドカバーが開いたとき
+    ``body.c-body--fixed-by-sidecover`` が増えた。body の部分木はページ全体なので、
+    そこを領域として探索すると画面中のボタンを片端から押すことになる。実際そうなり、
+    最後は別画面へ遷移して探索が終わった。
+    """
+    tree = _big_tree(
+        ("body", ("c-body", "c-body--fixed-by-sidecover"), -1),  # 0
+        ("div", ("c-side-cover",), 0),  # 1
+        ("button", ("c-side-cover__send",), 1),  # 2
+    )
+    sizes = subtree_sizes(tree)
+
+    # body は落ちる。サイドカバーは残る。
+    assert 0 not in region_roots(tree, sizes, ("body.c-body--fixed-by-sidecover",))
+    assert region_roots(tree, sizes, ("div.c-side-cover",)) == (1,)
+
+    controls = revealed_controls(tree, sizes, ("body.c-body--fixed-by-sidecover",))
+    assert controls == (), "ページ全体を領域として押しに行っている"
+
+
+def test_a_wrapper_that_holds_most_of_the_page_is_not_a_region() -> None:
+    """body でなくても、ほとんど全部を含むものは領域ではない。"""
+    tree = _big_tree(
+        ("body", ("c-body",), -1),  # 0
+        ("div", ("c-app-wrapper",), 0),  # 1  ここに詰め物がぶら下がる
+        ("button", ("c-somewhere",), 1),  # 2
+        filler_parent=1,
+    )
+    sizes = subtree_sizes(tree)
+    assert region_roots(tree, sizes, ("div.c-app-wrapper",)) == ()
+
+
+def test_the_share_rule_does_not_apply_to_a_small_tree() -> None:
+    """**小さな木で「半分以上」と言っても何も言っていない。**
+
+    数個しか要素が無い画面では、正当な領域が簡単に半分を超える。この規則が
+    防ぎたいのは「押せるものを片端から押す」ことなので、押すものが沢山ある木で
+    だけ意味を持つ。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-sticky-scout-bar",), 0),
+        ("button", ("c-sticky-scout-bar__scout-button",), 1),
+    )
+    sizes = subtree_sizes(tree)
+    assert region_roots(tree, sizes, ("div.c-sticky-scout-bar",)) == (1,)
+
+
+def test_the_tour_guide_is_never_a_region_to_explore() -> None:
+    """ツアー案内は閉じる対象であって、ドロワーでも送信フォームでもない。"""
+    tree = _big_tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-tour-guide",), 0),
+        ("button", ("c-button",), 1),
+    )
+    sizes = subtree_sizes(tree)
+    assert region_roots(tree, sizes, ("div.c-tour-guide",)) == ()
+    assert revealed_controls(tree, sizes, ("div.c-tour-guide",)) == ()

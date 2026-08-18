@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -125,6 +126,31 @@ def wait_for_structure_to_settle(page: Any, timeout_ms: int) -> bool:
     except Exception:
         return False
     return True
+
+
+def wait_for_content_to_arrive(page: Any, timeout_ms: int) -> bool:
+    """Wait until a press's content has actually mounted, not just settled.
+
+    **構造の静止だけでは足りない場面がある** (capture-open 6回目)。
+
+    媒体は押下のあと読み込み表示 (``div.c-loader``) を出し、GraphQL で中身を
+    取ってから差し替える。**読み込み表示が出ている間、DOM の構造は静止している**
+    -- 要素数は変わらないので :func:`wait_for_structure_to_settle` は「落ち着いた」
+    と答える。その瞬間に測ると、押して現れたものは読み込み表示そのものになる。
+    実際、6回目の観測で「増えた構造」は ``div.c-loader`` 一色だった。
+
+    構造だけを見ていては、この2つを区別できない。だから **ここでだけ通信の静止を
+    併用する**。1度落ち着くのを待ち、通信が止まるのを待ち、もう1度落ち着くのを
+    待つ -- 差し替え後の構造を測るには、この順序が要る。
+
+    通信の静止は待てないことがある (計測ビーコンが鳴り続ける等)。**待てなくても
+    失敗にしない** -- 待ちは観測の精度を上げるためのもので、ここで諦めても
+    後段は「何が増えたか」を測れる。
+    """
+    wait_for_structure_to_settle(page, timeout_ms)
+    with suppress(Exception):
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    return wait_for_structure_to_settle(page, timeout_ms)
 
 
 #: ドロワー/モーダルが開いたことの手掛かり。何が増えるかは媒体依存で分からないので、
