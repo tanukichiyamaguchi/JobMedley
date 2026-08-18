@@ -109,6 +109,14 @@ jobs:
         if: inputs.command == 'observe-list'
         run: scout recon observe-list
 
+      # 配信されている JavaScript から送信APIの操作名と変数の形を読む。
+      # **通信は GET だけで、ボタンを1つも押さない** ので、送信は起こす操作
+      # そのものが存在しない。出力は操作の種別・名前・変数の型だけで、配信
+      # ファイルの原文は出さない (13.2)。
+      - name: Read bundle (GET only)
+        if: inputs.command == 'read-bundle'
+        run: scout recon read-bundle
+
       # 構造スナップショット (タグ名・クラス名・親子関係のみ。文言・id・属性値は
       # 走査の時点で取っていないので、個人データは構造的に入らない = 13.2 の
       # 「構造ダイジェスト」)。これがあると、値が出なかった実行も無駄にならない --

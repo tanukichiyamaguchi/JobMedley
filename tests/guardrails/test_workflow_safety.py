@@ -115,3 +115,54 @@ def test_preflight_sees_the_same_credentials_as_a_real_run() -> None:
     assert credentials <= scout_env
     missing = (scout_env & credentials) - recon_env
     assert not missing, f"Recon (manual) に渡っていない資格情報があります: {sorted(missing)}"
+
+
+def test_every_recon_command_actually_runs_something() -> None:
+    """**選択肢に在るのに実行するステップが無い、を禁じる。**
+
+    実際に踏んだ (2026-08-18): ``read-bundle`` を選択肢と CLI には足したが、
+    ワークフローのステップを足し忘れた。運用者が選んで実行すると、条件に
+    一致するステップが1つも無いまま **ジョブは「成功」で終わる**。
+
+    これは 原則2 の「静かなゼロ件」そのものである。失敗より悪い -- 失敗なら
+    運用者は何かがおかしいと気づくが、成功と表示されれば「実行したのに何も
+    出なかった」と受け取り、媒体側の問題を疑い始める。実際にこの1回で往復を
+    まるごと1つ無駄にした。
+
+    レビューでは見つからない。選択肢とステップは同じファイルの離れた場所に
+    あり、片方だけ足しても構文は正しいままだからである。だから機械で押さえる。
+    """
+    parsed = _parsed(RECON)
+    # PyYAML は無引用の `on:` を True と読む。
+    trigger = parsed.get("on") or parsed[True]
+    options = trigger["workflow_dispatch"]["inputs"]["command"]["options"]
+    assert options, "command の選択肢が空になっている"
+
+    steps = parsed["jobs"]["recon"]["steps"]
+    guarded = " ".join(str(step.get("if", "")) for step in steps)
+
+    missing = [option for option in options if f"'{option}'" not in guarded]
+    assert not missing, (
+        f"選択肢に在るのに実行するステップが無い command: {missing}。"
+        " 運用者が選ぶと、何も実行しないまま「成功」で終わる (静かなゼロ件)。"
+    )
+
+
+def test_every_recon_step_belongs_to_an_offered_command() -> None:
+    """逆向き: **選べないコマンドのステップが残っていないこと。**
+
+    選択肢から消しただけでステップが残ると、二度と実行されない死んだ設定に
+    なる。次に読む人は「この経路は動いている」と読み違える。
+    """
+    parsed = _parsed(RECON)
+    trigger = parsed.get("on") or parsed[True]
+    options = set(trigger["workflow_dispatch"]["inputs"]["command"]["options"])
+
+    for step in parsed["jobs"]["recon"]["steps"]:
+        condition = str(step.get("if", ""))
+        if "inputs.command ==" not in condition:
+            continue
+        named = {part.strip("' ") for part in condition.split("==")[1:]}
+        assert (
+            named & options
+        ), f"選択肢に無い command を条件にしたステップがある: {step.get('name')} ({condition})"
