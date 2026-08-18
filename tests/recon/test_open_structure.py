@@ -17,8 +17,10 @@ from __future__ import annotations
 from jobmedley_scout.browser.dom import DomNode, DomTree
 from jobmedley_scout.recon.list_structure import subtree_sizes
 from jobmedley_scout.recon.open_structure import (
+    CLICK_FAILURE_KINDS,
     BlockedRequest,
     card_action_candidates,
+    click_failure_kind,
     close_candidates_in,
     opened_region,
     rank_send_candidates,
@@ -266,3 +268,37 @@ def test_revealed_controls_stay_inside_the_region_that_appeared() -> None:
 def test_an_empty_region_reveals_nothing() -> None:
     after = _tree(("body", ("c-body",), -1), ("div", ("c-bar",), 0))
     assert revealed_controls(after, subtree_sizes(after), []) == ()
+
+
+# --- click_failure_kind (実測4回目: 8個すべて完了しなかった) ---------------------
+
+
+def test_each_playwright_failure_gets_its_own_label() -> None:
+    """**理由を握り潰さない。** 実測4回目は8個すべて「完了しませんでした」としか
+    言えず、何が起きているのか分からなかった。分類が次の手を決める。
+    """
+    cases = {
+        '<div class="c-sticky-scout-bar">…</div> intercepts pointer events': (
+            "覆われていて押下が届かない"
+        ),
+        "element is not stable - waiting...": "要素が動き続けている (アニメーション等)",
+        "element is not visible": "要素が見えない",
+        "element is not enabled": "要素が無効化されている",
+        "strict mode violation: locator resolved to 2 elements": "同じセレクタに複数一致した",
+        "Timeout 5000ms exceeded.": "満了 (理由の特定なし)",
+        "something else entirely": "その他",
+    }
+    for message, expected in cases.items():
+        assert click_failure_kind(message) == expected
+
+
+def test_the_classification_never_leaks_page_text() -> None:
+    """Playwright の例外には要素の outerHTML (= ページの文言) が混ざる。
+    **分類名だけを返し、原文は返さない** (13.2)。
+    """
+    message = '<button class="x">山田太郎さんにスカウトを送る</button> intercepts pointer events'
+
+    kind = click_failure_kind(message)
+
+    assert kind in CLICK_FAILURE_KINDS
+    assert "山田" not in kind

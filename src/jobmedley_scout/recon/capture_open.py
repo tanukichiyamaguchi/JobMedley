@@ -55,6 +55,7 @@ from jobmedley_scout.recon.open_structure import (
     ActionCandidate,
     BlockedRequest,
     card_action_candidates,
+    click_failure_kind,
     close_candidates_in,
     opened_region,
     rank_send_candidates,
@@ -112,6 +113,11 @@ class AttemptResult:
     close_verified: bool | None = None
     #: この押下がドロワーではなく **別画面への遷移** だったか。
     navigated: bool = False
+    #: クリックが完了しなかった理由の分類 (open_structure.CLICK_FAILURE_KINDS)。
+    #: 空文字は「完了した」。**生の例外メッセージは持たない** (13.2)。
+    failure_kind: str = ""
+    #: 通常のクリックが満了したので、DOMイベントを直接発火して押下を届けたか。
+    dispatched: bool = False
 
     @property
     def opened(self) -> bool:
@@ -239,6 +245,15 @@ class OpenObservation:
             mark = " (クラス名がスカウト送信を名乗る部品)" if attempt.looks_like_send else ""
             state = "押せました" if attempt.clicked else "クリックは完了しませんでした"
             lines.append(f"    - {attempt.selector} の {attempt.nth} 番目: {state}{mark}")
+            if attempt.failure_kind:
+                # **理由を必ず出す。** 実測4回目は8個すべて「完了しませんでした」
+                # としか言えず、何が起きているのか運用者にも開発側にも分からなかった。
+                detail = (
+                    "押下をDOMイベントで直接届けました"
+                    if attempt.dispatched
+                    else "押下は届いていません"
+                )
+                lines.append(f"        理由: {attempt.failure_kind} / {detail}")
             if not attempt.clicked and (attempt.gained or attempt.lost):
                 # **どちらの事実も消さない。** クリックが完了しなかったのに画面が
                 # 変わったのは実際に起きる (押下は伝わり、その直後の安定性検査で
@@ -347,7 +362,7 @@ def explore_card_actions(
     gate: SendGate,
     config: BrowserConfig,
     list_url: str,
-    max_attempts: int = 8,
+    max_attempts: int = 14,
 ) -> tuple[AttemptResult, ...]:
     """Press each control in one card, gate already armed. Returns what was seen.
 
@@ -389,11 +404,29 @@ def explore_card_actions(
         pressed.add(fingerprint)
         before = _counts(page)
         clicked = False
+        failure_kind = ""
+        dispatched = False
+        target = page.locator(selector).nth(nth)
         try:
-            page.locator(selector).nth(nth).click(timeout=config.selector_timeout_ms)
+            target.click(timeout=config.selector_timeout_ms)
             clicked = True
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 -- 理由を分類して必ず残す
+            # **理由を握り潰さない** (実測4回目: 8個すべて失敗したのに理由が
+            # 記録されておらず、次の手が打てなかった)。分類だけを持ち回る --
+            # 生のメッセージには要素の outerHTML が混ざる (13.2)。
+            failure_kind = click_failure_kind(str(exc))
+            # **押下を届ける最後の手段。** Playwright の click は「見えて・動かず・
+            # 有効で・イベントを受け取れる」まで待つ。画面下部に固定表示される
+            # 一括操作バーのような作りでは、この検査が満了し続けて **一度も押せない**。
+            # dispatch_event は DOM のイベントを直接発火するので検査を経ない。
+            #
+            # 安全性: 押す対象の選定はこれで変わらない (カードの中、または直前に
+            # 現れた領域の中に限定済み)。そして遮断は武装したままなので、送信は
+            # 物理的に起こらない。**「押せない」で観測を諦めるより、届く経路を
+            # 用意して事実を持ち帰る。**
+            with suppress(Exception):
+                target.dispatch_event("click", timeout=config.selector_timeout_ms)
+                dispatched = True
         wait_for_structure_to_settle(page, config.selector_timeout_ms)
         after_tree = dom_tree(page)
         after = token_counts(after_tree) if after_tree is not None else {}
@@ -421,6 +454,8 @@ def explore_card_actions(
                 close_candidates=closes,
                 close_verified=verified,
                 navigated=navigated,
+                failure_kind=failure_kind,
+                dispatched=dispatched,
             )
         )
         if navigated:

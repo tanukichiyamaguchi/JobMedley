@@ -733,3 +733,89 @@ def test_an_unverified_region_is_not_called_a_drawer() -> None:
     assert "nav.drawer_close_selectors: UNRESOLVED" in report
     assert "ドロワーは開きました" not in report
     assert "閉じられる領域 (ドロワー/モーダル) かは確認できていません" in report
+
+
+# --- 実測4回目: 8個すべてクリックが完了しなかった --------------------------------
+
+
+def test_a_click_that_times_out_is_still_delivered_and_says_why(monkeypatch) -> None:
+    """**実測4回目そのもの。** 画面下部に固定表示される一括操作バーがあると、
+    Playwright の操作可能性検査 (見えて・動かず・有効で・イベントを受け取れる) が
+    満了し続け、**一度も押せない**。1個目で画面が変化していたので、押下自体は
+    伝わっていた。
+
+    通常のクリックが満了したら DOM イベントを直接発火して押下を届ける。理由の
+    分類も必ず報告する -- 握り潰すと次の手が打てない。
+    """
+
+    tree = _card_page_tree()
+    gate = SendGate()
+    page = _FakePage(gate, tree)
+    _install(monkeypatch, page, tree)
+
+    def _always_times_out(self, timeout: int = 0) -> None:
+        raise TimeoutError('<div class="c-sticky-scout-bar">…</div> intercepts pointer events')
+
+    def _dispatch(self, event: str, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "scout" in self._selector:
+            page.fire_request("POST", "https://customers.job-medley.com/api/scouts", "S")
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _always_times_out)
+    monkeypatch.setattr(_FakeLocatorHandle, "dispatch_event", _dispatch, raising=False)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=tree,
+            row_index=1,
+            sentinel="S",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+
+    assert results, "1つも試していない"
+    assert all(not r.clicked for r in results)  # 通常のクリックは通らない
+    assert all(r.dispatched for r in results)  # それでも押下は届いた
+    assert all(r.failure_kind == "覆われていて押下が届かない" for r in results)
+    # **届いた押下は、武装した遮断の内側にある。** 送信は起きない。
+    assert page.sent == []
+    assert any(e.carried_sentinel for r in results for e in r.blocked)
+
+
+def test_the_report_states_the_failure_reason_and_whether_it_was_delivered() -> None:
+    """「完了しませんでした」だけでは次の手が打てない。**理由と到達可否を出す。**"""
+    delivered = AttemptResult(
+        selector="label.c-checkbox",
+        nth=1,
+        looks_like_send=False,
+        clicked=False,
+        failure_kind="覆われていて押下が届かない",
+        dispatched=True,
+        gained=("div.c-sticky-scout-bar",),
+    )
+    not_delivered = AttemptResult(
+        selector="button.c-button",
+        nth=0,
+        looks_like_send=False,
+        clicked=False,
+        failure_kind="要素が見えない",
+        dispatched=False,
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(delivered, not_delivered),
+    ).render()
+
+    assert "覆われていて押下が届かない" in report
+    assert "押下をDOMイベントで直接届けました" in report
+    assert "要素が見えない" in report
+    assert "押下は届いていません" in report

@@ -254,3 +254,43 @@ def rank_send_candidates(blocked: Sequence[BlockedRequest]) -> tuple[BlockedRequ
 def subtree_holds(tree: DomTree, sizes: Sequence[int], root: int, index: int) -> bool:
     """Whether ``index`` sits inside ``root``'s subtree. **Pure.** (薄い別名)"""
     return contains(sizes, root, index)
+
+
+#: クリックが完了しなかった理由の分類。**この集合以外は出さない。**
+#: Playwright の例外メッセージには要素の outerHTML (= ページの文言) が混ざるので、
+#: **生のメッセージは決して印字しない** (13.2)。分類名だけを持ち回る。
+CLICK_FAILURE_KINDS: tuple[str, ...] = (
+    "覆われていて押下が届かない",
+    "要素が動き続けている (アニメーション等)",
+    "要素が見えない",
+    "要素が無効化されている",
+    "同じセレクタに複数一致した",
+    "満了 (理由の特定なし)",
+    "その他",
+)
+
+
+def click_failure_kind(message: str) -> str:
+    """Classify why a click did not complete. **Pure. 文言は返さない。**
+
+    実測4回目で8個すべてのクリックが完了しなかった。理由を握り潰していたので
+    「押せなかった」以上のことが分からず、次の手が打てなかった。**失敗の理由は
+    観測であり、捨ててはいけない。**
+
+    返すのは :data:`CLICK_FAILURE_KINDS` の定型句のみ。入力のメッセージには
+    要素の outerHTML が混ざりうるので、そのまま外へ出さない (13.2)。
+    """
+    lowered = message.lower()
+    if "intercepts pointer events" in lowered:
+        return "覆われていて押下が届かない"
+    if "not stable" in lowered:
+        return "要素が動き続けている (アニメーション等)"
+    if "not visible" in lowered:
+        return "要素が見えない"
+    if "not enabled" in lowered:
+        return "要素が無効化されている"
+    if "strict mode violation" in lowered:
+        return "同じセレクタに複数一致した"
+    if "timeout" in lowered:
+        return "満了 (理由の特定なし)"
+    return "その他"
