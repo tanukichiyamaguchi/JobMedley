@@ -17,13 +17,16 @@ from __future__ import annotations
 from jobmedley_scout.browser.dom import DomNode, DomTree
 from jobmedley_scout.recon.list_structure import subtree_sizes
 from jobmedley_scout.recon.open_structure import (
+    CLICK_FAILURE_KINDS,
     BlockedRequest,
     card_action_candidates,
+    click_failure_kind,
     close_candidates_in,
     opened_region,
     rank_send_candidates,
     redact_url,
     revealed_controls,
+    revealed_text_fields,
     vanished_region,
 )
 
@@ -266,3 +269,76 @@ def test_revealed_controls_stay_inside_the_region_that_appeared() -> None:
 def test_an_empty_region_reveals_nothing() -> None:
     after = _tree(("body", ("c-body",), -1), ("div", ("c-bar",), 0))
     assert revealed_controls(after, subtree_sizes(after), []) == ()
+
+
+# --- click_failure_kind (実測4回目: 8個すべて完了しなかった) ---------------------
+
+
+def test_each_playwright_failure_gets_its_own_label() -> None:
+    """**理由を握り潰さない。** 実測4回目は8個すべて「完了しませんでした」としか
+    言えず、何が起きているのか分からなかった。分類が次の手を決める。
+    """
+    cases = {
+        '<div class="c-sticky-scout-bar">…</div> intercepts pointer events': (
+            "覆われていて押下が届かない"
+        ),
+        "element is not stable - waiting...": "要素が動き続けている (アニメーション等)",
+        "element is not visible": "要素が見えない",
+        "element is not enabled": "要素が無効化されている",
+        "strict mode violation: locator resolved to 2 elements": "同じセレクタに複数一致した",
+        "Timeout 5000ms exceeded.": "満了 (理由の特定なし)",
+        "something else entirely": "その他",
+    }
+    for message, expected in cases.items():
+        assert click_failure_kind(message) == expected
+
+
+def test_the_classification_never_leaks_page_text() -> None:
+    """Playwright の例外には要素の outerHTML (= ページの文言) が混ざる。
+    **分類名だけを返し、原文は返さない** (13.2)。
+    """
+    message = '<button class="x">山田太郎さんにスカウトを送る</button> intercepts pointer events'
+
+    kind = click_failure_kind(message)
+
+    assert kind in CLICK_FAILURE_KINDS
+    assert "山田" not in kind
+
+
+# --- 現れた領域の入力欄 ---------------------------------------------------------
+
+
+def test_text_fields_are_taken_only_from_the_region_that_just_appeared() -> None:
+    """**画面全体から集めない。**
+
+    書き込みの目的は「遮断した非GETのどれが送信路かを見分けること」だけである。
+    常駐している検索欄まで書き換えると、一覧そのものが変わって、以降に押している
+    ものが別物になる (実測1回目でサイトのロゴを押したのと同じ種類の失敗)。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("form", ("c-search-form",), 0),  # 1  常駐している検索欄
+        ("input", ("c-search-form__keyword",), 1),  # 2
+        ("div", ("c-sticky-scout-bar",), 0),  # 3  押して現れた領域
+        ("input", ("c-scout-form__subject",), 3),  # 4
+        ("textarea", ("c-scout-form__body",), 3),  # 5
+        ("button", ("c-sticky-scout-bar__scout-button",), 3),  # 6
+    )
+    sizes = subtree_sizes(tree)
+
+    fields = revealed_text_fields(tree, sizes, ("div.c-sticky-scout-bar",))
+
+    assert [f.index for f in fields] == [4, 5], "領域の外の入力欄を拾っている"
+    assert [f.selector() for f in fields] == [
+        "input.c-scout-form__subject",
+        "textarea.c-scout-form__body",
+    ]
+
+
+def test_no_region_means_no_text_fields() -> None:
+    """領域が空なら書き込む先も無い (カードの中の候補を押すとき)。"""
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("textarea", ("c-scout-form__body",), 0),
+    )
+    assert revealed_text_fields(tree, subtree_sizes(tree), ()) == ()

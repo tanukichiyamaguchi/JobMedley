@@ -733,3 +733,314 @@ def test_an_unverified_region_is_not_called_a_drawer() -> None:
     assert "nav.drawer_close_selectors: UNRESOLVED" in report
     assert "ドロワーは開きました" not in report
     assert "閉じられる領域 (ドロワー/モーダル) かは確認できていません" in report
+
+
+# --- 実測4回目: 8個すべてクリックが完了しなかった --------------------------------
+
+
+def test_a_click_that_times_out_is_still_delivered_and_says_why(monkeypatch) -> None:
+    """**実測4回目そのもの。** 画面下部に固定表示される一括操作バーがあると、
+    Playwright の操作可能性検査 (見えて・動かず・有効で・イベントを受け取れる) が
+    満了し続け、**一度も押せない**。1個目で画面が変化していたので、押下自体は
+    伝わっていた。
+
+    通常のクリックが満了したら DOM イベントを直接発火して押下を届ける。理由の
+    分類も必ず報告する -- 握り潰すと次の手が打てない。
+    """
+
+    tree = _card_page_tree()
+    gate = SendGate()
+    page = _FakePage(gate, tree)
+    _install(monkeypatch, page, tree)
+
+    def _always_times_out(self, timeout: int = 0) -> None:
+        raise TimeoutError('<div class="c-sticky-scout-bar">…</div> intercepts pointer events')
+
+    def _dispatch(self, event: str, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "scout" in self._selector:
+            page.fire_request("POST", "https://customers.job-medley.com/api/scouts", "S")
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _always_times_out)
+    monkeypatch.setattr(_FakeLocatorHandle, "dispatch_event", _dispatch, raising=False)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=tree,
+            row_index=1,
+            sentinel="S",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+
+    assert results, "1つも試していない"
+    assert all(not r.clicked for r in results)  # 通常のクリックは通らない
+    assert all(r.dispatched for r in results)  # それでも押下は届いた
+    assert all(r.failure_kind == "覆われていて押下が届かない" for r in results)
+    # **届いた押下は、武装した遮断の内側にある。** 送信は起きない。
+    assert page.sent == []
+    assert any(e.carried_sentinel for r in results for e in r.blocked)
+
+
+def test_the_report_states_the_failure_reason_and_whether_it_was_delivered() -> None:
+    """「完了しませんでした」だけでは次の手が打てない。**理由と到達可否を出す。**"""
+    delivered = AttemptResult(
+        selector="label.c-checkbox",
+        nth=1,
+        looks_like_send=False,
+        clicked=False,
+        failure_kind="覆われていて押下が届かない",
+        dispatched=True,
+        gained=("div.c-sticky-scout-bar",),
+    )
+    not_delivered = AttemptResult(
+        selector="button.c-button",
+        nth=0,
+        looks_like_send=False,
+        clicked=False,
+        failure_kind="要素が見えない",
+        dispatched=False,
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(delivered, not_delivered),
+    ).render()
+
+    assert "覆われていて押下が届かない" in report
+    assert "押下をDOMイベントで直接届けました" in report
+    assert "要素が見えない" in report
+    assert "押下は届いていません" in report
+
+
+# --- 目印を書き込まない実行が、書き込んだふりをしない --------------------------
+
+
+def test_a_run_that_wrote_no_sentinel_says_so_instead_of_blaming_the_send_screen() -> None:
+    """**このコマンドは目印を自動では書けないことがある。**
+
+    以前の報告は、目印を運ぶ非GETが無いことを「送信画面まで到達していない」と
+    説明していた。しかし目印を1文字も書いていない実行では、**到達したかどうか
+    自体が観測されていない**。書いていないから載っていないだけである。
+
+    その説明は、すぐ上に並んでいる「遮断した非GET」の一覧と矛盾しうる --
+    送信APIを実際に叩いていても「到達していない」と書いてしまう。報告が事実と
+    食い違うことは、この工程で最もしてはいけないことである。
+    """
+    attempt = AttemptResult(
+        selector="button.c-sticky-scout-bar__scout-button",
+        nth=0,
+        looks_like_send=True,
+        clicked=True,
+        sentinel_written=False,
+        blocked=(
+            BlockedRequest(
+                method="POST",
+                url="https://customers.job-medley.com/customers/scouts/12345",
+                carried_sentinel=False,
+            ),
+        ),
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
+    ).render()
+
+    assert "送信画面まで到達していない" not in report, "観測していないことを理由にしている"
+    assert "目印を1文字も書き込めていません" in report
+    # 推測で埋めない (原則3)。候補は候補として出す。
+    assert "api.send.paid.url_pattern: UNRESOLVED" in report
+    assert "候補: POST" in report
+
+
+def test_a_run_that_wrote_the_sentinel_and_saw_nothing_says_that_instead() -> None:
+    """書いたうえで運ばれなかったのは、**意味のある観測** である。"""
+    attempt = AttemptResult(
+        selector="button.c-sticky-scout-bar__scout-button",
+        nth=0,
+        looks_like_send=True,
+        clicked=True,
+        sentinel_written=True,
+        blocked=(
+            BlockedRequest(method="POST", url="https://example.com/beacon", carried_sentinel=False),
+        ),
+    )
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=(attempt,),
+    ).render()
+
+    assert "入力欄に目印を書き込んだうえで押しましたが" in report
+    assert "目印を1文字も書き込めていません" not in report
+    assert "api.send.paid.url_pattern: UNRESOLVED" in report
+
+
+# --- 現れた領域に書き込んでから押す ---------------------------------------------
+
+
+class _ComposePage(_FakePage):
+    """チェックボックス → バー (本文欄つき) → 送信、という導線。"""
+
+    def __init__(self, gate: SendGate) -> None:
+        self._card_only = _tree(
+            ("body", ("c-body",), -1),
+            ("div", ("c-search-member-card",), 0),
+            ("label", ("c-checkbox",), 1),
+        )
+        self._with_bar = _tree(
+            ("body", ("c-body",), -1),
+            ("div", ("c-search-member-card",), 0),
+            ("label", ("c-checkbox",), 1),
+            ("div", ("c-sticky-scout-bar",), 0),
+            ("textarea", ("c-scout-form__body",), 3),
+            ("button", ("c-sticky-scout-bar__scout-button",), 3),
+        )
+        super().__init__(gate, self._card_only)
+        self.tree = self._card_only
+        self.fills: list[tuple[str, str, bool]] = []
+        self.body_text = ""
+
+    def locator(self, selector: str) -> _FakeLocator:  # type: ignore[override]
+        return _ComposeLocator(self, selector)
+
+
+class _ComposeLocator(_FakeLocator):
+    def count(self) -> int:
+        return 1
+
+    def nth(self, index: int) -> _FakeLocatorHandle:
+        return _ComposeHandle(self._page, self._selector, index)
+
+
+class _ComposeHandle(_FakeLocatorHandle):
+    def fill(self, text: str, timeout: int = 0) -> None:
+        page = self._page
+        if not self._selector.startswith("textarea"):
+            raise RuntimeError("Element is not an <input>, <textarea> or [contenteditable]")
+        page.fills.append((self._selector, text, page.gate.is_armed))  # type: ignore[attr-defined]
+        page.body_text = text  # type: ignore[attr-defined]
+
+    def click(self, timeout: int = 0) -> None:
+        page = self._page
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "checkbox" in self._selector:
+            page.tree = page._with_bar  # type: ignore[attr-defined]
+        if "scout-button" in self._selector:
+            # 媒体は、いま欄に入っている文面をそのまま本文に載せて送信する。
+            page.fire_request(
+                "POST",
+                "https://customers.job-medley.com/customers/scouts/12345",
+                page.body_text,  # type: ignore[attr-defined]
+            )
+
+
+def test_the_sentinel_is_written_into_the_revealed_region_before_pressing(monkeypatch) -> None:
+    """**書き込まなければ、どの非GETが送信路かは永遠に分からない。**
+
+    遮断は非GETを全部止めて記録する (fail-closed)。1押しで複数の非GETが出るので、
+    その中から送信路を選ぶ根拠が要る。根拠は「自分が書いた目印がその本文に
+    載っていること」だけである。
+
+    書き込みは送信ではない。そして書き込みも押下も、武装した遮断の内側で起きる。
+    """
+    import jobmedley_scout.recon.capture_open as module
+    from jobmedley_scout.recon.sentinel import make_sentinel, sentinel_body
+
+    gate = SendGate()
+    page = _ComposePage(gate)
+    sentinel = make_sentinel("test-run")
+
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_interactive", lambda *a, **k: None)
+    monkeypatch.setattr(module, "goto", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_dismiss_tour", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_close_landing_modals", lambda *a, **k: None)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=page._card_only,
+            row_index=1,
+            sentinel=sentinel,
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+
+    # 本文欄に、この実行の目印が書き込まれた。
+    assert page.fills, "現れた領域の入力欄に何も書いていない"
+    assert all(text == sentinel_body(sentinel) for _, text, _ in page.fills)
+    # **書き込みも武装の内側で起きている。**
+    assert all(armed for _, _, armed in page.fills)
+    # 送信は起きない。
+    assert page.sent == []
+
+    # 送信ボタンの押下が、書いた目印を運ぶ非GETとして観測された。
+    scout = [r for r in results if "scout-button" in r.selector]
+    assert scout, "現れたバーのボタンまで辿れていない"
+    assert scout[0].sentinel_written
+    assert any(e.carried_sentinel for e in scout[0].blocked)
+
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=results,
+    ).render()
+    assert "api.send.paid.url_pattern: UNRESOLVED" not in report
+    assert "customers/scouts/{id}" in report  # 会員IDは伏せてある (13.2)
+
+
+def test_writing_the_sentinel_never_touches_the_page_outside_the_revealed_region(
+    monkeypatch,
+) -> None:
+    """カードの中の候補は「現れた領域」を持たない。**書き込まない。**
+
+    画面全体に書き込むと、常駐している検索欄まで書き換えて一覧そのものが変わり、
+    以降に押しているものが別物になる。
+    """
+    import jobmedley_scout.recon.capture_open as module
+
+    gate = SendGate()
+    page = _ComposePage(gate)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p._card_only)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=page._card_only,
+            row_index=1,
+            sentinel="ZZRECON-TEST",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        gate.disarm()
+
+    assert page.fills == []
+    assert all(not r.sentinel_written for r in results)

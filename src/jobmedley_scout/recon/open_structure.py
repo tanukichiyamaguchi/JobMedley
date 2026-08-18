@@ -43,6 +43,11 @@ SEND_CLASS_HINTS: tuple[str, ...] = ("scout", "send", "offer")
 #: 操作部品とみなすタグ。``label`` はチェックボックスの当たり判定を兼ねるので含める。
 ACTION_TAGS: frozenset[str] = frozenset({"a", "button", "label", "input", "select", "textarea"})
 
+#: 文字を書き込めるかもしれないタグ。``input`` の種別 (text / checkbox / hidden) は
+#: 木からは分からない -- 書き込みは失敗しうるが、**失敗しても何も起きない** ので
+#: 種別で絞らずに試す。書き込みは送信ではない。
+TEXT_FIELD_TAGS: frozenset[str] = frozenset({"textarea", "input"})
+
 #: URLの中で個人を指しうる部分 (数値ID・長い英数字のトークン)。報告では伏せる (13.2)。
 _ID_SEGMENT = re.compile(r"(?<=/)(\d+|[0-9a-f]{8,})(?=/|$)", re.IGNORECASE)
 _QUERY_VALUE = re.compile(r"(?<==)[^&]+")
@@ -146,6 +151,52 @@ def revealed_controls(
                 seen.add(candidate.index)
                 found.append(candidate)
     return _safest_first(found)
+
+
+def revealed_text_fields(
+    tree: DomTree, sizes: Sequence[int], region_tokens: Iterable[str]
+) -> tuple[ActionCandidate, ...]:
+    """Text fields inside the region that a press just revealed, in document order. **Pure.**
+
+    **なぜ書き込む必要があるのか。**
+
+    段階3の成果物は ``api.send.paid.url_pattern`` である。しかし遮断した非GETは
+    1押しにつき複数出る (計測ビーコン、画面を開くための通信、そして送信)。
+    **どれが送信路かを区別する根拠は1つしかない** -- 自分で書き込んだ目印が
+    その本文に載っていることである (:mod:`recon.sentinel`)。
+
+    書き込まなければ、区別する根拠は永遠に手に入らない。それでも「たぶんこれが
+    送信路だろう」と書けば、それは推測で座標を埋めることになる (原則3)。だから
+    **押す前に書ける欄には書く**。書き込みは送信ではないし、書き込んだ内容を
+    保存しようとする通信があれば、それも遮断されている。
+
+    探索範囲を「現れた領域の中」に限るのは :func:`revealed_controls` と同じ理由。
+    画面全体へ広げると、常駐している検索欄のような無関係な入力まで書き換えて
+    しまい、一覧そのものが変わって探索が別物になる。
+    """
+    wanted = set(region_tokens)
+    if not wanted:
+        return ()
+    found: list[ActionCandidate] = []
+    seen: set[int] = set()
+    for root, node in enumerate(tree.nodes):
+        if not wanted.intersection(stable_tokens(node.tag, node.class_names)):
+            continue
+        for index in range(root, root + sizes[root]):
+            child = tree.nodes[index]
+            if child.tag not in TEXT_FIELD_TAGS or index in seen:
+                continue
+            seen.add(index)
+            blob = " ".join(child.class_names).lower()
+            found.append(
+                ActionCandidate(
+                    index=index,
+                    tag=child.tag,
+                    tokens=stable_tokens(child.tag, child.class_names),
+                    looks_like_send=any(hint in blob for hint in SEND_CLASS_HINTS),
+                )
+            )
+    return tuple(sorted(found, key=lambda c: c.index))
 
 
 def opened_region(
@@ -254,3 +305,43 @@ def rank_send_candidates(blocked: Sequence[BlockedRequest]) -> tuple[BlockedRequ
 def subtree_holds(tree: DomTree, sizes: Sequence[int], root: int, index: int) -> bool:
     """Whether ``index`` sits inside ``root``'s subtree. **Pure.** (薄い別名)"""
     return contains(sizes, root, index)
+
+
+#: クリックが完了しなかった理由の分類。**この集合以外は出さない。**
+#: Playwright の例外メッセージには要素の outerHTML (= ページの文言) が混ざるので、
+#: **生のメッセージは決して印字しない** (13.2)。分類名だけを持ち回る。
+CLICK_FAILURE_KINDS: tuple[str, ...] = (
+    "覆われていて押下が届かない",
+    "要素が動き続けている (アニメーション等)",
+    "要素が見えない",
+    "要素が無効化されている",
+    "同じセレクタに複数一致した",
+    "満了 (理由の特定なし)",
+    "その他",
+)
+
+
+def click_failure_kind(message: str) -> str:
+    """Classify why a click did not complete. **Pure. 文言は返さない。**
+
+    実測4回目で8個すべてのクリックが完了しなかった。理由を握り潰していたので
+    「押せなかった」以上のことが分からず、次の手が打てなかった。**失敗の理由は
+    観測であり、捨ててはいけない。**
+
+    返すのは :data:`CLICK_FAILURE_KINDS` の定型句のみ。入力のメッセージには
+    要素の outerHTML が混ざりうるので、そのまま外へ出さない (13.2)。
+    """
+    lowered = message.lower()
+    if "intercepts pointer events" in lowered:
+        return "覆われていて押下が届かない"
+    if "not stable" in lowered:
+        return "要素が動き続けている (アニメーション等)"
+    if "not visible" in lowered:
+        return "要素が見えない"
+    if "not enabled" in lowered:
+        return "要素が無効化されている"
+    if "strict mode violation" in lowered:
+        return "同じセレクタに複数一致した"
+    if "timeout" in lowered:
+        return "満了 (理由の特定なし)"
+    return "その他"
