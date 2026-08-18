@@ -76,6 +76,9 @@ def _build_parser() -> argparse.ArgumentParser:
     recon_sub.add_parser(
         "capture-open", help="送信遮断を武装した状態でカードのボタンを押し、ドロワーと送信路を観測"
     )
+    recon_sub.add_parser(
+        "read-bundle", help="配信JSから送信APIの操作名と変数の形を読む (GETのみ・押下なし)"
+    )
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
     recon_sub.add_parser("inbox", help="受信箱の構造を観測")
 
@@ -188,6 +191,8 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "replay-list": "recon-replay",
     "capture-send": "recon-capture-send",
     "capture-open": "recon-capture-send",
+    # 一覧URLさえ在れば読める (押下も送信も無い)。capture-open と同じ座標で足りる。
+    "read-bundle": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
 }
@@ -260,6 +265,19 @@ def _dispatch_recon(
         print("**再生 (replay)**: 保存された構造から再計算しました。媒体へは接続していません。")
         print()
         print(observed.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "read-bundle":
+        from jobmedley_scout.recon.read_bundle import read_bundle
+
+        # 認証済みのHTMLが要る (ログイン後の画面が読み込む配信ファイルを知るため)。
+        _restore_session_from_secrets(config)
+        from_bundle = read_bundle(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
+        )
+        print(from_bundle.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "capture-open":

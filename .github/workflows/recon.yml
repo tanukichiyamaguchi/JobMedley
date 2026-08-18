@@ -21,6 +21,7 @@ on:
           - observe-login
           - observe-list
           - capture-open
+          - read-bundle
           - preflight
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
