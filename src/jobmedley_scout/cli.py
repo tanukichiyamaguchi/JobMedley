@@ -77,6 +77,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "capture-open", help="送信遮断を武装した状態でカードのボタンを押し、ドロワーと送信路を観測"
     )
     recon_sub.add_parser(
+        "follow-send", help="教わった導線 (求人選択→本文→確認→送信) をそのまま辿って送信路を観測"
+    )
+    recon_sub.add_parser(
         "read-bundle", help="配信JSから送信APIの操作名と変数の形を読む (GETのみ・押下なし)"
     )
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
@@ -191,6 +194,8 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "replay-list": "recon-replay",
     "capture-send": "recon-capture-send",
     "capture-open": "recon-capture-send",
+    # 導線を辿るだけなので、必要な座標は capture-open と同じ (一覧URLと行の目印)。
+    "follow-send": "recon-capture-send",
     # 一覧URLさえ在れば読める (押下も送信も無い)。capture-open と同じ座標で足りる。
     "read-bundle": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
@@ -307,6 +312,20 @@ def _dispatch_recon(
             print(f"--- 構造スナップショット ---\n読んだDOM構造を保存しました: {path}")
             print("内容はタグ名・クラス名・親子関係のみです (13.2)。")
             _ = encode_block
+        return int(ExitCode.OK)
+
+    if args.recon_command == "follow-send":
+        from jobmedley_scout.recon.follow_send import follow_send
+
+        # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
+        _restore_session_from_secrets(config)
+        walk = follow_send(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
+            coordinates.selector("nav.list_ready_selector"),
+        )
+        print(walk.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "verify-session":

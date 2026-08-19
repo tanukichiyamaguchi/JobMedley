@@ -21,6 +21,7 @@ on:
           - observe-login
           - observe-list
           - capture-open
+          - follow-send
           - read-bundle
           - preflight
           - coordinates
@@ -140,6 +141,14 @@ jobs:
       - name: Capture open (gate armed)
         if: inputs.command == 'capture-open'
         run: scout recon capture-open
+
+      # **教わった導線をそのまま辿る。** capture-open のような目隠しの探索ではなく、
+      # 一覧の「スカウトを送る」→ 求人を選ぶ → 本文に目印 → 確認 → 送信、の順に
+      # 進む。遮断は最初の押下より前から武装しているので送信は物理的に起こらない。
+      # 出力は段ごとの到達可否と要素の構造のみで、**画面の文言は出さない** (13.2)。
+      - name: Follow send (gate armed)
+        if: inputs.command == 'follow-send'
+        run: scout recon follow-send
 
       - name: Observe list
         if: inputs.command == 'observe-list'

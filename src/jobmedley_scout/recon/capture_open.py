@@ -412,7 +412,10 @@ class OpenObservation:
         with_sentinel = [entry for entry in sends if entry.carried_sentinel]
         wrote_sentinel = any(attempt.sentinel_written for attempt in self.attempts)
         if with_sentinel:
-            out.append(f"  api.send.paid.url_pattern: {_scalar(with_sentinel[0].url)}")
+            # **会員IDは伏せたまま値にする。** 生のURLには会員番号が入り、それを
+            # Actions のログへ出すのは 13.2 が禁じている当のものである。座標名が
+            # url_pattern である以上、欲しいのも1件ぶんのURLではなく **形** である。
+            out.append(f"  api.send.paid.url_pattern: {_scalar(redact_url(with_sentinel[0].url))}")
             out.append("    # 押す直前に、現れた領域の入力欄へ書き込んだ目印を、")
             out.append("    # この非GETが本文に載せて運んでいました = 送信路。")
             out.append("    # **この通信は中断済みで、送信は行われていません。**")
