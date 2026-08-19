@@ -97,6 +97,27 @@ def validation_errors_in(tokens: Iterable[str]) -> tuple[str, ...]:
     )
 
 
+#: 値を持つ欄のタグ。不備の目印がこのタグに付いていれば、**その欄が不備の当事者**
+#: である (``li`` や ``ul`` に付いた目印は、欄ではなく「不備の一覧」を指す)。
+FIELD_TAGS: frozenset[str] = frozenset({"input", "textarea", "select"})
+
+
+def error_bearing_fields(markers: Iterable[str]) -> tuple[str, ...]:
+    """Which *fields* the validation marked as wrong, by tag. **Pure.**
+
+    不備の目印は2種類が混ざって出る。``ul.js-validation-error-message`` や
+    ``li.form-error`` は **不備の一覧そのもの** で、どの欄が悪いのかを言わない。
+    ``textarea.c-textarea--error`` のように **欄のタグに付いた目印** だけが、
+    当事者を名指ししている。
+
+    **この区別が要るのは、次に何を直すかが変わるからである。** 実測16回目は
+    ``textarea`` にだけ目印が付いていた -- つまり不足していたのは本文であって、
+    職種の選択ではなかった。一覧側の目印しか出ていない実行と混ぜて読むと、
+    「どこかが足りない」以上のことが言えず、推測で埋めにいくことになる (原則3)。
+    """
+    return tuple(sorted({token.split(".", 1)[0] for token in markers} & FIELD_TAGS))
+
+
 #: 操作部品とみなすタグ。``label`` はチェックボックスの当たり判定を兼ねるので含める。
 ACTION_TAGS: frozenset[str] = frozenset({"a", "button", "label", "input", "select", "textarea"})
 
@@ -534,6 +555,13 @@ CLICK_FAILURE_KINDS: tuple[str, ...] = (
     "満了 (理由の特定なし)",
     "その他",
 )
+
+#: 入力欄へ書き込めなかった理由の分類。**押下と同じ語彙に、書き込み固有の1つを足す。**
+#:
+#: 実測16回目、押下の失敗は分類して報告していたのに、書き込みの失敗だけは握り潰し
+#: ていた。報告は「1つも書き込めませんでした」で終わり、**なぜ書けないのかが
+#: 実行結果からは分からなかった** -- 原則2 の「静かなゼロ件」と同じ形である。
+WRITE_FAILURE_KINDS: tuple[str, ...] = (*CLICK_FAILURE_KINDS, "書いた値が残らなかった")
 
 
 def click_failure_kind(message: str) -> str:

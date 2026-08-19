@@ -59,6 +59,7 @@ from jobmedley_scout.recon.open_structure import (
     card_action_candidates,
     click_failure_kind,
     close_candidates_in,
+    error_bearing_fields,
     newly_present,
     opened_region,
     rank_send_candidates,
@@ -100,6 +101,23 @@ class StopStage(StrEnum):
 
 
 @dataclass(frozen=True)
+class WriteOutcome:
+    """What happened when the sentinel was written. **理由まで持ち帰る。**
+
+    ``bool`` だけを返していたときは「1つも書けませんでした」としか報告できず、
+    次に何を直せばよいのかが実行結果から読めなかった (実測16回目)。
+    """
+
+    #: 目印が実際に欄へ残ったか。**``fill`` が通ったことではない** (値を戻す
+    #: 作りがあるので、書いた後に読み直して確かめている)。
+    wrote: bool = False
+    #: 通常の入力が通らず、DOMへ直接書いて届けたか。
+    forced: bool = False
+    #: 書けなかった理由の分類 (:data:`~recon.open_structure.WRITE_FAILURE_KINDS`)。
+    failure_kind: str = ""
+
+
+@dataclass(frozen=True)
 class AttemptResult:
     """One button press, and everything it revealed."""
 
@@ -127,6 +145,14 @@ class AttemptResult:
     #: この押下の直前に、現れた領域の入力欄へ目印を書き込めたか。
     #: **False なら、この押下で遮断された非GETが送信路かどうかは判別できない。**
     sentinel_written: bool = False
+    #: 通常の入力が通らず、DOMへ直接書いて目印を届けたか。
+    #: **書けた事実と、どう書けたかは別に残す** -- 直接書きに頼っている間は、
+    #: 人間が同じ手順を再現できる保証が無い。
+    sentinel_forced: bool = False
+    #: 目印を書き込めなかった理由の分類 (open_structure.WRITE_FAILURE_KINDS)。
+    #: 空文字は「書けた」または「書ける部品が無かった」。
+    #: **生の例外メッセージは持たない** (13.2)。
+    write_failure_kind: str = ""
     #: 押す直前に、現れた領域の中に在った書き込める部品の数。
     #: **0 と「在ったが書けなかった」は別の事実である。** 区別せずに
     #: 「書き込めていません」とだけ報告すると、次に何を直すか決められない。
@@ -300,13 +326,34 @@ class OpenObservation:
                     "この押下では送信リクエストは発行されていません。**"
                 )
                 lines.append(f"        不備の目印: {', '.join(rejected[:6])}")
+                if blamed := error_bearing_fields(rejected):
+                    # **一覧側の目印と、欄に付いた目印を分けて述べる。**
+                    # 前者は「どこかが足りない」しか言わないが、後者は当事者を
+                    # 名指ししている。次に何を埋めるかは後者でしか決まらない。
+                    lines.append(f"        不備を訴えている欄: {', '.join(blamed)}")
+                else:
+                    lines.append(
+                        "        不備の目印は一覧側だけで、**どの欄が悪いのかは"
+                        "名指しされていません**。"
+                    )
             if attempt.sentinel_written:
-                lines.append("        押す前に、現れた領域の入力欄へ目印を書き込みました。")
+                how = (
+                    " (通常の入力は通らなかったので、DOMへ直接書きました)"
+                    if attempt.sentinel_forced
+                    else ""
+                )
+                lines.append(f"        押す前に、現れた領域の入力欄へ目印を書き込みました。{how}")
             elif attempt.text_fields_seen:
                 # **「無かった」と「在ったが書けなかった」を区別する。**
                 lines.append(
                     f"        現れた領域に書き込める部品が {attempt.text_fields_seen} 個"
                     " ありましたが、1つも書き込めませんでした。"
+                )
+                # **理由を必ず出す。** 押下の失敗には理由を付けているのに、
+                # 書き込みの失敗には付けていなかった (実測16回目)。
+                lines.append(
+                    f"        書けなかった理由: "
+                    f"{attempt.write_failure_kind or '理由は記録されていません'}"
                 )
             if attempt.blocked:
                 lines.append(f"        遮断した非GET: {len(attempt.blocked)} 件")
@@ -391,8 +438,16 @@ class OpenObservation:
             # 分からないことを理由として述べれば、それは上に並んでいる遮断済み
             # 非GETの一覧と矛盾しうる -- 報告が嘘になる。
             out.append(f"  api.send.paid.url_pattern: {UNRESOLVED_TOKEN}")
-            out.append("    # 非GETは遮断しましたが、**目印を1文字も書き込めていません**")
-            out.append("    # (押す直前に現れた領域に、書き込める入力欄が無かった)。")
+            out.append("    # 非GETは遮断しましたが、**目印を1文字も書き込めていません**。")
+            # **「無かった」と「在ったが書けなかった」を取り違えない。**
+            # 実測16回目の報告はここを「入力欄が無かった」と決め打ちしていたが、
+            # 実際には欄は在り、書き込みだけが届いていなかった。理由が違えば
+            # 次の一手も違う (欄を探し直すのか、書き方を変えるのか)。
+            if blocked_writes := [a for a in self.attempts if a.write_failure_kind]:
+                out.append("    # 書ける入力欄は在りましたが、書き込みが届きませんでした")
+                out.append(f"    # (最初に詰まった理由: {blocked_writes[0].write_failure_kind})。")
+            else:
+                out.append("    # (押す直前に現れた領域に、書き込める入力欄が無かった)。")
             out.append("    # 目印が無ければ、下の候補のどれが送信路かを **観測では**")
             out.append("    # 決められません。推測で埋めない (原則3) ため未確定のままにします。")
             for entry in sends[:3]:
@@ -502,7 +557,7 @@ def explore_card_actions(
         # 送信路かを区別する根拠が無く、座標を推測で埋めることになる (原則3)。
         # 書き込みは送信ではない。遮断は武装したままである。
         fields = revealed_text_fields(current_tree, current_sizes, region)
-        sentinel_written = _write_sentinel(page, fields, sentinel, config)
+        written = _write_sentinel(page, fields, sentinel, config)
         before = _counts(page)
         clicked = False
         failure_kind = ""
@@ -575,7 +630,9 @@ def explore_card_actions(
                 navigated=navigated,
                 failure_kind=failure_kind,
                 dispatched=dispatched,
-                sentinel_written=sentinel_written,
+                sentinel_written=written.wrote,
+                sentinel_forced=written.forced,
+                write_failure_kind=written.failure_kind,
                 text_fields_seen=len(fields),
             )
         )
@@ -621,7 +678,7 @@ def _write_sentinel(
     fields: Sequence[ActionCandidate],
     sentinel: str,
     config: BrowserConfig,
-) -> bool:
+) -> WriteOutcome:
     """Write the sentinel into the revealed region's text fields. **押下ではない。**
 
     書き込みは送信ではない。フォームに文字を入れても外向きの通信は起きないし、
@@ -631,16 +688,20 @@ def _write_sentinel(
     docstring にある -- 目印が本文に載っていることだけが、遮断した非GETの中から
     送信路を **観測で** 選び出す根拠になる。
 
-    書けなくても続ける (チェックボックスや hidden に当たれば ``fill`` は失敗する)。
-    失敗は探索の失敗ではないので握り潰してよい -- ここで落とす事実は「書けた/
-    書けなかった」の一点で、それは返り値として必ず報告に届く。
+    書けなくても探索は続ける。ただし **書けなかった理由は捨てない** --
+    実測16回目、報告は「書き込める部品が1個ありましたが、1つも書き込めません
+    でした」で終わり、なぜ書けないのかが分からなかった。押下の失敗は
+    :func:`~recon.open_structure.click_failure_kind` で分類しているのに、
+    書き込みの失敗だけを握り潰していた。**同じ失敗は、同じ強さで記録する。**
     """
     from jobmedley_scout.recon.sentinel import sentinel_body
 
     if not fields:
-        return False
+        return WriteOutcome()
     text = sentinel_body(sentinel)
     wrote = False
+    forced = False
+    failure_kind = ""
     for field_ in fields:
         selector = field_.selector()
         try:
@@ -649,13 +710,82 @@ def _write_sentinel(
         except Exception:  # noqa: BLE001 -- 数えられないだけ。探索は続ける
             continue
         for index in range(total):
-            with suppress(Exception):
-                element = locator.nth(index)
-                if not element.is_visible():
-                    continue
-                element.fill(text, timeout=config.selector_timeout_ms)
-                wrote = True
-    return wrote
+            outcome = _write_one(locator.nth(index), text, config)
+            wrote = wrote or outcome.wrote
+            forced = forced or (outcome.wrote and outcome.forced)
+            # 最初の理由だけを残す。後続の欄の理由で上書きすると、**最初に
+            # 詰まった場所** が報告から消える。
+            failure_kind = failure_kind or outcome.failure_kind
+    # 1つでも書けたなら理由は要らない (書けた事実の方が強い観測である)。
+    return WriteOutcome(wrote=wrote, forced=forced, failure_kind="" if wrote else failure_kind)
+
+
+#: 通常の入力が通らないときに、DOMへ直接書き込むための一文。
+#:
+#: **押下には最後の手段があり、書き込みには無かった。** ``fill`` は「見えて・
+#: 有効で・編集できる」まで待つ。実測16回目のスカウトフォームでは、押下と同じく
+#: この検査が最後まで通らず (要素が見えない / 覆われている)、目印が **一度も**
+#: 書き込まれないまま送信ボタンだけが押された -- 当然フォームは本文の不備を
+#: 訴えて、送信リクエストは発行されなかった。
+#:
+#: 素の代入で値を入れると、値を自前で追跡する作り (React 等) が変更に気付かない。
+#: だから **プロトタイプ側の setter を明示的に呼び**、``input`` と ``change`` を
+#: 冒泡させる。最後に ``el.value === text`` を返すので、**書けたと言えるのは
+#: 実際に値が残ったときだけ** である。
+#:
+#: 安全性: 書き込みは押下ではない。文字を入れても外向きの通信は起きず、下書き
+#: 保存のような非GETが走ったとしても遮断は武装したままである。
+_FORCE_WRITE_JS = """
+(el, text) => {
+  const proto =
+    el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+    : el instanceof HTMLInputElement ? HTMLInputElement.prototype
+    : null;
+  const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value').set;
+  if (setter) { setter.call(el, text); } else { el.value = text; }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return el.value === text;
+}
+"""
+
+
+def _write_one(element: Any, text: str, config: BrowserConfig) -> WriteOutcome:
+    """Write into one element, with the same last resort the click has.
+
+    **``is_visible()`` で先回りして諦めない。** 以前はここで見えない要素を黙って
+    飛ばしていたが、飛ばした事実は何処にも残らなかった -- 「書ける部品が1個
+    あったのに1つも書けなかった」という報告の正体がそれである。試して、
+    失敗を分類する。
+    """
+    failure_kind = ""
+    try:
+        element.fill(text, timeout=config.selector_timeout_ms)
+        if _value_holds(element, text):
+            return WriteOutcome(wrote=True)
+    except Exception as exc:  # noqa: BLE001 -- 理由を分類して必ず残す
+        # 生のメッセージには要素の outerHTML が混ざる (13.2)。分類だけを持ち回る。
+        failure_kind = click_failure_kind(str(exc))
+    try:
+        stuck = bool(element.evaluate(_FORCE_WRITE_JS, text))
+    except Exception as exc:  # noqa: BLE001
+        return WriteOutcome(failure_kind=failure_kind or click_failure_kind(str(exc)))
+    if stuck:
+        return WriteOutcome(wrote=True, forced=True)
+    return WriteOutcome(failure_kind=failure_kind or "書いた値が残らなかった")
+
+
+def _value_holds(element: Any, text: str) -> bool:
+    """Did the value actually stay? **``fill`` が通ったことは、残ったことではない。**
+
+    値を自前で管理する作りでは、書き込んだ直後に元の値へ戻されることがある。
+    戻されたのに「書き込みました」と報告すると、次の押下で遮断した非GETに目印が
+    載っていない理由を **送信路ではないから** と読み違える。
+    """
+    try:
+        return bool(element.input_value() == text)
+    except Exception:  # noqa: BLE001 -- 読めないなら「残った」とは言えない
+        return False
 
 
 def _measure_after_press(

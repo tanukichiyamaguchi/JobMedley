@@ -936,6 +936,13 @@ class _ComposeHandle(_FakeLocatorHandle):
         page.fills.append((self._selector, text, page.gate.is_armed))  # type: ignore[attr-defined]
         page.body_text = text  # type: ignore[attr-defined]
 
+    def input_value(self) -> str:
+        # **書いたあとに読み直すのが本番の作りである。** ``fill`` が通ったことは
+        # 値が残ったことではないので、実装は必ずここを読む。偽物も同じ形にする。
+        if not self._selector.startswith("textarea"):
+            raise RuntimeError("Element is not an <input>, <textarea> or [contenteditable]")
+        return self._page.body_text  # type: ignore[attr-defined,no-any-return]
+
     def click(self, timeout: int = 0) -> None:
         page = self._page
         page.clicks.append((self._selector, self._index, page.gate.is_armed))
@@ -1011,6 +1018,177 @@ def test_the_sentinel_is_written_into_the_revealed_region_before_pressing(monkey
     ).render()
     assert "api.send.paid.url_pattern: UNRESOLVED" not in report
     assert "customers/scouts/{id}" in report  # 会員IDは伏せてある (13.2)
+
+
+class _StubbornHandle(_ComposeHandle):
+    """A textarea that ``fill`` can never reach. **実測16回目の再現。**
+
+    スカウトのサイドカバーでは、押下も書き込みも Playwright の可視性検査を
+    最後まで通らなかった。押下には ``dispatch_event`` という逃げ道があったが、
+    書き込みには無く、目印は一度も入らないまま送信ボタンだけが押された。
+    """
+
+    #: DOM経由の書き込みまで失敗させるか (書けない欄そのものの再現)。
+    refuse_dom_write = False
+
+    def fill(self, text: str, timeout: int = 0) -> None:
+        raise RuntimeError("Element is not visible")
+
+    def evaluate(self, script: str, arg: object = None) -> object:
+        if not self._selector.startswith("textarea"):
+            return False
+        if type(self).refuse_dom_write:
+            return False
+        page = self._page
+        page.fills.append((self._selector, str(arg), page.gate.is_armed))  # type: ignore[attr-defined]
+        page.body_text = str(arg)  # type: ignore[attr-defined]
+        return True
+
+
+class _StubbornLocator(_ComposeLocator):
+    def nth(self, index: int) -> _FakeLocatorHandle:
+        return _StubbornHandle(self._page, self._selector, index)
+
+
+class _StubbornPage(_ComposePage):
+    def locator(self, selector: str) -> _FakeLocator:  # type: ignore[override]
+        return _StubbornLocator(self, selector)
+
+
+def _explore(page: _FakePage, monkeypatch, sentinel: str = "ZZRECON-STUBBORN") -> tuple:
+    import jobmedley_scout.recon.capture_open as module
+
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_interactive", lambda *a, **k: None)
+    monkeypatch.setattr(module, "goto", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_dismiss_tour", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_close_landing_modals", lambda *a, **k: None)
+
+    page.gate.arm()
+    try:
+        return explore_card_actions(
+            page,
+            tree=page._card_only,  # type: ignore[attr-defined]
+            row_index=1,
+            sentinel=sentinel,
+            gate=page.gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+        )
+    finally:
+        page.gate.disarm()
+
+
+def test_the_sentinel_reaches_a_field_that_fill_cannot_touch(monkeypatch) -> None:
+    """**押下に最後の手段があるなら、書き込みにも要る。**
+
+    ``fill`` は「見えて・有効で・編集できる」まで待つ。その検査が通らない欄では、
+    以前の実装は黙って諦めていた -- 報告に残るのは「書ける部品が1個あったのに
+    1つも書けなかった」だけで、理由も、次の一手も分からなかった。
+
+    DOM へ直接書けば目印は入る。そして **どう書けたかも報告する** (直接書きに
+    頼っている間は、人間が同じ手順を再現できる保証が無い)。
+    """
+    from jobmedley_scout.recon.sentinel import make_sentinel, sentinel_body
+
+    _StubbornHandle.refuse_dom_write = False
+    page = _StubbornPage(SendGate())
+    sentinel = make_sentinel("test-run")
+    results = _explore(page, monkeypatch, sentinel)
+
+    assert page.fills, "DOM経由でも目印が入っていない"
+    assert all(text == sentinel_body(sentinel) for _, text, _ in page.fills)
+    assert all(armed for _, _, armed in page.fills), "書き込みが武装の外で起きた"
+    assert page.sent == [], "送信が起きた"
+
+    scout = [r for r in results if "scout-button" in r.selector]
+    assert scout, "現れたバーのボタンまで辿れていない"
+    assert scout[0].sentinel_written
+    assert scout[0].sentinel_forced, "直接書きに頼った事実が残っていない"
+    assert not scout[0].write_failure_kind
+    # 目印が入ったので、遮断した非GETの中から送信路を **観測で** 選べる。
+    assert any(e.carried_sentinel for e in scout[0].blocked)
+
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=results,
+    ).render()
+    assert "DOMへ直接書きました" in report
+
+
+def test_a_field_that_cannot_be_written_reports_why(monkeypatch) -> None:
+    """**書けなかった理由を握り潰さない。**
+
+    「書ける部品が1個ありましたが、1つも書き込めませんでした」だけでは、欄を
+    探し直すのか書き方を変えるのかが決められない -- 原則2 の「静かなゼロ件」と
+    同じ形である。押下の失敗には理由を付けているのだから、書き込みにも付ける。
+    """
+    _StubbornHandle.refuse_dom_write = True
+    try:
+        page = _StubbornPage(SendGate())
+        results = _explore(page, monkeypatch)
+    finally:
+        _StubbornHandle.refuse_dom_write = False
+
+    assert page.fills == [], "書けていないのに書けたことになっている"
+    scout = [r for r in results if "scout-button" in r.selector]
+    assert scout, "現れたバーのボタンまで辿れていない"
+    assert not scout[0].sentinel_written
+    assert scout[0].text_fields_seen == 1, "欄が在った事実まで消えている"
+    assert scout[0].write_failure_kind == "要素が見えない"
+
+    report = OpenObservation(
+        requested_url=URL,
+        gate_armed=True,
+        tree_read=True,
+        list_rendered=True,
+        rows_found=True,
+        attempts=results,
+    ).render()
+    assert "書けなかった理由: 要素が見えない" in report
+    # **「無かった」と取り違えない。** 欄は在ったのだから、そう書く。
+    assert "書き込める入力欄が無かった" not in report
+    assert "書ける入力欄は在りましたが、書き込みが届きませんでした" in report
+
+
+def test_a_value_that_does_not_stay_is_not_reported_as_written(monkeypatch) -> None:
+    """**``fill`` が通ったことは、値が残ったことではない。**
+
+    値を自前で管理する作りでは、書いた直後に元へ戻されることがある。戻された
+    のに「書き込みました」と報告すると、次の押下で遮断した非GETに目印が載って
+    いない理由を「送信路ではないから」と読み違える -- 観測が嘘になる。
+    """
+
+    class _RevertingHandle(_ComposeHandle):
+        def fill(self, text: str, timeout: int = 0) -> None:
+            return None  # 受け取るが、値は残さない
+
+        def input_value(self) -> str:
+            return ""
+
+        def evaluate(self, script: str, arg: object = None) -> object:
+            return False
+
+    class _RevertingLocator(_ComposeLocator):
+        def nth(self, index: int) -> _FakeLocatorHandle:
+            return _RevertingHandle(self._page, self._selector, index)
+
+    class _RevertingPage(_ComposePage):
+        def locator(self, selector: str) -> _FakeLocator:  # type: ignore[override]
+            return _RevertingLocator(self, selector)
+
+    page = _RevertingPage(SendGate())
+    results = _explore(page, monkeypatch)
+
+    scout = [r for r in results if "scout-button" in r.selector]
+    assert scout, "現れたバーのボタンまで辿れていない"
+    assert not scout[0].sentinel_written, "残らなかった値を書けたことにしている"
+    assert scout[0].write_failure_kind == "書いた値が残らなかった"
 
 
 def test_writing_the_sentinel_never_touches_the_page_outside_the_revealed_region(
