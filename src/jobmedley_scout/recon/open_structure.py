@@ -36,9 +36,38 @@ from dataclasses import dataclass
 from jobmedley_scout.browser.dom import DomTree
 from jobmedley_scout.recon.list_structure import contains, stable_tokens
 
-#: クラス名がスカウト送信を名乗っている部品のトークン。**押す順の判断にのみ使う。**
-#: 除外には使わない -- 遮断を武装した状態では、これこそ押して正体を見たい部品である。
-SEND_CLASS_HINTS: tuple[str, ...] = ("scout", "send", "offer")
+#: クラス名が「送信」または「その画面の主たる操作」を名乗っている部品のトークン。
+#: **押す順の判断にのみ使う。** 除外には使わない -- 遮断を武装した状態では、
+#: これこそ押して正体を見たい部品である。
+#:
+#: 後半 (primary / important / submit / confirm) は実測11回目で足した。送信フォームの
+#: 送信ボタンらしき部品は ``button.c-button--important.c-button--center.u-m-0-auto``
+#: で、**scout / send / offer をどれも含んでいなかった**。名乗っていないものを
+#: 先に押せないままでは、上限に当たって到達しない。
+#:
+#: **これは座標を推測で埋めることではない。** ここが決めるのは押す順だけで、
+#: 外れても「後で押す」になるだけである。どれが送信路かは、目印を運ぶ非GETを
+#: 観測して初めて確定する (原則3)。
+SEND_CLASS_HINTS: tuple[str, ...] = (
+    "scout",
+    "send",
+    "offer",
+    "primary",
+    "important",
+    "submit",
+    "confirm",
+)
+
+#: クラス名が「無効」を名乗っている部品。**押しても何も起きない。**
+#:
+#: 実測11回目、探索は ``label.c-selectbox--disabled`` と
+#: ``select.c-selectbox__select--disabled`` を押しに行き、どちらも満了した。
+#: 1件につき通常のクリックと DOM イベントの2回ぶん待つので、**無効な部品1つで
+#: 30秒近く** を捨てている。上限14回・ジョブ15分の予算では致命的である。
+#:
+#: 押さない根拠は推測ではない -- クラス名が状態をそう名乗っている。名乗って
+#: いなければ従来どおり押す (押して確かめる方針は変えない)。
+DISABLED_CLASS_HINT = "disabled"
 
 #: 操作部品とみなすタグ。``label`` はチェックボックスの当たり判定を兼ねるので含める。
 ACTION_TAGS: frozenset[str] = frozenset({"a", "button", "label", "input", "select", "textarea"})
@@ -171,7 +200,7 @@ def _safest_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidat
     (:data:`FORBIDDEN_CLASS_HINTS`) は、順序ではなく除外で扱う。遮断は送信を
     止めるが、ログアウトは止めない。
     """
-    allowed = [c for c in candidates if not is_forbidden(c)]
+    allowed = [c for c in candidates if not is_forbidden(c) and not is_disabled(c)]
     return tuple(sorted(allowed, key=lambda c: (c.looks_like_send, c.index)))
 
 
@@ -208,6 +237,15 @@ def is_closing(candidate: ActionCandidate) -> bool:
     """Whether pressing this would close what we are exploring. **Pure.**"""
     blob = " ".join(candidate.tokens).lower()
     return any(hint in blob for hint in CLOSE_CLASS_HINTS)
+
+
+def is_disabled(candidate: ActionCandidate) -> bool:
+    """Whether the element's own classes say it is disabled. **Pure.**
+
+    押しても何も起きない部品に、満了ぶんの時間を払わない
+    (:data:`DISABLED_CLASS_HINT`)。
+    """
+    return DISABLED_CLASS_HINT in " ".join(candidate.tokens).lower()
 
 
 def is_forbidden(candidate: ActionCandidate) -> bool:
@@ -270,7 +308,9 @@ def _goal_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate,
     押せば探索中の領域が閉じるもの (:func:`is_closing`)。どちらも「順序を
     下げる」では足りない -- 順序が下がっても、いずれ押せば同じことが起きる。
     """
-    allowed = [c for c in candidates if not is_forbidden(c) and not is_closing(c)]
+    allowed = [
+        c for c in candidates if not is_forbidden(c) and not is_closing(c) and not is_disabled(c)
+    ]
     return tuple(sorted(allowed, key=lambda c: (not c.looks_like_send, c.index)))
 
 
