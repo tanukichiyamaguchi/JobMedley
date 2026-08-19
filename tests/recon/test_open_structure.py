@@ -22,6 +22,7 @@ from jobmedley_scout.recon.open_structure import (
     card_action_candidates,
     click_failure_kind,
     close_candidates_in,
+    newly_present,
     opened_region,
     rank_send_candidates,
     redact_url,
@@ -421,3 +422,65 @@ def test_the_tour_guide_is_never_a_region_to_explore() -> None:
     sizes = subtree_sizes(tree)
     assert region_roots(tree, sizes, ("div.c-tour-guide",)) == ()
     assert revealed_controls(tree, sizes, ("div.c-tour-guide",)) == ()
+
+
+# --- 実測9回目: 探索がヘッダのログアウトリンクを押した --------------------------
+
+
+def test_a_token_that_already_existed_is_not_a_revealed_region() -> None:
+    """**押しに行く先は「前には1つも無かった構造」に限る。**
+
+    実測9回目の事故そのもの。``a.c-link`` のように画面の至る所に在るトークンは、
+    押した結果どこかで1つ増えれば「増えた」に入る。それを領域として扱うと、
+    ページ中の ``a.c-link`` がぜんぶ根になり、探索は画面全体へ散る。
+    実際にヘッダのログアウトリンクを押し、セッションが切れて終わった。
+    """
+    before = {"a.c-link": 12, "div.c-card": 25}
+    after = {"a.c-link": 13, "div.c-card": 25, "div.c-side-cover__body": 1}
+
+    # 報告用: 何が変わったかの事実。**両方入る。**
+    assert opened_region(before, after) == ("a.c-link", "div.c-side-cover__body")
+    # 探索用: 押して初めて生まれたものだけ。
+    assert newly_present(before, after) == ("div.c-side-cover__body",)
+
+
+def test_a_token_that_vanished_is_not_newly_present() -> None:
+    before = {"div.u-is-hidden": 3}
+    after = {"div.u-is-hidden": 0, "div.c-modal__body": 1}
+    assert newly_present(before, after) == ("div.c-modal__body",)
+
+
+def test_the_logout_link_is_never_a_candidate() -> None:
+    """**押せば偵察そのものが終わる部品は、順序ではなく除外で扱う。**
+
+    遮断は送信を止めるが、ログアウトは止めない。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("div", ("c-search-member-card",), 0),  # 1
+        ("button", ("c-scout-send",), 1),  # 2
+        ("a", ("c-link", "c-link--alert", "c-header-menu__logout-link"), 1),  # 3
+    )
+    sizes = subtree_sizes(tree)
+
+    candidates = card_action_candidates(tree, sizes, 1)
+    selectors = [c.selector() for c in candidates]
+
+    assert not any("logout" in s for s in selectors), f"ログアウトを押しに行く: {selectors}"
+    # 送信を名乗る部品は **除外しない** (遮断があるので押して正体を見る)。
+    assert any("c-scout-send" in s for s in selectors)
+
+
+def test_a_revealed_region_also_excludes_the_logout_link() -> None:
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-side-cover",), 0),
+        ("a", ("c-header-menu__logout-link",), 1),
+        ("button", ("c-side-cover__send",), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    selectors = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
+
+    assert not any("logout" in s for s in selectors)
+    assert any("c-side-cover__send" in s for s in selectors)
