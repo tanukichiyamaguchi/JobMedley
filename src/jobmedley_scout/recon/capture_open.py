@@ -468,6 +468,8 @@ def explore_card_actions(
     # 現れた」ことになり、そのたびに同じ候補が積み直される。押す対象の重複は
     # ``pressed`` が防ぐが、**領域の重複は防いでいなかった。**
     followed: set[tuple[str, ...]] = set()
+    #: 探索が終わってから試す「閉じる操作」。(何番目の押下か, 候補, 領域)。
+    pending_close: tuple[int, tuple[str, ...], tuple[str, ...]] | None = None
     current_tree = tree
     current_sizes = sizes
 
@@ -531,11 +533,15 @@ def explore_card_actions(
         navigated = page.url != url_before_all
 
         closes: tuple[str, ...] = ()
-        verified: bool | None = None
         if region and after_tree is not None and not navigated:
             closes = close_candidates_in(after_tree, subtree_sizes(after_tree), region)
             if closes:
-                verified = _try_close(page, closes, region, config)
+                # **ここでは押さない。** 閉じる操作は探索の逆向きである。
+                # 実測11回目は送信フォームまで到達したあとに閉じる部品を押し、
+                # 486種の構造が一度に消えて実行が終わった。
+                # 値 (nav.drawer_close_selectors) は要るので、**探索が終わって
+                # から** 1回だけ試す (ループの後)。
+                pending_close = (len(results), closes, region)
 
         results.append(
             AttemptResult(
@@ -547,7 +553,7 @@ def explore_card_actions(
                 lost=lost,
                 blocked=blocked,
                 close_candidates=closes,
-                close_verified=verified,
+                close_verified=None,
                 navigated=navigated,
                 failure_kind=failure_kind,
                 dispatched=dispatched,
@@ -562,10 +568,10 @@ def explore_card_actions(
             # **現れたものを次に押す。** これが送信路への導線である (docstring)。
             current_tree = after_tree
             current_sizes = subtree_sizes(after_tree)
-            if region and verified is not True and region not in followed:
+            if region and region not in followed:
                 followed.add(region)
-                # 閉じられなかった = 閉じるものではなかった (選択バー等)。
-                # 打ち切らずに、現れた領域の中を次の候補として積む。
+                # 現れた領域の中を次の候補として積む。閉じられるかどうかは
+                # ここでは問わない -- 閉じる試みは探索が終わってから行う。
                 # **いま開いたものの中を先に押す (深さ優先)。**
                 #
                 # 後ろに足すと、先に開いた領域の残りを全部押してから次へ進む。
@@ -579,6 +585,16 @@ def explore_card_actions(
                     (control, region)
                     for control in revealed_controls(current_tree, current_sizes, region)
                 ]
+
+    # **探索が終わってから閉じる。** 途中で閉じると、その先が見られなくなる。
+    # ここで押しても失うものは無い -- 押す候補はもう尽きている。
+    if pending_close is not None and page.url == url_before_all:
+        index, closes, region = pending_close
+        verified = _try_close(page, closes, region, config)
+        target = results[index]
+        results[index] = AttemptResult(
+            **{**target.__dict__, "close_verified": verified},
+        )
     return tuple(results)
 
 
