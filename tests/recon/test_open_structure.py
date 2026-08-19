@@ -18,10 +18,12 @@ from jobmedley_scout.browser.dom import DomNode, DomTree
 from jobmedley_scout.recon.list_structure import subtree_sizes
 from jobmedley_scout.recon.open_structure import (
     CLICK_FAILURE_KINDS,
+    WRITE_FAILURE_KINDS,
     BlockedRequest,
     card_action_candidates,
     click_failure_kind,
     close_candidates_in,
+    error_bearing_fields,
     newly_present,
     opened_region,
     rank_send_candidates,
@@ -692,3 +694,36 @@ def test_a_disabled_control_in_a_card_is_skipped_too() -> None:
     order = [c.selector() for c in card_action_candidates(tree, sizes, 1)]
 
     assert order == ["button.c-button"], f"無効な部品を押しに行く: {order}"
+
+
+def test_only_the_markers_on_a_field_name_the_offending_field() -> None:
+    """**「どこかが足りない」と「本文が足りない」は別の観測である。**
+
+    実測16回目、送信を押して現れた不備の目印は4つあったが、欄のタグに付いて
+    いたのは ``textarea`` の2つだけだった -- つまり不足していたのは本文であって
+    職種の選択ではない。一覧側の目印 (``ul``/``li``) しか出ていない実行と
+    混ぜて読むと、次に何を埋めるかを推測で決めることになる (原則3)。
+    """
+    markers = (
+        "li.form-error",
+        "textarea.c-textarea--error",
+        "textarea.js-error",
+        "ul.js-validation-error-message",
+    )
+    assert error_bearing_fields(markers) == ("textarea",)
+
+
+def test_list_side_markers_alone_name_no_field() -> None:
+    """欄が名指しされていないことは、**そう報告できるだけの事実** である。"""
+    assert error_bearing_fields(("li.form-error", "ul.js-validation-error-message")) == ()
+
+
+def test_a_write_failure_is_classified_with_the_same_vocabulary_as_a_click() -> None:
+    """**同じ失敗は、同じ強さで記録する。**
+
+    押下の失敗だけを分類して書き込みの失敗を握り潰していたので、実測16回目の
+    報告は「1つも書き込めませんでした」で終わっていた。語彙を共有させて、
+    どちらも定型句だけが外へ出ることを保つ (13.2: 生の例外は印字しない)。
+    """
+    assert set(CLICK_FAILURE_KINDS) <= set(WRITE_FAILURE_KINDS)
+    assert "書いた値が残らなかった" in WRITE_FAILURE_KINDS
