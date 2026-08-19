@@ -80,9 +80,11 @@ jobs:
         timeout-minutes: 6
         run: pip install -e '.'
 
+      # --with-deps を付けない理由は Recon (manual) 側の同じ箇所にある
+      # (apt のミラー待ちで詰まる。必要ライブラリは実行環境に既に入っている)。
       - name: Install browser
         timeout-minutes: 8
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
 
       # 12.7: **状態のみ** をキャッシュする。資格情報は別ディレクトリ
       # (/tmp/jobmedley-credentials) にあり、ここには含まれない。

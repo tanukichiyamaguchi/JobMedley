@@ -1605,3 +1605,58 @@ Capture open (gate armed)   skipped
 
 そして、**持ち時間を増やす変更は、詰まったときの損失も増やす。** 増やすなら、
 同時に「詰まりを早く見つける仕掛け」を入れる必要があった。
+
+## 詰まっていたのは apt だった (2026-08-19, capture-open 15回目)
+
+### 段取りの上限は効いた
+
+前回入れた工程ごとの上限が、**まさに設計どおり働いた**。
+
+```
+Install          success  8秒
+Install browser  failure  8分 (上限で打ち切り)   ← ここ
+```
+
+前回は「25分ハングして全部失う」だった。今回は **8分で場所が分かった**。
+
+### 詰まりの正体
+
+```
+08:42:20  Ign:2 http://azure.archive.ubuntu.com/ubuntu noble InRelease
+08:42:20  Ign:3 ... noble-updates InRelease
+08:42:25  Get:5 https://archive.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+08:49:59  ##[error]The action 'Install browser' has timed out after 8 minutes.
+```
+
+実行環境の既定ミラー (`azure.archive.ubuntu.com`) が全て `Ign` = 応答せず、
+代替の `archive.ubuntu.com` に切り替わったあと **7分半止まった**。
+**ブラウザ本体のダウンロードは始まってすらいない。** 詰まっていたのは
+``--with-deps`` が走らせる apt である。
+
+### 対処: ``--with-deps`` を外す
+
+外してよい根拠は、成功していた回のログにある。
+
+```
+libasound2t64 is already the newest version
+libatk-bridge2.0-0t64 is already the newest version
+... (実際のライブラリは全て「最新版が入っている」)
+The following NEW packages will be installed:
+  fonts-freefont-ttf fonts-ipafont-gothic ... xfonts-utils
+```
+
+**新規に入っていたのはフォントだけ** である。Chromium の必要ライブラリは実行環境に
+すべて既に入っていた。そしてこの偵察が読むのは **タグ名とクラス名だけ** で、
+描画された文字は読まない (13.2)。フォントが無くても観測は変わらない。
+
+万一ライブラリが足りなければ **ブラウザの起動が失敗し、その旨が報告に出る**。
+静かに空振りはしないので、そのときは戻せばよい。
+
+### この回の意味
+
+**「どこで詰まったか」が分かると、対処は推測でなくなる。**
+14回目は「何かが25分かかった」しか分からず、私は最初「実行されていないのでは」と
+疑った。15回目は「apt のミラー待ちで7分半」と分かり、**その apt が要らないことも
+過去のログから確かめられた**。
+
+工程ごとの上限が生んだのは時間の節約ではなく、**原因を名指しできる観測** である。
