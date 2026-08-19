@@ -78,9 +78,30 @@ jobs:
         timeout-minutes: 6
         run: pip install -e '.'
 
+      # **``--with-deps`` を付けない。**
+      #
+      # 実測15回目、この段取りは apt のミラー待ちで7分半止まり、上限で落ちた。
+      # ブラウザ本体のダウンロードは始まってすらいない。詰まっていたのは
+      # ``--with-deps`` が走らせる apt である。
+      #
+      # 付けなくてよい根拠は、成功していた回のログにある。実行環境には Chromium の
+      # 必要ライブラリが **すべて既に入っていた**::
+      #
+      #     libasound2t64 is already the newest version
+      #     libatk-bridge2.0-0t64 is already the newest version
+      #     ... (実際のライブラリは全て「最新版が入っている」)
+      #     The following NEW packages will be installed:
+      #       fonts-freefont-ttf fonts-ipafont-gothic ... xfonts-utils
+      #
+      # **新規に入っていたのはフォントだけ** である。そしてこの偵察が読むのは
+      # タグ名とクラス名だけで、描画された文字は読まない (13.2)。フォントが
+      # 無くても観測は変わらない。
+      #
+      # 万一ライブラリが足りなければ **ブラウザの起動が失敗し、その旨が報告に出る**
+      # (静かに空振りはしない)。そのときは --with-deps を戻す。
       - name: Install browser
         timeout-minutes: 8
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
 
       # 段階2の合格条件。**失敗しても続行させない** (12.6) ので、
       # continue-on-error は付けない。安全弁の実効値と由来も印字される。
