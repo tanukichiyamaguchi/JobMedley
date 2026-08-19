@@ -568,3 +568,69 @@ def test_close_candidates_are_still_collected_for_the_coordinate() -> None:
     sizes = subtree_sizes(tree)
 
     assert close_candidates_in(tree, sizes, ("div.c-side-cover",)) == ("a.c-side-cover__close-btn",)
+
+
+# --- 実測11回目の続き: 送信ボタンが「送信」を名乗っていなかった -------------------
+
+
+def test_a_primary_action_counts_as_send_looking_for_ordering() -> None:
+    """**名乗っていない送信ボタンを、先に押せるようにする。**
+
+    実測11回目で見えた送信ボタンらしき部品は
+    ``button.c-button--important.c-button--center.u-m-0-auto`` で、
+    scout / send / offer をどれも含んでいなかった。先に押せないままでは、
+    無関係な部品を押しているうちに上限に当たって到達しない。
+
+    ここが決めるのは押す順だけである。外れても「後で押す」になるだけで、
+    どれが送信路かは目印を運ぶ非GETを観測して初めて確定する (原則3)。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-side-cover",), 0),
+        ("a", ("c-m-help", "c-m-help--link"), 1),
+        ("button", ("c-button", "c-button--important", "c-button--center"), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    order = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
+
+    assert "important" in order[0], f"主たる操作が先頭でない: {order}"
+
+
+def test_a_disabled_control_is_never_pressed() -> None:
+    """**押しても何も起きない部品に、満了ぶんの時間を払わない。**
+
+    実測11回目は ``label.c-selectbox--disabled`` と
+    ``select.c-selectbox__select--disabled`` を押しに行き、どちらも満了した。
+    1件につきクリックと DOM イベントの2回ぶん待つので、無効な部品1つで30秒近い。
+    上限14回・ジョブ15分の予算では致命的である。
+
+    推測ではない -- クラス名が状態をそう名乗っている。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-side-cover",), 0),
+        ("label", ("c-selectbox", "c-selectbox--disabled"), 1),
+        ("select", ("c-selectbox__select", "c-selectbox__select--disabled"), 1),
+        ("button", ("c-side-cover__go",), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    order = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
+
+    assert not any("disabled" in s for s in order), f"無効な部品を押しに行く: {order}"
+    assert any("go" in s for s in order)
+
+
+def test_a_disabled_control_in_a_card_is_skipped_too() -> None:
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-button", "c-button--disabled"), 1),
+        ("button", ("c-button",), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    order = [c.selector() for c in card_action_candidates(tree, sizes, 1)]
+
+    assert order == ["button.c-button"], f"無効な部品を押しに行く: {order}"
