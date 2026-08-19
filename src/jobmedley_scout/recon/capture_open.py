@@ -443,7 +443,7 @@ def explore_card_actions(
     gate: SendGate,
     config: BrowserConfig,
     list_url: str,
-    max_attempts: int = 14,
+    max_attempts: int = 22,
 ) -> tuple[AttemptResult, ...]:
     """Press each control in one card, gate already armed. Returns what was seen.
 
