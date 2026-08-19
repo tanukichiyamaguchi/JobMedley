@@ -527,3 +527,44 @@ def test_inside_a_card_the_send_control_still_comes_last() -> None:
     order = [c.selector() for c in card_action_candidates(tree, sizes, 1)]
 
     assert "scout" in order[-1], f"カードの中で送信部品が先に来ている: {order}"
+
+
+# --- 実測11回目: 送信フォームまで到達したのに、閉じるボタンを押して全部閉じた ----
+
+
+def test_a_closing_control_is_never_explored() -> None:
+    """**閉じる操作は探索の逆向きである。**
+
+    実測11回目、探索は送信フォームまで到達し、目印の書き込みにも成功した。その
+    直後に ``a.c-modal__closer`` を押し、486種の構造が一度に消えた -- 開いたものが
+    全部閉じた。以降の押下は全て「要素が無い」で満了して終わった。
+
+    順序を下げるだけでは足りない。順序が下がっても、いずれ押せば同じことが起きる。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-side-cover",), 0),
+        ("a", ("c-modal__closer",), 1),
+        ("button", ("c-side-cover__cancel",), 1),
+        ("button", ("c-button--important",), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    selectors = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
+
+    assert not any("closer" in s for s in selectors), f"閉じる部品を押しに行く: {selectors}"
+    assert not any("cancel" in s for s in selectors), f"取り消す部品を押しに行く: {selectors}"
+    # 送信らしき部品は残る。
+    assert any("important" in s for s in selectors)
+
+
+def test_close_candidates_are_still_collected_for_the_coordinate() -> None:
+    """押さないだけで、**候補としては拾う**。座標はこれで埋める (探索の後で試す)。"""
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-side-cover",), 0),
+        ("a", ("c-side-cover__close-btn",), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    assert close_candidates_in(tree, sizes, ("div.c-side-cover",)) == ("a.c-side-cover__close-btn",)

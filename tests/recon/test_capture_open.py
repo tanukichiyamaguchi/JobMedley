@@ -1404,3 +1404,65 @@ def test_the_same_region_is_never_followed_twice(monkeypatch) -> None:
 
     # 往復し続けるなら上限まで押し続ける。領域の重複を止めていれば早く尽きる。
     assert len(results) < 12, f"同じ領域を往復し続けている: {[r.selector for r in results]}"
+
+
+def test_closing_is_tried_only_after_the_exploration_finishes(monkeypatch) -> None:
+    """**探索の途中で閉じない。** 閉じるとその先が見られなくなる。
+
+    実測11回目: 送信フォームまで到達した直後に閉じる部品を押し、486種の構造が
+    一度に消えて実行が終わった。値 (nav.drawer_close_selectors) は要るので、
+    **探索が尽きてから** 1回だけ試す。
+    """
+    import jobmedley_scout.recon.capture_open as module
+
+    card = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-open",), 1),
+    )
+    opened = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-open",), 1),
+        ("div", ("c-side-cover",), 0),
+        ("a", ("c-side-cover__close-btn",), 3),
+        ("button", ("c-side-cover__deep",), 3),
+    )
+
+    gate = SendGate()
+    page = _FakePage(gate, card)
+    page.tree = card
+    order: list[str] = []
+
+    def _click(self, timeout: int = 0) -> None:
+        order.append(self._selector)
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        if "c-open" in self._selector:
+            page.tree = opened
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_any_detached", lambda *a, **k: True)
+
+    gate.arm()
+    try:
+        explore_card_actions(
+            page,
+            tree=card,
+            row_index=1,
+            sentinel="ZZRECON-TEST",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+            max_attempts=6,
+        )
+    finally:
+        gate.disarm()
+
+    deep = next((i for i, s in enumerate(order) if "deep" in s), None)
+    close = next((i for i, s in enumerate(order) if "close-btn" in s), None)
+
+    assert deep is not None, "開いた領域の奥へ入っていない"
+    if close is not None:
+        assert close > deep, f"探索の途中で閉じている: {order}"

@@ -189,6 +189,26 @@ def _safest_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidat
 #: こちらは **除外** である。遮断は送信を止めるが、ログアウトは止めない。
 FORBIDDEN_CLASS_HINTS: tuple[str, ...] = ("logout", "signout", "sign-out", "withdraw")
 
+#: 「閉じる」を名乗る部品のクラス断片。
+#:
+#: 実測11回目、探索は送信フォームまで到達し、目印の書き込みにも成功した。その
+#: 直後に ``a.c-modal__closer`` を押し、**486種の構造が一度に消えた** -- 開いた
+#: ものが全部閉じた。以降の押下は全て「要素が無い」で満了し、実行は終わった。
+#:
+#: 閉じる操作は探索の **逆向き** である。開いた先を見に行くのが目的なのだから、
+#: 開いたものを閉じる部品を途中で押す理由は無い。
+#:
+#: **ただし除外ではなく「後回し」である。** ``nav.drawer_close_selectors`` は
+#: 段階2から未確定のままで、値を得るには実際に押して領域が消えることを確かめる
+#: 必要がある。だから探索が終わってから1回だけ試す (:func:`recon.capture_open`)。
+CLOSE_CLASS_HINTS: tuple[str, ...] = ("close", "closer", "dismiss", "cancel")
+
+
+def is_closing(candidate: ActionCandidate) -> bool:
+    """Whether pressing this would close what we are exploring. **Pure.**"""
+    blob = " ".join(candidate.tokens).lower()
+    return any(hint in blob for hint in CLOSE_CLASS_HINTS)
+
 
 def is_forbidden(candidate: ActionCandidate) -> bool:
     """Whether pressing this would end the reconnaissance itself. **Pure.**"""
@@ -241,12 +261,16 @@ def revealed_controls(
 
 
 def _goal_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, ...]:
-    """並びは (送信を名乗るものが先, 文書順)。**除外は :func:`is_forbidden` だけ。**
+    """並びは (送信を名乗るものが先, 文書順)。
 
     :func:`_safest_first` の逆順である。使い分けの理由は
     :func:`revealed_controls` の docstring に書いた。
+
+    **2種類を除外する。** 押せば偵察が終わるもの (:func:`is_forbidden`) と、
+    押せば探索中の領域が閉じるもの (:func:`is_closing`)。どちらも「順序を
+    下げる」では足りない -- 順序が下がっても、いずれ押せば同じことが起きる。
     """
-    allowed = [c for c in candidates if not is_forbidden(c)]
+    allowed = [c for c in candidates if not is_forbidden(c) and not is_closing(c)]
     return tuple(sorted(allowed, key=lambda c: (not c.looks_like_send, c.index)))
 
 
