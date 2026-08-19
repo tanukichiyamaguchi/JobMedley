@@ -29,6 +29,7 @@ from jobmedley_scout.recon.open_structure import (
     region_roots,
     revealed_controls,
     revealed_text_fields,
+    validation_errors_in,
     vanished_region,
 )
 
@@ -489,29 +490,35 @@ def test_a_revealed_region_also_excludes_the_logout_link() -> None:
 # --- 実測10回目: 現れた領域の中では、送信を名乗るものを先に押す ------------------
 
 
-def test_inside_a_revealed_region_the_send_control_comes_first() -> None:
-    """**現れた領域の中では、送信を名乗る部品こそ探しているものである。**
+def test_inside_a_revealed_region_the_send_control_comes_last() -> None:
+    """**送信は最後に押す。フォームを埋めてから送る。**
 
-    カードの中とは逆順になる。カードでは「安全そうな方から押せばドロワーが先に
-    開くかもしれない」に意味があったが、開いた先では違う -- 後ろへ回すと、
-    無関係な部品を押しているうちに上限や画面遷移に当たって到達しない
-    (実測8〜10回目はいずれもそれで終わった)。
+    実測11回目までは「到達できない」ことが問題だったので、12回目の直前に順序を
+    逆にして送信を先頭へ回した。**その結果、到達はできた。そして間違いだと
+    分かった。**
 
-    安全性の緩和ではない。遮断は武装したままで、スカウト送信は GraphQL の
-    ``mutation`` なので通す条件に当たらない。
+    12回目、送信ボタンは実際に押せた。返ってきたのは送信ではなく
+    バリデーションエラー (``ul.js-validation-error-message`` /
+    ``textarea.c-textarea--error`` ほか) である。フォームが埋まる前に押したので、
+    リクエストがそもそも発行されなかった。
+
+    到達の問題は領域を跨ぐ順序 (深さ優先) で解けている。領域の **中** では、
+    人がやるのと同じ順序 -- 入力を先に、送信を最後に -- が正しい。
     """
     tree = _tree(
         ("body", ("c-body",), -1),  # 0
         ("div", ("c-side-cover",), 0),  # 1
-        ("a", ("c-side-cover__close-btn",), 1),  # 2
+        ("textarea", ("c-side-cover__body",), 1),  # 2
         ("button", ("c-side-cover__scout-send",), 1),  # 3
-        ("button", ("c-side-cover__cancel",), 1),  # 4
+        ("input", ("c-side-cover__subject",), 1),  # 4
     )
     sizes = subtree_sizes(tree)
 
     order = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
 
-    assert "scout-send" in order[0], f"送信を名乗る部品が先頭でない: {order}"
+    assert "scout-send" in order[-1], f"送信を名乗る部品が最後でない: {order}"
+    # **落とされてはいない。** 遮断があるので押して正体を見る。
+    assert any("scout-send" in s for s in order)
 
 
 def test_inside_a_card_the_send_control_still_comes_last() -> None:
@@ -573,16 +580,16 @@ def test_close_candidates_are_still_collected_for_the_coordinate() -> None:
 # --- 実測11回目の続き: 送信ボタンが「送信」を名乗っていなかった -------------------
 
 
-def test_a_primary_action_counts_as_send_looking_for_ordering() -> None:
-    """**名乗っていない送信ボタンを、先に押せるようにする。**
+def test_a_primary_action_is_recognised_as_the_send_control() -> None:
+    """**送信ボタンが「送信」を名乗っていない場合を拾う。**
 
-    実測11回目で見えた送信ボタンらしき部品は
+    実測11・12回目で見えた送信ボタンは
     ``button.c-button--important.c-button--center.u-m-0-auto`` で、
-    scout / send / offer をどれも含んでいなかった。先に押せないままでは、
-    無関係な部品を押しているうちに上限に当たって到達しない。
+    scout / send / offer をどれも含んでいなかった。認識できなければ、順序の
+    判断そのものが働かない (押す順を決める材料が無い)。
 
-    ここが決めるのは押す順だけである。外れても「後で押す」になるだけで、
-    どれが送信路かは目印を運ぶ非GETを観測して初めて確定する (原則3)。
+    認識したうえで **最後に回す** のが正しい。12回目はここを先頭に回して押し、
+    フォームが埋まる前に送信してバリデーションエラーになった。
     """
     tree = _tree(
         ("body", ("c-body",), -1),
@@ -591,10 +598,39 @@ def test_a_primary_action_counts_as_send_looking_for_ordering() -> None:
         ("button", ("c-button", "c-button--important", "c-button--center"), 1),
     )
     sizes = subtree_sizes(tree)
+    controls = revealed_controls(tree, sizes, ("div.c-side-cover",))
 
-    order = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
+    primary = next(c for c in controls if "important" in c.selector())
+    assert primary.looks_like_send, "主たる操作を送信部品として認識できていない"
+    # 認識したうえで最後に回す (フォームを埋めてから押す)。
+    assert controls[-1] is primary, f"送信部品が最後でない: {[c.selector() for c in controls]}"
 
-    assert "important" in order[0], f"主たる操作が先頭でない: {order}"
+
+def test_validation_errors_are_named_so_they_are_not_mistaken_for_a_blocked_send() -> None:
+    """**「遮断で止まった」と「そもそも送られなかった」は別の事実である。**
+
+    報告の上ではどちらも「mutation は記録されませんでした」になるが、次の一手は
+    まるで違う。前者なら座標が取れているはずで、後者はフォームを埋め直す必要がある。
+    """
+    gained = (
+        "li.c-alert__item",
+        "li.form-error",
+        "textarea.c-textarea--error",
+        "textarea.js-error",
+        "ul.js-validation-error-message",
+        "div.c-side-cover__body",
+    )
+
+    found = validation_errors_in(gained)
+
+    assert "ul.js-validation-error-message" in found
+    assert "li.form-error" in found
+    assert "textarea.c-textarea--error" in found
+    assert "div.c-side-cover__body" not in found
+
+
+def test_a_clean_press_reports_no_validation_error() -> None:
+    assert validation_errors_in(("div.c-side-cover", "button.c-button")) == ()
 
 
 def test_a_disabled_control_is_never_pressed() -> None:

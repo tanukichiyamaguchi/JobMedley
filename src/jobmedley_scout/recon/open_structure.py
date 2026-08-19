@@ -69,6 +69,34 @@ SEND_CLASS_HINTS: tuple[str, ...] = (
 #: いなければ従来どおり押す (押して確かめる方針は変えない)。
 DISABLED_CLASS_HINT = "disabled"
 
+#: 入力の不備をフォームが訴えているときに現れる構造のクラス断片。
+#:
+#: 実測12回目、送信ボタンは実際に押せた。返ってきたのは送信ではなく、これらである::
+#:
+#:     ul.js-validation-error-message, li.form-error,
+#:     textarea.c-textarea--error, textarea.js-error, ul.c-alert, li.c-alert__item
+#:
+#: **遮断で止まったのではない。リクエストがそもそも発行されていない。**
+#: この2つは報告の上では見分けがつかない ("mutation は記録されませんでした")
+#: が、次の一手はまるで違う -- 前者なら座標が取れているはずで、後者はフォームを
+#: 埋め直す必要がある。**見分けられないまま報告するのは、静かなゼロ件と同じ形**
+#: なので、現れたら名指しで述べる。
+VALIDATION_ERROR_HINTS: tuple[str, ...] = (
+    "validation-error",
+    "form-error",
+    "--error",
+    "js-error",
+)
+
+
+def validation_errors_in(tokens: Iterable[str]) -> tuple[str, ...]:
+    """Tokens that say the form rejected the input. **Pure.**"""
+    lowered = [(token, token.lower()) for token in tokens]
+    return tuple(
+        sorted(token for token, low in lowered if any(h in low for h in VALIDATION_ERROR_HINTS))
+    )
+
+
 #: 操作部品とみなすタグ。``label`` はチェックボックスの当たり判定を兼ねるので含める。
 ACTION_TAGS: frozenset[str] = frozenset({"a", "button", "label", "input", "select", "textarea"})
 
@@ -196,11 +224,16 @@ def _safest_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidat
     遮断を武装した状態では送信部品こそ押して正体を見たい -- 中断された非GETが
     そのまま ``api.send.*`` の観測になる。ここが決めるのは順序だけである。
 
-    **ただし1種類だけ除外する。** 押せば偵察そのものが終わる部品
-    (:data:`FORBIDDEN_CLASS_HINTS`) は、順序ではなく除外で扱う。遮断は送信を
-    止めるが、ログアウトは止めない。
+    **ただし3種類は除外する。** 押せば偵察そのものが終わる部品
+    (:func:`is_forbidden`)、押せば探索中の領域が閉じる部品 (:func:`is_closing`)、
+    押しても何も起きない部品 (:func:`is_disabled`)。いずれも「順序を下げる」では
+    足りない -- 順序が下がっても、いずれ押せば同じことが起きる。
+
+    遮断は送信を止めるが、ログアウトも「閉じる」も止めない。
     """
-    allowed = [c for c in candidates if not is_forbidden(c) and not is_disabled(c)]
+    allowed = [
+        c for c in candidates if not is_forbidden(c) and not is_closing(c) and not is_disabled(c)
+    ]
     return tuple(sorted(allowed, key=lambda c: (c.looks_like_send, c.index)))
 
 
@@ -275,18 +308,29 @@ def revealed_controls(
     UI (ヘッダやサイドバー) まで押しに行く -- 実測1回目でサイトのロゴを押した
     のと同じ失敗になる。
 
-    **並びはカードの中とは逆で、送信を名乗るものが先である。**
+    **並びはカードの中と同じで、送信を名乗るものは後ろである。**
 
-    カードの中では「安全そうな方から押せば、送信部品を押さずにドロワーが開く
-    かもしれない」に意味があった。しかし現れた領域の中では逆で、送信を名乗る
-    部品こそ **探しているもの** である。後ろへ回すと、無関係な部品を押している
-    うちに上限や画面遷移に当たって到達しない -- 実測8〜10回目はいずれもそれで
-    終わった。
+    実測11回目までは「到達できない」ことが問題だったので、12回目の直前に順序を
+    逆にして送信を先頭へ回した。**その結果、到達はできた。そして間違いだと
+    分かった。**
 
-    **これは安全性の緩和ではない。** 遮断は ``BLOCK_WRITES`` で武装したままで、
-    スカウト送信は GraphQL の ``mutation`` なので通す条件に当たらない。送信は
-    物理的に起こらないまま、送信路だけが観測される。押してはいけない部品
-    (:data:`FORBIDDEN_CLASS_HINTS`) は順序ではなく除外で扱う。
+    12回目、送信ボタン (``button.c-button--important...``) は実際に押せた。
+    返ってきたのは送信ではなく **バリデーションエラー** である::
+
+        増えた構造 (8種): ul.js-validation-error-message, li.form-error,
+                          textarea.c-textarea--error, textarea.js-error, ...
+
+    フォームが埋まる前に送信を押したので、リクエストがそもそも発行されなかった。
+    **送信ボタンは「探しているもの」だが、最初に押すものではない。** 同じ領域の
+    中では入力・選択を先に済ませ、送信は最後に押す -- それが人のやる順序であり、
+    フォームが要求する順序でもある。
+
+    領域を **跨ぐ** 順序 (深さ優先: いま開いたものの中へ先に入る) は別の話で、
+    そちらは正しかった。到達の問題はそれで解けている。
+
+    押してはいけない部品 (:func:`is_forbidden`)、探索を逆行させる部品
+    (:func:`is_closing`)、押しても何も起きない部品 (:func:`is_disabled`) は、
+    順序ではなく除外で扱う。
     """
     found: list[ActionCandidate] = []
     seen: set[int] = set()
@@ -295,23 +339,7 @@ def revealed_controls(
             if candidate.index not in seen:
                 seen.add(candidate.index)
                 found.append(candidate)
-    return _goal_first(found)
-
-
-def _goal_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, ...]:
-    """並びは (送信を名乗るものが先, 文書順)。
-
-    :func:`_safest_first` の逆順である。使い分けの理由は
-    :func:`revealed_controls` の docstring に書いた。
-
-    **2種類を除外する。** 押せば偵察が終わるもの (:func:`is_forbidden`) と、
-    押せば探索中の領域が閉じるもの (:func:`is_closing`)。どちらも「順序を
-    下げる」では足りない -- 順序が下がっても、いずれ押せば同じことが起きる。
-    """
-    allowed = [
-        c for c in candidates if not is_forbidden(c) and not is_closing(c) and not is_disabled(c)
-    ]
-    return tuple(sorted(allowed, key=lambda c: (not c.looks_like_send, c.index)))
+    return _safest_first(found)
 
 
 def revealed_text_fields(

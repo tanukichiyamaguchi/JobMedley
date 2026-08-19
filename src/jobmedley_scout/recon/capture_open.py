@@ -65,6 +65,7 @@ from jobmedley_scout.recon.open_structure import (
     redact_url,
     revealed_controls,
     revealed_text_fields,
+    validation_errors_in,
     vanished_region,
 )
 from jobmedley_scout.recon.yaml_paste import yaml_scalar as _scalar
@@ -290,6 +291,15 @@ class OpenObservation:
                 # 出さないと「何も起きなかった」に見える。
                 shown = ", ".join(attempt.lost[:14])
                 lines.append(f"        消えた構造 ({len(attempt.lost)}種): {shown}")
+            if rejected := validation_errors_in(attempt.gained):
+                # **遮断で止まったのか、そもそも送られなかったのかを分ける。**
+                # 報告の上ではどちらも「mutation は記録されませんでした」だが、
+                # 次の一手はまるで違う (実測12回目)。
+                lines.append(
+                    "        **フォームが入力の不備を訴えました。"
+                    "この押下では送信リクエストは発行されていません。**"
+                )
+                lines.append(f"        不備の目印: {', '.join(rejected[:6])}")
             if attempt.sentinel_written:
                 lines.append("        押す前に、現れた領域の入力欄へ目印を書き込みました。")
             elif attempt.text_fields_seen:
@@ -359,6 +369,14 @@ class OpenObservation:
             out.append("    # 押す直前に、現れた領域の入力欄へ書き込んだ目印を、")
             out.append("    # この非GETが本文に載せて運んでいました = 送信路。")
             out.append("    # **この通信は中断済みで、送信は行われていません。**")
+        elif any(validation_errors_in(a.gained) for a in self.attempts):
+            # **「押したが送られなかった」を「押せなかった」と混同しない。**
+            out.append(f"  api.send.paid.url_pattern: {UNRESOLVED_TOKEN}")
+            out.append("    # 送信ボタンは押せましたが、**フォームが入力の不備を")
+            out.append("    # 訴えて送信リクエストを発行しませんでした**。")
+            out.append("    # 遮断で止まったのではないので、この実行に送信路の")
+            out.append("    # 観測は含まれていません。フォームを埋めてから押す")
+            out.append("    # 必要があります (どの欄が不足かは上の目印を参照)。")
         elif sends and wrote_sentinel:
             # **目印を書いたうえで運ばれなかった** のは意味のある観測である。
             # 送信は別の押下の先にある (画面遷移した等)。
