@@ -217,8 +217,18 @@ def revealed_controls(
     UI (ヘッダやサイドバー) まで押しに行く -- 実測1回目でサイトのロゴを押した
     のと同じ失敗になる。
 
-    並びは :func:`_safest_first` と同じ (送信を名乗るものは後ろ)。ただし
-    **除外はしない** -- 遮断があるので、送信ボタンこそ押して正体を見る。
+    **並びはカードの中とは逆で、送信を名乗るものが先である。**
+
+    カードの中では「安全そうな方から押せば、送信部品を押さずにドロワーが開く
+    かもしれない」に意味があった。しかし現れた領域の中では逆で、送信を名乗る
+    部品こそ **探しているもの** である。後ろへ回すと、無関係な部品を押している
+    うちに上限や画面遷移に当たって到達しない -- 実測8〜10回目はいずれもそれで
+    終わった。
+
+    **これは安全性の緩和ではない。** 遮断は ``BLOCK_WRITES`` で武装したままで、
+    スカウト送信は GraphQL の ``mutation`` なので通す条件に当たらない。送信は
+    物理的に起こらないまま、送信路だけが観測される。押してはいけない部品
+    (:data:`FORBIDDEN_CLASS_HINTS`) は順序ではなく除外で扱う。
     """
     found: list[ActionCandidate] = []
     seen: set[int] = set()
@@ -227,7 +237,17 @@ def revealed_controls(
             if candidate.index not in seen:
                 seen.add(candidate.index)
                 found.append(candidate)
-    return _safest_first(found)
+    return _goal_first(found)
+
+
+def _goal_first(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, ...]:
+    """並びは (送信を名乗るものが先, 文書順)。**除外は :func:`is_forbidden` だけ。**
+
+    :func:`_safest_first` の逆順である。使い分けの理由は
+    :func:`revealed_controls` の docstring に書いた。
+    """
+    allowed = [c for c in candidates if not is_forbidden(c)]
+    return tuple(sorted(allowed, key=lambda c: (not c.looks_like_send, c.index)))
 
 
 def revealed_text_fields(
