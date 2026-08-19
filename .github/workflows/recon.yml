@@ -37,7 +37,10 @@ concurrency:
 jobs:
   recon:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 探索は1押しごとに満了ぶんを待つことがあるので、押す回数に比例して伸びる。
+    # 実測13回目は14手で7分半。上限を上げた分の余裕を持たせる (偵察は送信しない
+    # ので、長引いても状態は壊れない)。
+    timeout-minutes: 25
 
     # **本番ワークフローと同じ資格情報を渡す。** ここが揃っていないと preflight は
     # *存在しない環境* を点検することになる。実際に踏んだ: ANTHROPIC_API_KEY を

@@ -331,11 +331,33 @@ def test_text_fields_are_taken_only_from_the_region_that_just_appeared() -> None
 
     fields = revealed_text_fields(tree, sizes, ("div.c-sticky-scout-bar",))
 
-    assert [f.index for f in fields] == [4, 5], "領域の外の入力欄を拾っている"
-    assert [f.selector() for f in fields] == [
-        "input.c-scout-form__subject",
-        "textarea.c-scout-form__body",
-    ]
+    assert [f.selector() for f in fields] == ["textarea.c-scout-form__body"]
+
+
+def test_only_textareas_receive_the_sentinel() -> None:
+    """**``input`` には書かない。書き込みは「失敗しても無害」ではなかった。**
+
+    実測13回目、``input.c-text-field`` は求人を探すサジェスト欄だった。そこへ
+    目印の本文 (複数行のダミー文) を書き込んだ結果:
+
+    * ``JobOfferSearchOnScoutMessageForm`` が **54回** 走った
+    * 該当する求人は当然無く、``div.c-suggest__list`` は空のまま消えた
+    * 求人が選ばれないので、送信は ``ul.js-validation-error-message`` で弾かれた
+
+    検索欄に無関係な文字列を入れる操作は、**成功したうえでフォームを壊す**。
+    長文を受ける ``textarea`` だけが、目印を載せたい本文の欄である。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-side-cover",), 0),
+        ("input", ("c-text-field",), 1),  # 求人サジェスト欄 -- 書いてはいけない
+        ("textarea", ("c-textarea",), 1),  # 本文 -- ここに書く
+    )
+    sizes = subtree_sizes(tree)
+
+    fields = revealed_text_fields(tree, sizes, ("div.c-side-cover",))
+
+    assert [f.selector() for f in fields] == ["textarea.c-textarea"]
 
 
 def test_no_region_means_no_text_fields() -> None:
