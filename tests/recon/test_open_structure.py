@@ -484,3 +484,46 @@ def test_a_revealed_region_also_excludes_the_logout_link() -> None:
 
     assert not any("logout" in s for s in selectors)
     assert any("c-side-cover__send" in s for s in selectors)
+
+
+# --- 実測10回目: 現れた領域の中では、送信を名乗るものを先に押す ------------------
+
+
+def test_inside_a_revealed_region_the_send_control_comes_first() -> None:
+    """**現れた領域の中では、送信を名乗る部品こそ探しているものである。**
+
+    カードの中とは逆順になる。カードでは「安全そうな方から押せばドロワーが先に
+    開くかもしれない」に意味があったが、開いた先では違う -- 後ろへ回すと、
+    無関係な部品を押しているうちに上限や画面遷移に当たって到達しない
+    (実測8〜10回目はいずれもそれで終わった)。
+
+    安全性の緩和ではない。遮断は武装したままで、スカウト送信は GraphQL の
+    ``mutation`` なので通す条件に当たらない。
+    """
+    tree = _tree(
+        ("body", ("c-body",), -1),  # 0
+        ("div", ("c-side-cover",), 0),  # 1
+        ("a", ("c-side-cover__close-btn",), 1),  # 2
+        ("button", ("c-side-cover__scout-send",), 1),  # 3
+        ("button", ("c-side-cover__cancel",), 1),  # 4
+    )
+    sizes = subtree_sizes(tree)
+
+    order = [c.selector() for c in revealed_controls(tree, sizes, ("div.c-side-cover",))]
+
+    assert "scout-send" in order[0], f"送信を名乗る部品が先頭でない: {order}"
+
+
+def test_inside_a_card_the_send_control_still_comes_last() -> None:
+    """カードの中の順序は **変えていない**。"""
+    tree = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("button", ("c-button", "js-tour-guide-scout-button"), 1),
+        ("button", ("c-button", "c-button--small"), 1),
+    )
+    sizes = subtree_sizes(tree)
+
+    order = [c.selector() for c in card_action_candidates(tree, sizes, 1)]
+
+    assert "scout" in order[-1], f"カードの中で送信部品が先に来ている: {order}"

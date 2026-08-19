@@ -461,6 +461,13 @@ def explore_card_actions(
     results: list[AttemptResult] = []
     url_before_all = page.url
     pressed: set[str] = set()
+    # **同じ領域を二度は辿らない。**
+    #
+    # 実測10回目、探索はチェックボックスを入れたり外したりし続けた。入れると
+    # ``--checked`` が現れ、外すと ``--scouted`` が現れる -- 交互に「新しい領域が
+    # 現れた」ことになり、そのたびに同じ候補が積み直される。押す対象の重複は
+    # ``pressed`` が防ぐが、**領域の重複は防いでいなかった。**
+    followed: set[tuple[str, ...]] = set()
     current_tree = tree
     current_sizes = sizes
 
@@ -555,7 +562,8 @@ def explore_card_actions(
             # **現れたものを次に押す。** これが送信路への導線である (docstring)。
             current_tree = after_tree
             current_sizes = subtree_sizes(after_tree)
-            if region and verified is not True:
+            if region and verified is not True and region not in followed:
+                followed.add(region)
                 # 閉じられなかった = 閉じるものではなかった (選択バー等)。
                 # 打ち切らずに、現れた領域の中を次の候補として積む。
                 # **いま開いたものの中を先に押す (深さ優先)。**

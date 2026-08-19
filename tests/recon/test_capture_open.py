@@ -1347,3 +1347,60 @@ def test_the_report_separates_no_field_from_could_not_write() -> None:
     ).render()
 
     assert "書き込める部品が 2 個" in report
+
+
+def test_the_same_region_is_never_followed_twice(monkeypatch) -> None:
+    """**チェックボックスの入り切りで、同じ領域を往復し続けない。**
+
+    実測10回目: 入れると ``--checked`` が現れ、外すと ``--scouted`` が現れる。
+    交互に「新しい領域が現れた」ことになり、そのたびに同じ候補が積み直された。
+    押す対象の重複は防いでいたが、**領域の重複は防いでいなかった。**
+    """
+    import jobmedley_scout.recon.capture_open as module
+
+    unchecked = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("label", ("c-checkbox",), 1),
+        ("div", ("c-card--scouted",), 1),
+        ("button", ("c-scouted__x",), 3),
+    )
+    checked = _tree(
+        ("body", ("c-body",), -1),
+        ("div", ("c-search-member-card",), 0),
+        ("label", ("c-checkbox",), 1),
+        ("div", ("c-card--checked",), 1),
+        ("button", ("c-checked__y",), 3),
+    )
+
+    gate = SendGate()
+    page = _FakePage(gate, unchecked)
+    page.tree = unchecked
+
+    def _click(self, timeout: int = 0) -> None:
+        page.clicks.append((self._selector, self._index, page.gate.is_armed))
+        # 押すたびに2つの状態を往復する。
+        page.tree = checked if page.tree is unchecked else unchecked
+
+    monkeypatch.setattr(_FakeLocatorHandle, "click", _click)
+    monkeypatch.setattr(module, "dom_tree", lambda p: p.tree)
+    monkeypatch.setattr(module, "wait_for_structure_to_settle", lambda *a, **k: None)
+    monkeypatch.setattr(module, "wait_for_any_detached", lambda *a, **k: True)
+
+    gate.arm()
+    try:
+        results = explore_card_actions(
+            page,
+            tree=unchecked,
+            row_index=1,
+            sentinel="ZZRECON-TEST",
+            gate=gate,
+            config=_Config(),  # type: ignore[arg-type]
+            list_url=URL,
+            max_attempts=12,
+        )
+    finally:
+        gate.disarm()
+
+    # 往復し続けるなら上限まで押し続ける。領域の重複を止めていれば早く尽きる。
+    assert len(results) < 12, f"同じ領域を往復し続けている: {[r.selector for r in results]}"
