@@ -73,10 +73,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      # **段取りにも時間の上限を置く** (経緯は Recon (manual) 側の同じ箇所)。
+      # 上限が無いと、詰まった段取りがジョブの持ち時間を全部食い、しかも
+      # 「何もせず打ち切られた」という形でしか現れない。
       - name: Install
-        run: |
-          pip install -e '.'
-          python -m playwright install --with-deps chromium
+        timeout-minutes: 6
+        run: pip install -e '.'
+
+      - name: Install browser
+        timeout-minutes: 8
+        run: python -m playwright install --with-deps chromium
 
       # 12.7: **状態のみ** をキャッシュする。資格情報は別ディレクトリ
       # (/tmp/jobmedley-credentials) にあり、ここには含まれない。

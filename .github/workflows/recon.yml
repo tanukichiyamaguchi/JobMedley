@@ -65,10 +65,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      # **段取りにも時間の上限を置く。**
+      #
+      # 実測14回目、この段取りが25分ハングしてジョブごと打ち切られ、偵察は一度も
+      # 走らないまま往復を1つ失った。段取りに上限が無いと、詰まった段取りが
+      # ジョブの持ち時間を全部食う -- しかも「何もせず打ち切られた」という形でしか
+      # 現れないので、原因がこちらのコードに見える。
+      #
+      # 上限があれば、詰まりは **その段取りの失敗として** 見える (原則2 の
+      # 「静かなゼロ件」を作らない)。
       - name: Install
-        run: |
-          pip install -e '.'
-          python -m playwright install --with-deps chromium
+        timeout-minutes: 6
+        run: pip install -e '.'
+
+      - name: Install browser
+        timeout-minutes: 8
+        run: python -m playwright install --with-deps chromium
 
       # 段階2の合格条件。**失敗しても続行させない** (12.6) ので、
       # continue-on-error は付けない。安全弁の実効値と由来も印字される。

@@ -166,3 +166,31 @@ def test_every_recon_step_belongs_to_an_offered_command() -> None:
         assert (
             named & options
         ), f"選択肢に無い command を条件にしたステップがある: {step.get('name')} ({condition})"
+
+
+@pytest.mark.parametrize("path", [SCOUT, RECON])
+def test_every_setup_step_has_its_own_time_limit(path: Path) -> None:
+    """**詰まった段取りに、ジョブの持ち時間を全部食わせない。**
+
+    実測14回目、``playwright install`` が25分ハングしてジョブごと打ち切られ、
+    偵察は一度も走らないまま往復を1つ失った。段取りに上限が無いと、詰まりは
+    「何もせず打ち切られた」という形でしか現れず、**原因がこちらのコードに見える**。
+
+    上限があれば、詰まりはその段取りの失敗として見える (原則2)。
+    """
+    steps = _parsed(path)["jobs"].popitem()[1]["steps"]
+    setup = [
+        step
+        for step in steps
+        if "install" in str(step.get("name", "")).lower()
+        or "pip install" in str(step.get("run", ""))
+        or "playwright install" in str(step.get("run", ""))
+    ]
+    assert setup, "段取りのステップが見当たらない (この検査が空振りしている)"
+
+    missing = [
+        str(step.get("name", step.get("run", "?")))
+        for step in setup
+        if not step.get("timeout-minutes")
+    ]
+    assert not missing, f"時間の上限が無い段取り: {missing}"
