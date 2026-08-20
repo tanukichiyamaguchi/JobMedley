@@ -32,7 +32,22 @@ from jobmedley_scout.recon.resume_keys import KeyPath, discover_key_paths
 UNKNOWN_VALUE = "<{kind}>"
 
 #: 目印が載っていたキーに置く印。**ここが本文の入り口である。**
-BODY_MARKER = "<本文>"
+#:
+#: 語彙は :mod:`api.payloads` の ``PLACEHOLDER_BODY`` と **同じもの** を使う。
+#: 別の記法にすると、偵察が出した雛形を座標へ貼っても本文が差し替わらず、
+#: ``<本文>`` という文字列がそのままスカウトとして実在の候補者へ飛ぶ。
+#: 送信は取り消せない (13.6)。**出力と入力の語彙は揃えておく。**
+BODY_MARKER = "{{BODY}}"
+
+#: ``variables`` 以外の最上位キーは **そのまま残す**。
+#:
+#: 最初の実装はここを落としていた。「問い合わせ文は長いし、雛形に要るのは変数の
+#: 形である」という理屈だったが、**GraphQL は ``query`` が無いリクエストを受け
+#: 付けない** (persisted query を使う場合は ``extensions`` が代わりに要る)。
+#: 落とした雛形は、貼っても送れない雛形である。
+#:
+#: 問い合わせ文は媒体のAPIの定義そのもので、画面の文言でも個人データでもない
+#: ので 13.2 には触れない。伏せるべきは ``variables`` の **値** だけである。
 
 #: 名前だけを出してよいヘッダ。**値は1つも出さない** -- Cookie や
 #: Authorization の値はセッションそのものであり、ログに残せば漏洩である
@@ -58,6 +73,33 @@ class PayloadShape:
     #: 値を伏せた雛形 (JSON)。``api.send.paid.payload_template`` に転記する。
     template: str
 
+    def unfilled_keys(self) -> tuple[str, ...]:
+        """Key paths whose value is still a kind marker. **貼る前に埋める必要がある。**
+
+        本文 (:data:`BODY_MARKER`) は数えない -- あれは送信時にコードが差し込む。
+        """
+        try:
+            parsed = json.loads(self.template)
+        except ValueError:  # pragma: no cover - template は自前で作っている
+            return ()
+        found: list[str] = []
+
+        def _walk(node: object, prefix: str) -> None:
+            if isinstance(node, str):
+                if node.startswith("<") and node.endswith(">"):
+                    found.append(prefix)
+                return
+            if isinstance(node, Mapping):
+                for key, value in node.items():
+                    _walk(value, f"{prefix}.{key}" if prefix else str(key))
+                return
+            if isinstance(node, Sequence) and not isinstance(node, str | bytes):
+                for index, value in enumerate(node):
+                    _walk(value, f"{prefix}[{index}]")
+
+        _walk(parsed.get("variables"), "variables")
+        return tuple(found)
+
     def render(self) -> str:
         lines = ["送信リクエストの形 (**値は含まれていません** -- 13.2)", ""]
         lines.append(f"  操作名: {self.operation or '(GraphQL ではありません)'}")
@@ -72,6 +114,12 @@ class PayloadShape:
         if self.keys:
             lines.append("  変数のキーパス:")
             lines.extend(f"    {path.render()}" for path in self.keys)
+        if unfilled := self.unfilled_keys():
+            # **貼っただけでは送れない、と先に言う。** 種別の印が残ったまま送ると、
+            # ``<string>`` という文字列がそのまま媒体へ飛ぶ。送信は取り消せない
+            # (13.6) ので、埋める必要がある欄を名指ししておく。
+            lines.append("  **まだ値が決まっていない欄** (座標に貼る前に埋めること):")
+            lines.extend(f"    {key}" for key in unfilled)
         if self.header_names:
             lines.append(f"  ヘッダ名 (**値は出しません**): {', '.join(self.header_names)}")
         return "\n".join(lines)
@@ -138,12 +186,13 @@ def shape_of(
 
     operation = str(payload.get("operationName") or "")
     variables: Any = payload.get("variables")
-    # **``query`` は出さない。** GraphQL の問い合わせ文は長く、雛形に要るのは
-    # 変数の形である。操作名はURLにも出ているので、そちらで足りる。
     keys = discover_key_paths(variables) if isinstance(variables, Mapping) else ()
     body_key = _find_sentinel_key(variables, sentinel, "variables")
+    # **封筒はそのまま、中身の値だけを伏せる。** ``query`` や ``extensions`` を
+    # 落とすと、貼っても送れない雛形になる (上の BODY_MARKER の注記を参照)。
+    envelope = {str(key): value for key, value in payload.items() if key != "variables"}
     template = json.dumps(
-        {"operationName": operation, "variables": _blank(variables, sentinel)},
+        {**envelope, "variables": _blank(variables, sentinel)},
         ensure_ascii=False,
         indent=2,
         sort_keys=True,

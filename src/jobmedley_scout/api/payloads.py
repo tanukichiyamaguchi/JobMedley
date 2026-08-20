@@ -15,6 +15,7 @@ payload の形状そのものは段階3の偵察で確定する座標 (``api.sen
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -77,10 +78,69 @@ def parse_payload_template(template: Coord[str | None], *, used_by: str) -> dict
 
 #: 雛形の中でこの記法が現れたら、実際の値に差し替える。
 #: 偵察が記録した実ボディの該当箇所を、手でこの記法に書き換えて使う。
+#:
+#: **本文の記法は偵察の出力と揃えてある** (:data:`recon.payload_shape.BODY_MARKER`)。
+#: 揃っていないと、貼った雛形の本文が差し替わらないまま送信される。
 PLACEHOLDER_CANDIDATE_ID = "{{CANDIDATE_ID}}"
 PLACEHOLDER_SUBJECT = "{{SUBJECT}}"
 PLACEHOLDER_BODY = "{{BODY}}"
 PLACEHOLDER_FOLLOWUP_DAYS = "{{FOLLOWUP_DAYS}}"
+
+#: 実測20回目に観測した送信 payload には、この3つが載っていた。
+#: **どれも候補者の属性ではない** ので、上の4つの語彙では表せなかった。
+#:
+#: - 求人ID / 求人の給与ID: どの求人へのスカウトかを指す。運用者が決める値
+#: - 検索UUID: **どの検索から辿り着いた候補者か**。一覧APIの応答から持ち出す
+#:
+#: 語彙を増やしただけでは値は埋まらない。埋め方が決まるまでは
+#: :func:`assert_fully_filled` が送信を止める。
+PLACEHOLDER_JOB_OFFER_ID = "{{JOB_OFFER_ID}}"
+PLACEHOLDER_JOB_OFFER_SALARY_ID = "{{JOB_OFFER_SALARY_ID}}"
+PLACEHOLDER_SEARCH_UUID = "{{SEARCH_UUID}}"
+
+#: 偵察が「値が決まっていない」と印した箇所の記法 (``<string>`` / ``<number>`` 等)。
+UNFILLED_PATTERN = re.compile(r"^<[^<>]+>$")
+
+
+def unfilled_slots(payload: object, prefix: str = "") -> tuple[str, ...]:
+    """Key paths still holding a placeholder or a kind marker. **Pure.**
+
+    2種類ある。どちらも「まだ値が決まっていない」という同じ事実である。
+
+    - ``{{...}}`` -- 差し込むつもりだったのに差し込まれなかった
+    - ``<...>``   -- 偵察が種別だけを記録した箇所。人間がまだ埋めていない
+    """
+    found: list[str] = []
+    if isinstance(payload, str):
+        if UNFILLED_PATTERN.match(payload) or (payload.startswith("{{") and payload.endswith("}}")):
+            found.append(prefix or "(トップレベル)")
+    elif isinstance(payload, Mapping):
+        for key, value in payload.items():
+            found.extend(unfilled_slots(value, f"{prefix}.{key}" if prefix else str(key)))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            found.extend(unfilled_slots(value, f"{prefix}[{index}]"))
+    return tuple(found)
+
+
+def assert_fully_filled(payload: Mapping[str, Any], *, used_by: str) -> None:
+    """Refuse a payload that still has unfilled slots. **送信は取り消せない。**
+
+    これが無いと、埋め忘れは **失敗としてではなく成功として** 現れる。
+    ``scoutMessage`` に ``"<string>"`` の入ったスカウトが実在の候補者へ飛び、
+    月次の送信枠を1通消費し、相手の受信箱に残る。取り消す手段は無い (13.6)。
+
+    「送れなかった」は次の実行でやり直せる。「間違ったものを送った」はやり直せない。
+    **だから、迷ったら送らない側に倒す。**
+    """
+    if remaining := unfilled_slots(payload):
+        raise ConfigError(
+            f"{used_by}: payload に値の決まっていない箇所が残っています: "
+            f"{', '.join(remaining)}。"
+            f"座標 api.send.*.payload_template の該当箇所を実際の値、または "
+            f"差し込み用の記法 ({PLACEHOLDER_CANDIDATE_ID} 等) に書き換えてください。"
+            f"**このまま送ると、記法がそのまま本文や項目として媒体へ渡ります。**"
+        )
 
 
 def _substitute(node: object, values: Mapping[str, object]) -> object:
@@ -105,6 +165,7 @@ def build_send_payload(
     body: str,
     followup_days: int | None,
     used_by: str,
+    extra: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Fill a send payload template.
 
@@ -118,7 +179,11 @@ def build_send_payload(
         PLACEHOLDER_BODY: body,
         PLACEHOLDER_FOLLOWUP_DAYS: followup_days,
     }
+    values.update(extra or {})
     result = _substitute(parsed, values)
     if not isinstance(result, dict):  # pragma: no cover - parse_payload_template guarantees dict
         raise ConfigError(f"{used_by}: payload の組み立て結果がオブジェクトになりませんでした")
+    # **差し込み漏れは、ここで止める。** 通してしまうと記法そのものが媒体へ渡り、
+    # 取り消せない送信になる (13.6)。
+    assert_fully_filled(result, used_by=used_by)
     return result

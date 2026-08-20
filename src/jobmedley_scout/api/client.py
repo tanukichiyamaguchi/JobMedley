@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from jobmedley_scout.api.endpoints import Endpoint
-from jobmedley_scout.api.success import is_success
+from jobmedley_scout.api.success import graphql_errors, is_success
 from jobmedley_scout.api.transport import HttpResponse, HttpTransport
 from jobmedley_scout.config.placeholders import Coord, is_resolved, require
 from jobmedley_scout.errors import PermanentAuthError
@@ -60,9 +60,23 @@ def classify_auth_failure(
     **保守的に判定する** (6.6): 401 は無条件、403 は認証系のコードを伴う場合のみ。
     403 を無条件に認証切れとみなすと、単発の権限エラー (この候補者には送れない等)
     で実行全体が落ちる。
+
+    **GraphQL の失効は 401 でも 403 でも来ない。** 実測20回目で分かったとおり、
+    媒体の送信は GraphQL の mutation である。GraphQL は失効を HTTP 200 で返し、
+    本文の ``errors[].extensions.code`` に ``UNAUTHENTICATED`` のようなコードを
+    入れる。ステータスコードだけを見る判定では **これが1件も引っかからない**。
+
+    引っかからないと何が起きるか。セッションが死んでいるのに例外が上がらず、
+    全件が「失敗」として静かに積み上がる -- 6.6 の事故 (CIは緑のまま送信0件) が
+    そのまま再現する。だから **本文のエラーコードも同じ集合で照合する**。
     """
     if status == HTTP_UNAUTHORIZED:
         return "http_401"
+    # **ステータスが正常でも、本文が失効を訴えていることがある** (GraphQL)。
+    for code in graphql_errors(body):
+        needle = code.lower()
+        if needle and any(hint in needle or needle in hint for hint in auth_codes):
+            return code
     if status != HTTP_FORBIDDEN:
         return None
     if body is None:
@@ -139,6 +153,6 @@ class JobMedleyApiClient:
         return ApiOutcome(
             endpoint_id=endpoint.id,
             status=response.status,
-            succeeded=is_success(endpoint, response.status),
+            succeeded=is_success(endpoint, response.status, response.json_body()),
             response=response,
         )

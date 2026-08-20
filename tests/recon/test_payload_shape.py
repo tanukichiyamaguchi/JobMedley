@@ -76,8 +76,69 @@ def test_the_operation_name_and_the_variable_shape_survive() -> None:
     assert paths["input.memberId"] == "string"
     assert paths["input.isDraft"] == "bool"
     assert paths["input.attachmentIds"] == "array"
-    # 問い合わせ文そのものは出さない (長いうえ、雛形に要るのは変数の形である)。
-    assert "mutation SendSingleScout" not in shape.template
+
+
+def test_the_graphql_envelope_survives_because_a_send_needs_it() -> None:
+    """**問い合わせ文を落とした雛形は、貼っても送れない雛形である。**
+
+    最初の実装はこれを落としていた。「長いし、雛形に要るのは変数の形だ」という
+    理屈だったが、GraphQL は ``query`` の無いリクエストを受け付けない
+    (persisted query なら ``extensions`` が代わりに要る)。
+
+    問い合わせ文は媒体のAPIの定義そのもので、画面の文言でも個人データでもない
+    ので 13.2 には触れない。伏せるべきは ``variables`` の **値** だけである。
+    """
+    shape = shape_of(REAL_SHAPE, {}, SENTINEL)
+    assert shape is not None
+    restored = json.loads(shape.template)
+    assert restored["query"].startswith("mutation SendSingleScout")
+    assert restored["operationName"] == "SendSingleScout"
+
+
+def test_a_persisted_query_envelope_also_survives() -> None:
+    """``query`` を送らない作り (APQ) でも、封筒はそのまま残す。"""
+    body = json.dumps(
+        {
+            "operationName": "SendSingleScout",
+            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": "abc123"}},
+            "variables": {"input": {"scoutMessage": SENTINEL}},
+        }
+    )
+    shape = shape_of(body, {}, SENTINEL)
+    assert shape is not None
+    restored = json.loads(shape.template)
+    assert restored["extensions"]["persistedQuery"]["sha256Hash"] == "abc123"
+
+
+def test_the_body_placeholder_matches_what_the_sender_substitutes() -> None:
+    """**出力と入力の語彙が揃っていないと、本文が差し替わらないまま送られる。**
+
+    偵察が ``<本文>`` と書き、送信側が ``{{BODY}}`` を探していた時期があった。
+    貼った雛形はそのまま通り、``<本文>`` という文字列がスカウトとして実在の
+    候補者へ飛ぶ。送信は取り消せない (13.6)。
+    """
+    from jobmedley_scout.api.payloads import PLACEHOLDER_BODY
+
+    assert BODY_MARKER == PLACEHOLDER_BODY
+
+    shape = shape_of(REAL_SHAPE, {}, SENTINEL)
+    assert shape is not None
+    assert PLACEHOLDER_BODY in shape.template
+
+
+def test_the_report_names_every_slot_the_operator_still_has_to_fill() -> None:
+    """**貼っただけでは送れない、と先に言う。**
+
+    種別の印が残ったまま送ると ``<string>`` がそのまま媒体へ渡る。
+    本文は数えない -- あれは送信時にコードが差し込む。
+    """
+    shape = shape_of(REAL_SHAPE, {}, SENTINEL)
+    assert shape is not None
+    unfilled = shape.unfilled_keys()
+    assert "variables.input.memberId" in unfilled
+    assert "variables.input.jobOfferId" in unfilled
+    assert "variables.input.scoutMessage" not in unfilled, "本文はコードが差し込む"
+    assert "**まだ値が決まっていない欄**" in shape.render()
 
 
 def test_an_unreadable_body_yields_nothing_rather_than_a_guess() -> None:
