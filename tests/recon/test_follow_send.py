@@ -132,6 +132,30 @@ class _Handle:
             return self._page.offer
         raise RuntimeError("Element is not an <input>, <textarea> or [contenteditable]")
 
+    def evaluate(self, script: str, arg: object = None) -> object:
+        """DOM を直に触る経路。**押下では焦点は移らない、を写し取る。**
+
+        実測18回目、求人の欄は「押した」のに候補が1件も出なかった。押下は
+        ``dispatch_event`` で届いているが、それは焦点を移さないので入力補完は
+        開かない。**偽物もそう振る舞わないと、直したことの検証にならない。**
+        """
+        from jobmedley_scout.recon.follow_send import _FOCUS_JS, _TYPE_JS
+
+        page = self._page
+        if script == _FOCUS_JS:
+            page.focused = self._selector
+            return page.on_focus(self._selector)
+        if script == _TYPE_JS:
+            page.typed.append((self._selector, str(arg)))
+            page.on_type(self._selector, str(arg))
+            return True
+        if "el.type" in script:
+            # クラス名ではなく HTML の意味で判定する側の入口。
+            if not self._selector.startswith("input"):
+                return "textarea"
+            return "checkbox" if "checkbox" in self._selector else "text"
+        raise RuntimeError("この偽物が知らない評価です")
+
 
 class _Locator:
     def __init__(self, page: _Page, selector: str) -> None:
@@ -165,6 +189,21 @@ class _Page:
         self.body = ""
         self.sent: list[str] = []
         self.pressed: list[tuple[str, bool]] = []
+        self.typed: list[tuple[str, str]] = []
+        self.focused = ""
+        #: 焦点を当てただけで候補が出る作りか。既定は **出ない** --
+        #: 実測18回目に見たのは「触っただけでは出ない」側だからである。
+        self.suggests_on_focus = False
+
+    def on_focus(self, selector: str) -> bool:
+        if self.suggests_on_focus and selector.startswith("input"):
+            self.tree = SUGGEST
+        return True
+
+    def on_type(self, selector: str, text: str) -> None:
+        # **空の検索では候補が出ない。** 文字が要る作りを写す。
+        if selector.startswith("input") and text.strip():
+            self.tree = SUGGEST
 
     def locator(self, selector: str) -> _Locator:
         return _Locator(self, selector)
@@ -177,8 +216,6 @@ class _Page:
         self.pressed.append((selector, self.gate.is_armed))
         if "js-tour-guide-scout-button" in selector:
             self.tree = FORM
-        elif selector.startswith("input"):
-            self.tree = SUGGEST
         elif "c-typeahead__item" in selector:
             self.offer = "選ばれた求人"
             self.tree = FORM
@@ -309,9 +346,12 @@ def test_an_unfilled_form_is_reported_as_rejected_not_as_blocked(monkeypatch) ->
         self.pressed.append((selector, self.gate.is_armed))
         if "js-tour-guide-scout-button" in selector:
             self.tree = FORM
-        # 求人の欄を押しても候補は出ない (実物でそうなる可能性は残っている)。
 
+    # **どの文字を打っても候補が出ない。** 実測18回目に見たのは「押しただけでは
+    # 出ない」側だったが、打っても出ない作りはありうる。そのときに何を報告するか
+    # が、この試験が固定していることである。
     monkeypatch.setattr(_Page, "press", _no_suggestions)
+    monkeypatch.setattr(_Page, "on_type", lambda self, selector, text: None)
     outcome = _run(monkeypatch, page, make_sentinel("test-run"))
 
     assert outcome.form_opened
@@ -346,8 +386,6 @@ def test_a_send_with_no_confirm_step_still_reports_success(monkeypatch) -> None:
         self.pressed.append((selector, self.gate.is_armed))
         if "js-tour-guide-scout-button" in selector:
             self.tree = FORM
-        elif selector.startswith("input"):
-            self.tree = SUGGEST
         elif "c-typeahead__item" in selector:
             self.offer = "選ばれた求人"
             self.tree = FORM
@@ -421,3 +459,90 @@ def test_every_step_that_did_not_happen_is_shown_as_not_done() -> None:
     report = walk.render()
     assert "○ 送信フォームを開く" in report
     assert "× スカウト対象求人の欄を押して候補を出す" in report
+
+
+def test_the_field_is_focused_not_merely_pressed(monkeypatch) -> None:
+    """**押下では焦点は移らない。**
+
+    実測18回目、求人の欄は3回「押した」のに候補が1件も出なかった。押下は
+    ``dispatch_event`` で届けているが、それは ``document.activeElement`` を
+    動かさない -- 入力補完は ``focus`` か ``input`` で開くので、クリックの
+    イベントだけでは何も起きない。
+
+    直したことの証拠は「候補が出た」ではなく **「焦点を当てた」** である。
+    出たかどうかは媒体の都合だが、当てたかどうかはこちらの責任である。
+    """
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    page = _Page(gate)
+    outcome = _run(monkeypatch, page, make_sentinel("test-run"))
+
+    assert page.focused.startswith("input"), "求人の欄に焦点を当てていない"
+    assert outcome.suggestions_seen
+    assert outcome.offer_chosen
+
+
+def test_focus_alone_is_enough_when_the_site_opens_on_focus(monkeypatch) -> None:
+    """**出るなら打たない。**
+
+    空の検索で全件返す作りなら、焦点を当てただけで候補が出る。そのとき欄へ
+    文字を打つのは余計な操作であり、打った文字が候補を絞ってしまう。
+    """
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    page = _Page(gate)
+    page.suggests_on_focus = True
+    outcome = _run(monkeypatch, page, make_sentinel("test-run"))
+
+    assert outcome.offer_chosen
+    assert page.typed == [], "候補が出ているのに文字を打った"
+
+
+def test_a_typeahead_that_needs_text_is_probed_and_the_probe_is_reported(monkeypatch) -> None:
+    """**打った文字を報告する。**
+
+    どの入力で候補が出たかは、次の実行が推測ではなく観測から始めるための材料で
+    ある。報告に出ないと、直った理由が分からないまま先へ進むことになる。
+    """
+    from jobmedley_scout.recon.follow_send import SUGGESTION_PROBES
+
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    page = _Page(gate)  # 既定は「焦点だけでは出ない」
+    outcome = _run(monkeypatch, page, make_sentinel("test-run"))
+
+    assert page.typed, "文字を1つも打っていない"
+    # 空の試行から順に、**広い順に** 試している。
+    assert [text for _, text in page.typed] == [probe for probe in SUGGESTION_PROBES if probe][
+        : len(page.typed)
+    ]
+
+    walk = SendWalk(
+        requested_url=URL,
+        list_rendered=True,
+        rows_found=True,
+        gate_armed=True,
+        form_opened=True,
+        suggestions_seen=True,
+        offer_chosen=outcome.offer_chosen,
+        body_written=outcome.body_written,
+        submit_pressed=outcome.submit_pressed,
+        steps=outcome.steps,
+    )
+    report = walk.render()
+    assert "打ち込んだ文字:" in report, "何を打ったかが報告に出ていない"
+    assert "焦点だけ" in report, "焦点だけの試行が報告に出ていない"
+
+
+def test_a_checkbox_is_never_tried_as_the_search_field(monkeypatch) -> None:
+    """**試す価値の無いものを試さない。**
+
+    実測18回目、フォームの中の ``input`` を順に触っていったら、2番目と3番目は
+    送信先のチェックボックスだった。押しても候補は出ないし、外せば送信先が
+    消える。「候補が出ない」という同じ失敗を3回並べても、報告は水増しされる
+    だけで何も分からない。
+    """
+    from jobmedley_scout.recon.form_structure import query_fields_in
+    from jobmedley_scout.recon.list_structure import subtree_sizes
+
+    sizes = subtree_sizes(FORM)
+    root = 6  # フォームの器
+    fields = query_fields_in(FORM, sizes, root)
+    assert all("checkbox" not in token for f in fields for token in f.tokens)

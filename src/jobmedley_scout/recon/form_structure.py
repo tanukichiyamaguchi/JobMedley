@@ -46,6 +46,18 @@ BODY_TAGS: frozenset[str] = frozenset({"textarea"})
 #: 区切りで検索」という1行の入力欄である。
 QUERY_TAGS: frozenset[str] = frozenset({"input"})
 
+#: 検索欄では **ありえない** ``input`` のクラス片。
+#:
+#: 実測18回目、フォームの中の ``input`` を順に押していったら、2番目と3番目は
+#: ``input.c-checkbox__input`` -- 送信先のチェックボックスだった。押しても候補は
+#: 出ないし、外せば送信先が消える。**検索欄を探しているのに、当たったら困るもの
+#: まで順番待ちに並べていた。**
+#:
+#: これは安全弁ではなく **的の絞り込み** である。本当の判定はブラウザ側で
+#: ``el.type`` を読んで行う (クラス名は媒体の都合で変わるが、``type`` は
+#: HTML の意味そのものなので変わらない)。ここはその前段の粗い篩である。
+NON_QUERY_CLASS_HINTS: tuple[str, ...] = ("checkbox", "radio", "hidden", "file", "toggle")
+
 #: 押して先へ進める部品のタグ。
 SUBMIT_TAGS: frozenset[str] = frozenset({"button", "a"})
 
@@ -133,12 +145,23 @@ def body_fields_in(tree: DomTree, sizes: Sequence[int], root: int) -> tuple[Acti
 
 
 def query_fields_in(tree: DomTree, sizes: Sequence[int], root: int) -> tuple[ActionCandidate, ...]:
-    """The one-line inputs inside the form, in document order. **Pure.**
+    """The one-line **search** inputs inside the form, in document order. **Pure.**
 
     運用者の画面では、この欄はただ1つ (スカウト対象求人) である。複数あったら
-    **順に試す** -- どれが求人の欄かは、押して候補が出たかどうかでしか分からない。
+    順に試す -- どれが求人の欄かは、触って候補が出たかどうかでしか分からない。
+
+    ただし :data:`NON_QUERY_CLASS_HINTS` に当たるものは **最初から外す**。
+    実測18回目、チェックボックスの ``input`` まで順番待ちに並び、「候補が出ない」
+    という同じ失敗を3回繰り返して報告を水増ししていた。試す価値の無いものを
+    試すのは、探索ではなく雑音である。
     """
-    return _in_subtree(tree, sizes, root, QUERY_TAGS)
+    return tuple(
+        candidate
+        for candidate in _in_subtree(tree, sizes, root, QUERY_TAGS)
+        if not any(
+            hint in token.lower() for token in candidate.tokens for hint in NON_QUERY_CLASS_HINTS
+        )
+    )
 
 
 def submit_candidates_in(

@@ -463,6 +463,93 @@ def _find_form(
     return steps, None
 
 
+#: 候補を出させるために欄へ打ち込む文字。**空から順に、狭くない順に。**
+#:
+#: 実測18回目、欄を「押す」だけでは候補が1件も出なかった。押下は
+#: ``dispatch_event`` で届けているが、**それは焦点を移さない**。入力補完の類は
+#: ``focus`` か ``input`` で開くので、クリックのイベントだけでは何も起きない。
+#:
+#: 打つ内容は媒体の持ち物 (この事業所の求人) に依存するので、**当てにいかない**。
+#: 広い順に試し、**どれで候補が出たかを報告する** -- 次の実行が推測ではなく
+#: 観測から始められるようにするためである (原則3)。
+#:
+#: - ``""``   : 何も打たず焦点だけ。空の検索で全件返す作りならこれで出る
+#: - ``" "``  : 欄の但し書きが「スペース区切りで検索」なので、空白は正当な入力
+#: - ``"県"`` : 都道府県名47のうち43に含まれる。勤務地で引く欄に最も広く当たる
+#:
+#: **これは座標を推測で埋めることではない。** 埋める座標 (送信APIのURL) は
+#: あくまで観測から得る。ここで選んでいるのは「観測を成立させるための操作」で
+#: あって、報告する値ではない。
+SUGGESTION_PROBES: tuple[str, ...] = ("", " ", "県")
+
+#: 欄へ焦点を当てる一文。**押下では焦点は移らない。**
+#:
+#: ``el.focus()`` は可視性の検査を経ないので、覆われている欄にも届く。返すのは
+#: 実際に焦点が乗ったかどうかで、**乗ったと言えるのは乗ったときだけ** である。
+_FOCUS_JS = """
+(el) => { el.focus(); return document.activeElement === el; }
+"""
+
+#: 欄へ文字を打ち込む一文。
+#:
+#: 値を素の代入で入れると、値を自前で追跡する作り (React 等) が変更に気付かない。
+#: プロトタイプ側の setter を明示的に呼び、``input`` を冒泡させる。入力補完には
+#: キー入力を見るものもあるので ``keydown``/``keyup`` も添える。
+#:
+#: 安全性: 打ち込みは押下ではない。外向きの通信は検索の読み取り (GraphQL の
+#: query) だけで、それ以外の非GETは遮断が武装したまま止める。
+_TYPE_JS = """
+(el, text) => {
+  const proto =
+    el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+    : el instanceof HTMLInputElement ? HTMLInputElement.prototype
+    : null;
+  const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value').set;
+  el.focus();
+  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Process' }));
+  if (setter) { setter.call(el, text); } else { el.value = text; }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Process' }));
+  return el.value === text;
+}
+"""
+
+#: 検索欄として受け入れる ``input`` の ``type``。
+#:
+#: クラス名ではなく **HTML の意味** で判定する。クラス名は媒体の都合で変わるが、
+#: ``type`` は変わらない。空文字は ``type`` 未指定 = ``text`` である。
+_QUERY_INPUT_TYPES: frozenset[str] = frozenset({"", "text", "search"})
+
+
+def _input_type(page: Any, form: FormHandle, field_: ActionCandidate) -> str | None:
+    """The field's ``type``. ``None`` if it could not be read. **文言ではない。**"""
+    selector = field_.selector()
+    nth = _nth_within_page(form.tree, form.sizes, field_, selector)
+    try:
+        value = page.locator(selector).nth(nth).evaluate("(el) => el.type || ''")
+    except Exception:  # noqa: BLE001 -- 読めないだけ。判定できないものは使わない
+        return None
+    return str(value).lower()
+
+
+def _touch(page: Any, form: FormHandle, field_: ActionCandidate, probe: str) -> tuple[bool, str]:
+    """Focus the field and, if ``probe`` is non-empty, type it. Returns (ok, detail)."""
+    selector = field_.selector()
+    nth = _nth_within_page(form.tree, form.sizes, field_, selector)
+    element = page.locator(selector).nth(nth)
+    try:
+        focused = bool(element.evaluate(_FOCUS_JS))
+    except Exception:  # noqa: BLE001 -- 分類だけを持ち回る (13.2)
+        return False, "欄へ焦点を当てられませんでした"
+    if not probe:
+        return focused, ("焦点を当てました" if focused else "焦点が乗りませんでした")
+    try:
+        typed = bool(element.evaluate(_TYPE_JS, probe))
+    except Exception:  # noqa: BLE001
+        return False, "欄へ打ち込めませんでした"
+    return typed, ("打ち込みました" if typed else "打ち込んだ値が残りませんでした")
+
+
 def _choose_offer(
     page: Any,
     form: FormHandle,
@@ -470,13 +557,18 @@ def _choose_offer(
     sentinel: str,
     config: BrowserConfig,
 ) -> tuple[list[Step], FormHandle, bool, bool]:
-    """Open the job-offer typeahead and pick one. Returns steps, form, seen, chosen."""
+    """Open the job-offer typeahead and pick one. Returns steps, form, seen, chosen.
+
+    **押すのではなく、焦点を当てて打ち込む。** 実測18回目、欄を押すだけでは候補が
+    1件も出なかった -- 押下は ``dispatch_event`` で届けているが、それは焦点を
+    移さないので、入力補完は開かない。
+    """
     steps: list[Step] = []
     fields = query_fields_in(form.tree, form.sizes, form.root)
     if not fields:
         steps.append(
             Step(
-                name="スカウト対象求人の欄を押す",
+                name="スカウト対象求人の欄を探す",
                 done=False,
                 detail="フォームの中に1行の入力欄がありません",
             )
@@ -485,34 +577,53 @@ def _choose_offer(
 
     current = form
     for field_ in fields:
-        before = _counts(page)
-        selector, detail = _press(page, current.tree, current.sizes, field_, config)
-        after_tree, _counts_after, gained, lost, fresh = _after(page, before, config)
-        blocked = _drain(gate, sentinel)
-        if after_tree is not None:
-            current = FormHandle(
-                tree=after_tree,
-                sizes=subtree_sizes(after_tree),
-                root=form_root(after_tree, subtree_sizes(after_tree), current.region)
-                or current.root,
-                region=current.region,
+        kind = _input_type(page, current, field_)
+        if kind not in _QUERY_INPUT_TYPES:
+            # **試す価値の無いものを試さない。** ただし飛ばした事実は残す。
+            steps.append(
+                Step(
+                    name="スカウト対象求人の欄を探す",
+                    done=False,
+                    detail=f"この欄は検索欄ではありません (type={kind or '読めません'})",
+                    selector=field_.selector(),
+                )
             )
-        items = suggestion_items_in(current.tree, current.sizes, fresh) if fresh else ()
-        steps.append(
-            Step(
-                name="スカウト対象求人の欄を押して候補を出す",
-                done=bool(items),
-                detail=(
-                    f"候補が {len(items)} 件現れました (タグ: {items[0].tag})"
-                    if items
-                    else (detail or "候補が現れませんでした")
-                ),
-                selector=selector,
-                gained=gained,
-                lost=lost,
-                blocked=blocked,
+            continue
+
+        items: tuple[ActionCandidate, ...] = ()
+        fresh: tuple[str, ...] = ()
+        for probe in SUGGESTION_PROBES:
+            before = _counts(page)
+            ok, detail = _touch(page, current, field_, probe)
+            after_tree, _counts_after, gained, lost, fresh = _after(page, before, config)
+            blocked = _drain(gate, sentinel)
+            if after_tree is not None:
+                sizes = subtree_sizes(after_tree)
+                current = FormHandle(
+                    tree=after_tree,
+                    sizes=sizes,
+                    root=form_root(after_tree, sizes, current.region) or current.root,
+                    region=current.region,
+                )
+            items = suggestion_items_in(current.tree, current.sizes, fresh) if fresh else ()
+            how = "焦点だけ" if not probe else f"打ち込んだ文字: {probe!r}"
+            steps.append(
+                Step(
+                    name=f"スカウト対象求人の候補を出す ({how})",
+                    done=bool(items),
+                    detail=(
+                        f"候補が {len(items)} 件現れました (タグ: {items[0].tag})"
+                        if items
+                        else (detail if ok else detail) + " / 候補は現れませんでした"
+                    ),
+                    selector=field_.selector(),
+                    gained=gained,
+                    lost=lost,
+                    blocked=blocked,
+                )
             )
-        )
+            if items:
+                break
         if not items:
             continue
 
