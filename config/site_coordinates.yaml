@@ -148,10 +148,23 @@ nav.drawer_close_selectors: UNRESOLVED
 api.base_url: "https://customers.job-medley.com"
 
 # 候補者一覧取得APIのURL (ページング付き)。
-# 偵察中の応答インデックスから特定する。
+#
+# **まだ観測していない。** 一覧は武装より前に読み込まれるので、いまの偵察
+# (follow-send / capture-open) の記録には入らない。
+#
+# **ここは急ぐ理由がある。** 送信の payload に searchUuid が載っていた
+# (api.send.paid.payload_template を参照)。つまり送信は「どの検索から辿り着いた
+# 候補者か」に紐づいており、**一覧の応答から searchUuid を持ち出せなければ
+# 送信は組み立てられない**。
 api.candidate_list.url_pattern: UNRESOLVED
 
 # 候補者レジュメ取得APIのURL。
+#
+# **手がかりはあるが、確定していない。** 偵察が通した読み取りの中に
+#   graphql/MemberOnScoutProfileModalOfDesktop
+# があり、名前と出る場面 (カードの「プロフィール確認」を押したとき) からは
+# これらしい。ただし **応答の中身を見ていない** ので、レジュメの全項目が
+# ここで取れるのかは分からない。推測で埋めない (原則3)。
 api.resume.url_pattern: UNRESOLVED
 
 # 送信前チェック (既送信・対象外の除外) API。
@@ -165,9 +178,23 @@ api.precheck.url_pattern: UNRESOLVED
 api.quota.url_pattern: UNRESOLVED
 
 # 冪等キーを載せるヘッダ名。
-# 媒体に受け口が無ければ null (その場合は再試行前に送信済み一覧を照会する手順で代替する、9.2)。
-# (存在しないことが確認できた場合は null と書いてよい)
-api.idempotency_header: UNRESOLVED
+#
+# 2026-08-20 follow-send 3回目で、実際の送信リクエストの **ヘッダ名を全て**
+# 観測した (値は観測していない -- cookie の値はセッションそのものである)::
+#
+#   accept, accept-language, content-type, cookie, origin, referer,
+#   sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform, user-agent
+#
+# **どれも素のブラウザが付けるヘッダで、冪等キーの受け口は無い。**
+# (CSRFトークンのヘッダも無い。cookie と origin で守っている作りである。)
+#
+# **この観測が言えること**: 媒体自身のクライアントは冪等キーを送っていない。
+# **言えないこと**: サーバが受け付けないこと。ただし自前のクライアントが勝手な
+# ヘッダを足しても、受け口が無ければ黙って無視されるだけである。
+#
+# したがって 9.2 の代替手順に従う -- **再試行の前に送信済み一覧を照会する**。
+# あわせて 12.5 のとおり、送信APIの自動再試行はそもそも行わない。
+api.idempotency_header: null
 
 # 有料枠の送信API。
 #
@@ -185,12 +212,49 @@ api.send.paid.url_pattern: "https://customers.job-medley.com/api/customers/graph
 # **成功とみなすHTTPステータスの集合。
 # ** エンドポイントごとに違う (参照実装では 200 と 201 が混在した、6.2)。
 # 段階4のdryRun検証で実測する。
+#
+# **注意: 送信は GraphQL である。** GraphQL は失敗しても HTTP 200 を返し、
+# 応答本文の errors 配列にエラーを入れる作りが普通である。ステータスコードだけを
+# 見る判定は **失敗を成功と数える** -- 原則2 の「静かなゼロ件」そのものになる。
+# 段階4では本文の errors も併せて実測すること。
 api.send.paid.success_statuses: UNRESOLVED
 
 # 有料枠のpayload形状。
-# IDが配列か単数か、トークンが必要かが枠ごとに違う。
-# 偵察が記録した実リクエストボディをそのまま雛形にする。
-api.send.paid.payload_template: UNRESOLVED
+#
+# 2026-08-20 follow-send 3回目で **観測** した。値はすべて種別に伏せてある
+# (13.2)。伏せていないのは「本文がどのキーに入るか」だけで、それは自分で書いた
+# 目印がそこに載っていたという観測そのものである。
+#
+# **推測では1つも当たらなかったはずの形である。**
+#   - 本文のキーは body ではなく **scoutMessage**
+#   - 求人IDだけでなく **jobOfferSalaryId** も要る (求人を選ぶと一緒に決まる)
+#   - **searchUuid** が載る。送信は「どの検索から辿り着いた候補者か」に紐づく
+#   - 件名の欄は無い (フォームにも無い)
+#
+# **この雛形はまだ送信に使えない。** 理由は2つある。
+#
+# 1. **問い合わせ文 (query) が入っていない。** これを記録した回の偵察は
+#    「長いから」という理由で query を落としていた。GraphQL は query の無い
+#    リクエストを受け付けないので、貼っても送れない。**次の follow-send が
+#    封筒ごと記録するので、その出力で丸ごと差し替えること。**
+# 2. **``<...>`` の欄が埋まっていない。** どれも観測はしたが、こちらが用意する
+#    値である (どの求人へ送るか、どの検索から辿ったか)。
+#
+# 埋め忘れたまま送ろうとしても、api.payloads.assert_fully_filled が送信の前に
+# 止める。``<string>`` という文字列がスカウトとして飛ぶことは無い (13.6)。
+api.send.paid.payload_template: |
+  {
+    "operationName": "SendSingleScout",
+    "variables": {
+      "input": {
+        "jobOfferId": "<number>",
+        "jobOfferSalaryId": "<number>",
+        "memberId": "<number>",
+        "scoutMessage": "{{BODY}}",
+        "searchUuid": "<string>"
+      }
+    }
+  }
 
 # 無料枠の送信API。
 # 無ければ null。
