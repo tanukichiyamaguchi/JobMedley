@@ -27,6 +27,31 @@ URL = "https://customers.job-medley.com/customers/searches"
 SEND_URL = "https://customers.job-medley.com/api/customers/scouts/03323741"
 
 
+def _send_body(body: str) -> str:
+    """媒体が送ろうとする本文を、実測19回目に見た形で包む。
+
+    実物は GraphQL の mutation で、本文は ``variables.input.body`` に載る。
+    **偽物が生の文字列を送っていると、payload の形を読む工程が試されない。**
+    """
+    import json as _json
+
+    return _json.dumps(
+        {
+            "operationName": "SendSingleScout",
+            "query": "mutation SendSingleScout($input: SendSingleScoutInput!) { ok }",
+            "variables": {
+                "input": {
+                    "memberId": "00000000",
+                    "jobOfferId": "11111111",
+                    "body": body,
+                    "isDraft": False,
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
 def _tree(*rows: tuple[str, tuple[str, ...], int]) -> DomTree:
     return DomTree(
         nodes=tuple(DomNode(tag=t, class_names=c, parent=p) for t, c, p in rows),
@@ -221,7 +246,7 @@ class _Page:
             self.tree = FORM
         elif "c-button--send" in selector:
             # 確認の段の送信。**媒体はいま本文欄に在る文面をそのまま載せて送る。**
-            self.fire_request("POST", SEND_URL, self.body)
+            self.fire_request("POST", SEND_URL, _send_body(self.body))
         elif "c-button--important" in selector:
             if self.offer and self.body:
                 self.tree = CONFIRM
@@ -391,7 +416,7 @@ def test_a_send_with_no_confirm_step_still_reports_success(monkeypatch) -> None:
             self.tree = FORM
         elif "c-button--important" in selector:
             # 確認の段を挟まず、その場で送る。
-            self.fire_request("POST", SEND_URL, self.body)
+            self.fire_request("POST", SEND_URL, _send_body(self.body))
 
     monkeypatch.setattr(_Page, "press", _direct)
     outcome = _run(monkeypatch, page, make_sentinel("test-run"))
@@ -546,3 +571,70 @@ def test_a_checkbox_is_never_tried_as_the_search_field(monkeypatch) -> None:
     root = 6  # フォームの器
     fields = query_fields_in(FORM, sizes, root)
     assert all("checkbox" not in token for f in fields for token in f.tokens)
+
+
+def test_the_shape_of_the_send_payload_is_reported_without_its_values(monkeypatch) -> None:
+    """**段階3の成果物はURLだけではない。**
+
+    形が無ければ、段階4は何を詰めて送ればよいのか分からない。そして遮断の記録は
+    次の押下の前に空にされるので、**消える前に読まなければ永久に手に入らない**。
+    """
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    page = _Page(gate)
+    sentinel = make_sentinel("test-run")
+    outcome = _run(monkeypatch, page, sentinel)
+
+    assert outcome.payload is not None, "送信路は掴んだのに形が残っていない"
+    assert outcome.payload.operation == "SendSingleScout"
+    assert outcome.payload.body_key == "variables.input.body"
+    # **値は1つも出さない** (13.2)。会員IDも求人IDも、形ではない。
+    assert "00000000" not in outcome.payload.template
+    assert "11111111" not in outcome.payload.template
+    assert sentinel not in outcome.payload.template
+
+    walk = SendWalk(
+        requested_url=URL,
+        list_rendered=True,
+        rows_found=True,
+        gate_armed=True,
+        form_opened=True,
+        suggestions_seen=True,
+        offer_chosen=True,
+        body_written=True,
+        submit_pressed=True,
+        steps=outcome.steps,
+        payload=outcome.payload,
+    )
+    report = walk.render()
+    assert "api.send.paid.payload_template: |" in report
+    assert "variables.input.body" in report
+    assert "00000000" not in report
+
+
+def test_a_send_that_never_happened_leaves_the_template_unresolved(monkeypatch) -> None:
+    """**掴めなかったものを、掴んだことにしない** (原則3)。"""
+    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    page = _Page(gate)
+    monkeypatch.setattr(_Page, "on_type", lambda self, selector, text: None)
+
+    def _no_suggestions(self: _Page, selector: str) -> None:
+        self.pressed.append((selector, self.gate.is_armed))
+        if "js-tour-guide-scout-button" in selector:
+            self.tree = FORM
+
+    monkeypatch.setattr(_Page, "press", _no_suggestions)
+    outcome = _run(monkeypatch, page, make_sentinel("test-run"))
+
+    assert outcome.payload is None
+    walk = SendWalk(
+        requested_url=URL,
+        list_rendered=True,
+        rows_found=True,
+        gate_armed=True,
+        form_opened=True,
+        steps=outcome.steps,
+        payload=outcome.payload,
+    )
+    report = walk.render()
+    assert "api.send.paid.payload_template: UNRESOLVED" in report
+    assert "送信路そのものが観測できていない" in report

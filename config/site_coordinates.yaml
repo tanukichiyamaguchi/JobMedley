@@ -143,8 +143,9 @@ nav.drawer_close_selectors: UNRESOLVED
 # ========================================================================
 
 # 内部APIのオリジン。
-# `scout recon capture-send` の出力から。
-api.base_url: UNRESOLVED
+# 2026-08-20 follow-send 2回目で観測。遮断して記録した送信リクエストのURLが
+# このオリジンを向いていた。
+api.base_url: "https://customers.job-medley.com"
 
 # 候補者一覧取得APIのURL (ページング付き)。
 # 偵察中の応答インデックスから特定する。
@@ -169,8 +170,17 @@ api.quota.url_pattern: UNRESOLVED
 api.idempotency_header: UNRESOLVED
 
 # 有料枠の送信API。
-# `scout recon capture-send --slot paid` が記録した中断済みPOSTのURL。
-api.send.paid.url_pattern: UNRESOLVED
+#
+# 2026-08-20 follow-send 2回目で **観測** した。教わった導線を順に辿り
+# (一覧の「スカウトを送る」→ 求人を選ぶ → 本文に目印 → 確認して送る)、最後の
+# 押下で飛んだ非GETのうち、**本文へ書き込んだ目印を載せて運んでいた** のがこれ:
+#
+#   POST /api/customers/graphql/SendSingleScout
+#
+# 目印が載っていたことが、これが送信路であることの根拠である (原則3: 同時に
+# 遮断された計測ビーコン7件と、推測ではなく観測で区別できている)。
+# **この通信は中断済みで、送信は行われていない。**
+api.send.paid.url_pattern: "https://customers.job-medley.com/api/customers/graphql/SendSingleScout"
 
 # **成功とみなすHTTPステータスの集合。
 # ** エンドポイントごとに違う (参照実装では 200 と 201 が混在した、6.2)。

@@ -85,6 +85,11 @@ from jobmedley_scout.recon.open_structure import (
     validation_errors_in,
     vanished_region,
 )
+from jobmedley_scout.recon.payload_shape import (
+    PayloadShape,
+    idempotency_candidates,
+    shape_of,
+)
 from jobmedley_scout.recon.yaml_paste import yaml_scalar as _scalar
 
 #: このコマンドが埋めうる座標キー。
@@ -176,6 +181,8 @@ class SendWalk:
     submit_pressed: bool = False
     steps: tuple[Step, ...] = ()
     reads_allowed: tuple[str, ...] = ()
+    #: 送信路の payload の **形** (値は含まない)。掴めなければ None。
+    payload: PayloadShape | None = None
     note: str = ""
 
     def all_blocked(self) -> tuple[BlockedRequest, ...]:
@@ -264,7 +271,8 @@ class SendWalk:
         lines.append("")
         lines.append("config/site_coordinates.yaml の該当行:")
         lines.append("")
-        if carrier := self.carrier():
+        carrier = self.carrier()
+        if carrier is not None:
             # **会員IDは伏せたまま値にする。** 生のURLには会員番号が入る (13.2:
             # 偵察の出力に個人を指す値を残さない)。そして座標名が url_pattern で
             # ある以上、欲しいのは1件ぶんのURLではなく **形** である -- 伏せ字に
@@ -277,6 +285,23 @@ class SendWalk:
             for line in _why_unresolved(stage, self):
                 lines.append(f"    # {line}")
 
+        # **段階3の成果物はURLだけではない。** 形が無ければ、段階4は何を詰めて
+        # 送ればよいのか分からない。
+        if self.payload is not None:
+            lines.append("  api.send.paid.payload_template: |")
+            for line in self.payload.template.splitlines():
+                lines.append(f"    {line}")
+            lines.append("    # 値はすべて種別に伏せてあります (13.2)。")
+            if self.payload.body_key:
+                lines.append(f"    # 本文の入り口: {self.payload.body_key}")
+        elif carrier is not None:
+            # **掴んだのに読めなかった** のは、掴めなかったのとは違う事実である。
+            lines.append(f"  api.send.paid.payload_template: {UNRESOLVED_TOKEN}")
+            lines.append("    # 送信路は掴みましたが、本文をJSONとして読めませんでした。")
+        else:
+            lines.append(f"  api.send.paid.payload_template: {UNRESOLVED_TOKEN}")
+            lines.append("    # 送信路そのものが観測できていないので、形も分かりません。")
+
         lines.append("")
         lines.append("**このコマンドは送信を1件も行っていません。**")
         if self.reads_allowed:
@@ -286,6 +311,18 @@ class SendWalk:
             for url in self.reads_allowed[:5]:
                 lines.append(f"  通した: {url}")
         lines.append("書き込み (mutation・その他の非GET) は全て止めて記録しました。")
+        if self.payload is not None:
+            lines.append("")
+            lines.append(self.payload.render())
+            if idem := idempotency_candidates(self.payload.header_names):
+                lines.append(f"  冪等キーらしいヘッダ名: {', '.join(idem)}")
+            else:
+                # **無いことを「無い」と言い切らない** (原則3)。この1回に載って
+                # いなかった、という以上のことは観測していない。
+                lines.append(
+                    "  冪等キーらしいヘッダ名: この1回の送信には載っていませんでした"
+                    " (api.idempotency_header を null と決めるにはまだ足りません)"
+                )
         if self.note:
             lines.append(self.note)
         return "\n".join(lines)
@@ -329,6 +366,30 @@ def _why_unresolved(stage: SendWalkStage, walk: SendWalk) -> tuple[str, ...]:
         "目印が載っていませんでした。押下が送信を発火させていないか、送信が",
         "目印を本文に載せない形で運ばれています。推測で埋めません (原則3)。",
     )
+
+
+@dataclass
+class _Catch:
+    """Carries the run's sentinel, and remembers the **shape** of the send request.
+
+    ``_drain`` は遮断の記録を空にする。段階3のもう1つの成果物
+    (``api.send.paid.payload_template``) は、その記録の本文からしか取れない。
+    **消える前に読む場所** がここである。
+
+    読むのは形だけで、本文そのものは持ち帰らない (13.2)。送信先の会員IDが
+    載っているし、雛形に要るのは値ではなく形である。
+    """
+
+    sentinel: str
+    shape: PayloadShape | None = None
+
+    def drain(self, gate: SendGate) -> tuple[BlockedRequest, ...]:
+        if self.shape is None:
+            for entry in gate.recorded:
+                if entry.body and self.sentinel in entry.body:
+                    self.shape = shape_of(entry.body, entry.headers, self.sentinel)
+                    break
+        return _drain(gate, self.sentinel)
 
 
 def _counts(page: Any) -> Mapping[str, int]:
@@ -391,7 +452,7 @@ def _find_form(
     sizes: Sequence[int],
     row_index: int,
     gate: SendGate,
-    sentinel: str,
+    catch: _Catch,
     config: BrowserConfig,
 ) -> tuple[list[Step], FormHandle | None]:
     """Press towards the send form. **送信らしいボタンから押す。**
@@ -422,7 +483,7 @@ def _find_form(
         before = _counts(page)
         selector, detail = _press(page, current_tree, current_sizes, candidate, config)
         after_tree, _after_counts, gained, lost, fresh = _after(page, before, config)
-        blocked = _drain(gate, sentinel)
+        blocked = catch.drain(gate)
 
         if after_tree is not None:
             current_tree = after_tree
@@ -554,7 +615,7 @@ def _choose_offer(
     page: Any,
     form: FormHandle,
     gate: SendGate,
-    sentinel: str,
+    catch: _Catch,
     config: BrowserConfig,
 ) -> tuple[list[Step], FormHandle, bool, bool]:
     """Open the job-offer typeahead and pick one. Returns steps, form, seen, chosen.
@@ -596,7 +657,7 @@ def _choose_offer(
             before = _counts(page)
             ok, detail = _touch(page, current, field_, probe)
             after_tree, _counts_after, gained, lost, fresh = _after(page, before, config)
-            blocked = _drain(gate, sentinel)
+            blocked = catch.drain(gate)
             if after_tree is not None:
                 sizes = subtree_sizes(after_tree)
                 current = FormHandle(
@@ -630,7 +691,7 @@ def _choose_offer(
         before = _counts(page)
         pick_selector, pick_detail = _press(page, current.tree, current.sizes, items[0], config)
         after_tree, _counts_after, gained, lost, _fresh = _after(page, before, config)
-        blocked = _drain(gate, sentinel)
+        blocked = catch.drain(gate)
         if after_tree is not None:
             sizes = subtree_sizes(after_tree)
             current = FormHandle(
@@ -671,7 +732,7 @@ def _field_has_value(page: Any, field_: ActionCandidate, form: FormHandle) -> bo
 
 
 def _write_body(
-    page: Any, form: FormHandle, sentinel: str, config: BrowserConfig
+    page: Any, form: FormHandle, catch: _Catch, config: BrowserConfig
 ) -> tuple[Step, bool]:
     """Write the sentinel into the body. **求人を選んだ後に書く。**
 
@@ -687,7 +748,7 @@ def _write_body(
             name="本文へ目印を書き込む", done=False, detail="フォームの中に本文欄がありません"
         ), False
 
-    text = sentinel_body(sentinel)
+    text = sentinel_body(catch.sentinel)
     for field_ in fields:
         selector = field_.selector()
         nth = _nth_within_page(form.tree, form.sizes, field_, selector)
@@ -714,7 +775,7 @@ def _press_forward(
     page: Any,
     form: FormHandle,
     gate: SendGate,
-    sentinel: str,
+    catch: _Catch,
     config: BrowserConfig,
     *,
     name: str,
@@ -734,7 +795,7 @@ def _press_forward(
     before = _counts(page)
     selector, detail = _press(page, form.tree, form.sizes, candidates[0], config)
     after_tree, _counts_after, gained, lost, fresh = _after(page, before, config)
-    blocked = _drain(gate, sentinel)
+    blocked = catch.drain(gate)
     current = form
     if after_tree is not None:
         sizes = subtree_sizes(after_tree)
@@ -850,6 +911,7 @@ def follow_send(
                 body_written=outcome.body_written,
                 submit_pressed=outcome.submit_pressed,
                 steps=outcome.steps,
+                payload=outcome.payload,
                 reads_allowed=tuple(redact_url(r.url) for r in gate.passed_reads),
             )
         finally:
@@ -871,6 +933,8 @@ class WalkOutcome:
     offer_chosen: bool = False
     body_written: bool = False
     submit_pressed: bool = False
+    #: 目印を運んでいった非GETの **形** (値は含まない)。掴めなければ None。
+    payload: PayloadShape | None = None
 
 
 def walk_form(
@@ -888,20 +952,30 @@ def walk_form(
     位置は :func:`follow_send` の設計そのものなので、2箇所に散らさない。
     """
     sizes = subtree_sizes(tree)
-    steps, form = _find_form(page, tree, sizes, row_index, gate, sentinel, config)
+    catch = _Catch(sentinel=sentinel)
+    steps, form = _find_form(page, tree, sizes, row_index, gate, catch, config)
     if form is None:
-        return WalkOutcome(steps=tuple(steps))
+        return WalkOutcome(steps=tuple(steps), payload=catch.shape)
 
-    offer_steps, form, seen, chosen = _choose_offer(page, form, gate, sentinel, config)
+    offer_steps, form, seen, chosen = _choose_offer(page, form, gate, catch, config)
     steps.extend(offer_steps)
     if not chosen:
-        return WalkOutcome(steps=tuple(steps), form_opened=True, suggestions_seen=seen)
+        return WalkOutcome(
+            steps=tuple(steps),
+            form_opened=True,
+            suggestions_seen=seen,
+            payload=catch.shape,
+        )
 
-    body_step, wrote = _write_body(page, form, sentinel, config)
+    body_step, wrote = _write_body(page, form, catch, config)
     steps.append(body_step)
     if not wrote:
         return WalkOutcome(
-            steps=tuple(steps), form_opened=True, suggestions_seen=True, offer_chosen=True
+            steps=tuple(steps),
+            form_opened=True,
+            suggestions_seen=True,
+            offer_chosen=True,
+            payload=catch.shape,
         )
 
     # **確認の段は「段」であって「関門」ではない。**
@@ -915,7 +989,7 @@ def walk_form(
     names = ("「確認してスカウトを送る」を押す", "確認の段の送信ボタンを押す")
     for round_ in range(MAX_FORWARD):
         step, form, fresh = _press_forward(
-            page, form, gate, sentinel, config, name=names[min(round_, len(names) - 1)]
+            page, form, gate, catch, config, name=names[min(round_, len(names) - 1)]
         )
         steps.append(step)
         if not step.done:
@@ -947,4 +1021,5 @@ def walk_form(
         offer_chosen=True,
         body_written=True,
         submit_pressed=submitted,
+        payload=catch.shape,
     )
