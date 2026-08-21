@@ -489,6 +489,54 @@ scout recon resume-keys
 
 **撤退条件**: 特定できない場合はDOM操作を再検討する (ただし2章の原則1の制約を負う)。
 
+### 段階3-2: 読み取りAPI (`recon observe-api`)
+
+送信路が取れても **候補者を取ってくる経路** が無ければ何も始まらない。しかも
+観測した送信 payload には `searchUuid` が載っていた — 送信は「どの検索から辿り
+着いた候補者か」に紐づいており、一覧の応答からその値を持ち出せなければ組み立て
+られない。
+
+`observe-api` は **ボタンを1つも押さず**、一覧を開いて飛ぶ応答のキーの形だけを
+読む。2026-08-21 の3回目で決着した:
+
+| 座標 | 実測値 |
+|---|---|
+| `api.candidate_list.url_pattern` | `POST /api/customers/members/search/` |
+| `api.quota.url_pattern` | `GET /api/customers/messages/scout_count/` |
+
+`members/search` の応答に `members[]` と **`search_uuid` が同居していた**。
+1回の一覧取得で候補者と検索識別子が揃うので、別経路は要らない。
+
+求人側 (`jobOfferId` / `jobOfferSalaryId`) は
+`GET /api/customers/job_offers/published/?limit=…` の
+`data.job_offers[].id` と `data.job_offers[].job_offer_salaries[].id` に在った。
+
+**この媒体は送信だけが GraphQL で、読み取りは REST の POST である。**
+`endpoints.py` は参照実装からの引き写しで候補者一覧を `GET` と書いていた。
+実測に合わせて `POST` へ直した。
+
+#### まだ終わっていないこと
+
+**要求本文の形を観測していない。** URLが決まっても、何を送れば同じ並びが返るのか
+は分からない。3回目の報告は応答しか出していなかった (こちらの手落ち)。
+
+同じ回の `POST /api/customers/customer_search_conditions/label/` が
+`label.search_form` という46キーの入れ物を返しており、中身は一覧の絞り込みその
+ものに **見える** — が、名前が似ていることは同じものである証明ではない (原則3)。
+
+次の `observe-api` は要求本文のキーの形も出す。それで決着する。
+
+#### この回で塞いだ穴
+
+- **計測ビーコンが遮断を素通りしていた。** `own_host in url` で判定していたが、
+  ビーコンは送信元ページのURLを `dl=` に載せるので、URLの文字列の中には媒体の
+  ホスト名がそのまま入る。ホスト名で判定するように直した
+  (`recon.gate.is_own_origin`)。`redact_url` で塞いだのと同じ形の穴で、**同じ
+  失敗を2度している**
+- **報告が読めなかった。** 聴いた19本すべてが「(名前を読めませんでした)」で
+  始まっていた。GraphQL の封筒を探していたが、この媒体の読み取りは REST である。
+  URLの経路から名付けるようにした (`members/search` 等)
+
 ---
 
 ## 段階4: 応答の読み方を確定する

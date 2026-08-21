@@ -149,30 +149,49 @@ api.base_url: "https://customers.job-medley.com"
 
 # 候補者一覧取得APIのURL (ページング付き)。
 #
-# **まだ観測していない。** 一覧は武装より前に読み込まれるので、いまの偵察
-# (follow-send / capture-open) の記録には入らない。
+# 2026-08-21 observe-api 3回目で **観測した**。媒体のオリジンを素通しにして
+# 一覧を開き、飛んだ応答19本のキーの形を全部読んだ。候補者の並びを返していたのは
+# 1本だけだった::
 #
-# **ここは急ぐ理由がある。** 送信の payload に searchUuid が載っていた
-# (api.send.paid.payload_template を参照)。つまり送信は「どの検索から辿り着いた
-# 候補者か」に紐づいており、**一覧の応答から searchUuid を持ち出せなければ
-# 送信は組み立てられない**。
+#     POST /api/customers/members/search/
+#       members[]                                 <array> [25]
+#       members[].id / .code / .age / .gender_name / .short_address
+#       members[].qualifications[] / .member_desired_job_categories[]
+#       members[].member_career_job_categories[] / .last_sign_in_at
+#       members[].scouted / .scouted_at_list[] / .scouted_job_offer_ids[]
+#       members[].has_careers / .has_self_pr / .read_profile / .hot
+#       search_uuid                               <string>
+#       total / page / limit / next_cursor
 #
-# 2026-08-21 observe-api 2回目で **候補が見えた**。一覧を開いた瞬間に媒体の
-# オリジンへ飛ぶ非GETは、計測ビーコンを除くとこの5本だけだった::
+# **値は1つも見ていない** (13.2)。見たのはキーの名前と値の種別だけである。
+# それでも一意に決まったのは、他の18本が候補者の並びではなかったからである
+# (求人・通知・残数・検索条件の一覧・保存条件のラベル)。
 #
-#     POST /api/customers/customer_search_conditions/search_manual/
-#     POST /api/customers/customer_search_conditions/search_recommend/
-#     POST /api/customers/received_favorites/search/
-#     POST /api/customers/scouted_members/search/
-#     POST /api/customers/customer_search_conditions/label/
+# **GET ではなく POST である。** api/endpoints.py の method もそれに合わせた。
+api.candidate_list.url_pattern: "https://customers.job-medley.com/api/customers/members/search/"
+
+# ------------------------------------------------------------------------
+# **要求本文の形はまだ観測していない。**
 #
-# **この媒体の読み取りは GraphQL ではなく REST の POST である。** 送信だけが
-# GraphQL で、読み取りは別の作りになっている。
+# URLが決まっても、**何を送れば同じ並びが返るのかは分からない**。
+# 3回目の observe-api は応答しか出していなかった (こちらの手落ちである)。
 #
-# ただしこの回は遮断がこれらを止めていたので、**どれが候補者の並びを返すのかは
-# まだ分からない**。名前から選ぶのは推測である (原則3)。次の observe-api は
-# 媒体のオリジンを素通しするので、応答のキーの形で決着する。
-api.candidate_list.url_pattern: UNRESOLVED
+# 手がかりはある。同じ回に観測した
+#   POST /api/customers/customer_search_conditions/label/
+# の応答が ``label.search_form`` という46キーの入れ物を返しており、中身は
+# 一覧の絞り込みそのものに見える::
+#
+#   search_form.pagination.{limit,page,cursor}
+#   search_form.desired_job_category_ids[] / member_qualification_ids[]
+#   search_form.desired_areas[].{prefecture_id,city_ids[]}
+#   search_form.age.{from,to} / genders[] / employment_types[]
+#   search_form.last_login / desired_features[] / career_job_categories[]
+#   search_form.ignore.{favorite,scouted} / customer_search_condition_id
+#
+# **これが members/search の要求本文だとは、まだ言えない** (原則3)。
+# 名前が似ていることは同じものである証明ではない。次の observe-api は
+# 要求本文のキーの形も出すので、それで決着する。
+# ------------------------------------------------------------------------
 
 # 候補者レジュメ取得APIのURL。
 #
@@ -189,9 +208,20 @@ api.resume.url_pattern: UNRESOLVED
 api.precheck.url_pattern: UNRESOLVED
 
 # 送信枠の残数照会API。
-# 無ければ null。
-# (存在しないことが確認できた場合は null と書いてよい)
-api.quota.url_pattern: UNRESOLVED
+#
+# 2026-08-21 observe-api 3回目で **観測した**。一覧を開くと必ず飛んでいる::
+#
+#     GET /api/customers/messages/scout_count/
+#       remaining_count   <number>
+#       total_count       <number>
+#
+# **これは 8章の「残数は毎回読む」を満たす**。運用者の画面で2日のあいだに
+# 62通 -> 51通 と動いており、引き算で持つと必ずずれる (媒体側で人が送る、
+# 月次でリセットされる)。``remaining_count`` をそのまま読む。
+#
+# **値は見ていない。** 見たのはキーの名前と種別だけである (13.2)。
+# どちらの数が「残り」かは名前が述べているが、突き合わせは段階4で行う。
+api.quota.url_pattern: "https://customers.job-medley.com/api/customers/messages/scout_count/"
 
 # 冪等キーを載せるヘッダ名。
 #
@@ -271,6 +301,60 @@ api.send.paid.payload_template: |
       }
     }
   }
+
+# ------------------------------------------------------------------------
+# **送信payloadの5つの値が、どの読み取りから来るのか。**
+#
+# 2026-08-21 observe-api 3回目で、4つは出所らしいキーが見つかった。
+# **名前が一致しただけで、値が同じである確認はまだ取れていない** (原則3)。
+# 突き合わせは段階4で行う。
+#
+#   memberId          <- POST /api/customers/members/search/
+#                          members[].id
+#   searchUuid        <- POST /api/customers/members/search/
+#                          search_uuid           (同じ応答に載っている)
+#   jobOfferId        <- GET  /api/customers/job_offers/published/?limit=...
+#                          data.job_offers[].id
+#   jobOfferSalaryId  <- 同上
+#                          data.job_offers[].job_offer_salaries[].id
+#   scoutMessage      <- こちらが生成する本文 (座標ではない)
+#
+# **searchUuid が候補者一覧と同じ応答に載っていたことは、設計上の朗報である。**
+# 送信は「どの検索から辿り着いた候補者か」に紐づいているので、別に取りに行く
+# 経路が要るかもしれなかった。1回の一覧取得で候補者と検索識別子が揃う。
+#
+# **求人は候補者ごとではなく事前に1回取れる。** job_offers/published は一覧を
+# 開いた時点で飛んでおり、``limit`` 付きのGETである。運用上は「どの求人へ
+# 送るか」を先に決めて固定するので、送信のたびに引く必要は無い。
+#
+# 重複送信の判定にも同じ応答が使える::
+#
+#   members[].scouted                <bool>
+#   members[].scouted_job_offer_ids  <array>
+#   members[].scouted_at_list        <array>
+#
+# **ただしこれを唯一の根拠にはしない** (9章)。媒体側の値であり、こちらの
+# 送信記録 (state) と食い違ったときにどちらが正かは決められていない。
+# 突き合わせて、食い違ったら送らない側へ倒す。
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
+# **同じ回に観測した、いま使わない読み取り。** 記録だけしておく。
+# 名前とURLは観測そのもので、値は1つも見ていない (13.2)。
+#
+#   POST /api/customers/customer_search_conditions/search_manual/
+#        保存した検索条件の一覧 (画面の「実践会＿衛生士」等)
+#   POST /api/customers/customer_search_conditions/label/
+#        保存条件の中身 (label.search_form。46キー)
+#   POST /api/customers/scouted_members/search/
+#        送信済み候補者の一覧 (scouted_members[], total, count, limit)
+#   POST /api/customers/received_favorites/search/
+#        「気になる」を押した候補者の一覧
+#
+# scouted_members/search は 9章の重複判定の照会先になりうるが、**応答に
+# 会員IDが載っているかを確認していない** (見えたキーは job_offer_id と title
+# だけだった)。確認するまで重複判定の根拠にはしない (原則3)。
+# ------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------
 # **参照実装由来の軸。この媒体に在るかは未確認。**

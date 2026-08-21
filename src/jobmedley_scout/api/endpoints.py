@@ -66,7 +66,17 @@ def build_endpoints(coordinates: SiteCoordinates) -> dict[str, Endpoint]:
         ),
         CANDIDATE_LIST: Endpoint(
             id=CANDIDATE_LIST,
-            method="GET",
+            # **GET ではない。** 参照実装からの引き写しで長く ``"GET"`` と
+            # 書かれていたが、2026-08-21 observe-api 3回目で実測した::
+            #
+            #     POST /api/customers/members/search/
+            #       -> members[] (25件), search_uuid, total, page, limit,
+            #          next_cursor
+            #
+            # この媒体は **送信だけが GraphQL で、読み取りは REST の POST**
+            # である。GET のまま呼べば当たらない -- しかも 404/405 は
+            # 「候補者0件」と区別が付かない形で上流に伝わりうる (原則2)。
+            method="POST",
             url_pattern=coordinates.url("api.candidate_list.url_pattern"),
             # 読み取り系の成功判定は座標化していない。2xx 全般でよく、枠ごとの
             # 差異が問題になるのは副作用のある送信だけだから (6.2)。

@@ -67,8 +67,9 @@ from jobmedley_scout.recon.api_shape import (
     scan_text,
 )
 from jobmedley_scout.recon.capture_send import install_gate
-from jobmedley_scout.recon.gate import GateMode, SendGate
+from jobmedley_scout.recon.gate import GateMode, SendGate, is_own_origin
 from jobmedley_scout.recon.open_structure import redact_url
+from jobmedley_scout.recon.resume_keys import KeyPath
 
 #: このコマンドが埋めうる座標キー。
 OBSERVE_API_KEYS: tuple[str, ...] = (
@@ -86,7 +87,10 @@ OBSERVE_API_KEYS: tuple[str, ...] = (
 #: つきのページで、**サーバ側で組み立てられて返ってくる**。GraphQL は1本も飛ばない。
 #:
 #: 絞り込みを媒体のオリジンだけにする。計測ビーコンは他所のオリジンなので、
-#: これでも入ってこない。
+#: これでも入ってこない -- **ただし判定はホスト名で行うこと**。実測23回目、
+#: ``_MEDIA_HOST not in url`` で見ていたせいで計測ビーコンが報告に紛れ込んだ。
+#: ビーコンは送信元ページのURLを ``dl=`` に載せるので、URLの文字列の中には
+#: 媒体のホスト名がそのまま入る (:func:`recon.gate.is_own_origin`)。
 _MEDIA_HOST = "job-medley.com"
 
 #: 本文を読んでよい応答の種別。画像や動画は読まない (読む意味が無く、重い)。
@@ -173,7 +177,11 @@ class _Listener:
             url = str(response.url)
         if not url:
             return
-        if _MEDIA_HOST not in url.lower():
+        if not is_own_origin(url, _MEDIA_HOST):
+            # **ホスト名で判定する。URL全体の部分一致では駄目。** 実測23回目、
+            # 計測ビーコンが報告に紛れ込んだ -- ビーコンは「どのページから
+            # 送ったか」を ``dl=`` に載せるので、URLの文字列の中には媒体の
+            # ホスト名がそのまま入っている (:func:`recon.gate.is_own_origin`)。
             self.ignored += 1
             return
 
@@ -182,6 +190,14 @@ class _Listener:
         with suppress(Exception):
             request_body = response.request.post_data
             method = str(response.request.method)
+
+        # **要求の形を、応答より先に取る。** 呼ぶために要るのはこちらである。
+        # 値は出さない -- 応答と同じ ``describe_response`` を通す (13.2)。
+        request_keys: tuple[KeyPath, ...] = ()
+        request_reason = ""
+        request_dropped = 0
+        if request_body and method not in ("GET", "HEAD"):
+            request_keys, request_reason, request_dropped = describe_response(request_body)
 
         content_type = ""
         with suppress(Exception):
@@ -212,10 +228,13 @@ class _Listener:
         # **ここで本文を捨てる。** 以降どこにも残らない。
         body = None
 
+        redacted = redact_url(url)
         self.calls.append(
             ObservedCall(
-                operation=operation_name(request_body),
-                redacted_url=redact_url(url),
+                # **URLからも名前を付ける。** この媒体の読み取りは REST なので、
+                # GraphQL の封筒を探すだけでは19本すべてが無名になる (実測23回目)。
+                operation=operation_name(request_body, redacted),
+                redacted_url=redacted,
                 method=method,
                 keys=keys,
                 unread_reason=reason,
@@ -223,6 +242,9 @@ class _Listener:
                 content_type=short_type,
                 uuid_like=uuid_like,
                 send_key_mentions=mentions,
+                request_keys=request_keys,
+                request_unread_reason=request_reason,
+                request_dropped_keys=request_dropped,
             )
         )
 
