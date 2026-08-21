@@ -168,9 +168,44 @@ _TOUR_TOKEN = "tour-guide"
 #: どれも目印を書く先ではない。
 TEXT_FIELD_TAGS: frozenset[str] = frozenset({"textarea"})
 
-#: URLの中で個人を指しうる部分 (数値ID・長い英数字のトークン)。報告では伏せる (13.2)。
-_ID_SEGMENT = re.compile(r"(?<=/)(\d+|[0-9a-f]{8,})(?=/|$)", re.IGNORECASE)
-_QUERY_VALUE = re.compile(r"(?<==)[^&]+")
+#: URLの中で個人を指しうる部分。報告では伏せる (13.2)。
+#:
+#: **最初の実装には穴が4つあった。** 段階3の点検で、実際に通して確かめた::
+#:
+#:     /customers/members/48211?tab=resume  -> 48211 が **残る** (後読みが / か末尾のみ)
+#:     /customers/members/48211#profile     -> 残る (# を見ていない)
+#:     /s/550e8400-e29b-41d4-...-446655440000/list -> 残る (ダッシュ入りUUIDに一致しない)
+#:     https://user:s3cr3t@host/x           -> 残る (資格情報を見ていない)
+#:
+#: 3つ目が特に重い。観測した送信 payload には ``searchUuid`` が載っており、
+#: **その値の形がまさにダッシュ入りUUIDである**。読み取りAPIの観測でURLに
+#: 現れたら素通しになっていた。
+#:
+#: 穴を1つずつ塞ぐ形はやめた。**「安全なものを残す」ではなく「識別子らしいものを
+#: 全部落とす」** に倒す。過剰に伏せても座標は読めるが、伏せ漏らしは漏洩である。
+_UUID_SEGMENT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_HEX_SEGMENT = re.compile(r"^[0-9a-f]{8,}$", re.I)
+_DIGIT_RUN = re.compile(r"\d{4,}")
+_PERCENT_ENCODED = re.compile(r"%[0-9a-f]{2}", re.I)
+_USERINFO = re.compile(r"^([a-z][a-z0-9+.\-]*://)[^/@]*@", re.I)
+_QUERY_VALUE = re.compile(r"(?<==)[^&]*")
+
+
+def _segment_is_an_identifier(segment: str) -> bool:
+    """Whether one path segment looks like it identifies a person. **Pure.**
+
+    形で判断する。語彙を数え上げることはできない (媒体が経路名を増やすたびに
+    穴が空く) が、**識別子の形は数えられる**。
+    """
+    if not segment:
+        return False
+    if _UUID_SEGMENT.match(segment) or _HEX_SEGMENT.match(segment):
+        return True
+    if _PERCENT_ENCODED.search(segment):
+        # パーセント符号化された日本語 = 氏名や地名でありうる。
+        return True
+    # 4桁以上の数字の並びを含む語。``v2`` や ``2fa`` のような経路名は残る。
+    return bool(_DIGIT_RUN.search(segment))
 
 
 @dataclass(frozen=True)
@@ -502,12 +537,35 @@ def redact_url(url: str) -> str:
     """A URL safe to print: path IDs and query values masked. **Pure.**
 
     段階3の成果物はAPIのURL形 (``api.send.paid.url_pattern``) なので、URL自体は
-    出さないと意味が無い。しかし実URLには会員IDが載る -- パスの数値/長い16進と
-    クエリの値を伏せる (13.2)。**保存する構造ダンプには原文を残す** (アーティ
-    ファクトは保持3日、実行ログとは別扱い)。
+    出さないと意味が無い。しかし実URLには会員IDが載る -- **識別子らしいパスの
+    語とクエリ・フラグメントの値を全部伏せる** (13.2)。
+    **保存する構造ダンプには原文を残す** (アーティファクトは保持3日、実行ログ
+    とは別扱い)。
+
+    伏せ漏らしは漏洩なので、迷ったら伏せる側に倒してある。過剰に伏せても
+    「どのエンドポイントか」は経路の語から読める。
     """
-    masked = _ID_SEGMENT.sub("{id}", url)
-    return _QUERY_VALUE.sub("{value}", masked)
+    # **資格情報は丸ごと落とす。** ``https://user:pass@host/`` の形。
+    without_userinfo = _USERINFO.sub(r"\1", url)
+
+    # 断片 (``#...``) も値である。クエリと同じ扱いにする。
+    head, sep, fragment = without_userinfo.partition("#")
+    path_part, query_sep, query = head.partition("?")
+
+    scheme, slashes, rest = path_part.partition("//")
+    prefix = scheme + slashes
+    segments = rest.split("/")
+    # 先頭 (ホスト名) は経路ではないので触らない。
+    masked_segments = [segments[0]] + [
+        "{id}" if _segment_is_an_identifier(segment) else segment for segment in segments[1:]
+    ]
+    masked = prefix + "/".join(masked_segments)
+
+    if query_sep:
+        masked += query_sep + _QUERY_VALUE.sub("{value}", query)
+    if sep:
+        masked += sep + "{value}"
+    return masked
 
 
 @dataclass(frozen=True)
