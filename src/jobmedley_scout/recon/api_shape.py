@@ -49,6 +49,39 @@ _BARE_NUMBER = re.compile(r"^\d+$")
 _UUID_LIKE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _LONG_HEX = re.compile(r"^[0-9a-f]{16,}$", re.I)
 
+#: UUID の形をした文字列。**数えるためだけに使う。値は取り出さない。**
+#:
+#: 一覧が JSON で来ない場合 (サーバ側で組み立てたHTMLだった場合)、``searchUuid``
+#: の値は文書のどこかに埋まっている。キーパスでは辿れないが、**「その形のものが
+#: 何個あるか」は数えられる**。0個なら文書には無い、1個以上なら在る --
+#: どちらも次にどこを見るかを決める材料になる。
+#:
+#: **数は個人データではない。** 値そのものは1文字も取り出さない。
+_UUID_TOKEN = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+
+#: 送信 payload が要求するキーの名前。文書の中にこの **名前** が現れるかを数える。
+#: 名前はAPIの語彙であって個人データではない。
+_SEND_KEY_NAMES: tuple[str, ...] = ("searchuuid", "joboffersalaryid", "jobofferid", "memberid")
+
+
+def scan_text(body: str | None) -> tuple[int, int]:
+    """Count UUID-shaped tokens and send-key *names* in a document. **Pure.**
+
+    返すのは ``(UUIDの形の数, 送信キーの名前の出現数)`` の2つの **数** だけ。
+    値も文言も返さない (13.2)。
+
+    JSON として読めない応答 (サーバ側で組み立てたHTML等) に対して、
+    「送信に要る値がこの文書に入っているのか」を値を見ずに問うための道具である。
+    """
+    if not body:
+        return 0, 0
+    lowered = body.lower()
+    return (
+        len(set(_UUID_TOKEN.findall(body))),
+        sum(lowered.count(name) for name in _SEND_KEY_NAMES),
+    )
+
+
 #: 検索の識別子らしいキー名の断片。**名前で探す。値は見ない。**
 #:
 #: 送信 payload の ``searchUuid`` に入る値の出所を、一覧の応答の中から
@@ -101,6 +134,12 @@ class ObservedCall:
     unread_reason: str = ""
     #: 個人データに見えたので落としたキーの数。**落とした事実も観測である。**
     dropped_keys: int = 0
+    #: 応答の種別 (``application/json`` 等)。読めなければ空。
+    content_type: str = ""
+    #: JSON として読めなかった文書の中に在った、UUIDの形の文字列の **数**。
+    uuid_like: int = 0
+    #: 同じ文書の中に現れた、送信キーの **名前** の出現数。
+    send_key_mentions: int = 0
 
     def search_id_candidates(self) -> tuple[str, ...]:
         """Key paths whose **name** suggests the search identifier. **Pure.**"""
@@ -113,9 +152,20 @@ class ObservedCall:
     def render(self) -> str:
         lines = [f"  操作: {self.operation or '(名前を読めませんでした)'}"]
         lines.append(f"    {self.method} {self.redacted_url}")
+        if self.content_type:
+            lines.append(f"    種別: {self.content_type}")
         if self.unread_reason:
             # **読めなかったことを、キーが無かったことにしない** (原則2)。
-            lines.append(f"    応答を読めませんでした: {self.unread_reason}")
+            lines.append(f"    キーパスは取れませんでした: {self.unread_reason}")
+            if self.uuid_like or self.send_key_mentions:
+                # **値は出さない。数だけ出す。** それでも次に見る先は決まる。
+                lines.append(
+                    f"    ただし文書の中に UUIDの形が {self.uuid_like} 個、"
+                    f"送信キーの名前が {self.send_key_mentions} 回ありました"
+                )
+                lines.append("    (**値は取り出していません。数だけです** -- 13.2)")
+            else:
+                lines.append("    文書の中に UUIDの形も送信キーの名前もありませんでした。")
             return "\n".join(lines)
         if not self.keys:
             lines.append("    応答は読めましたが、キーが1つもありませんでした。")
