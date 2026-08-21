@@ -165,7 +165,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         "followup": "followup",
         "sync-replies": "sync-replies",
         "analytics": "analytics",
-        "dryrun": "send",
+        # **``send`` に写像しない。** 一通も送らないコマンドが、送信の応答を
+        # 解釈するための座標を要求すると、梯子が閉じる (coordinates.py の注記)。
+        "dryrun": "dryrun",
     }.get(args.command)
 
     if command_key is not None:

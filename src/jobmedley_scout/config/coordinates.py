@@ -420,6 +420,29 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
             "api.auth_failure_codes",
         }
     ),
+    # **段階5の空振りは、段階4の成果物を要求してはいけない。**
+    #
+    # ``dryrun`` は「送信直前で止める」コマンドである。組み立てるところまでは
+    # やるので、送信先URLと payload の雛形は要る -- 組み立てられないなら、
+    # 止まる前に失敗しているべきである。
+    #
+    # 要求しないのは **応答を解釈するための座標** である
+    # (``api.send.paid.success_statuses`` / ``api.auth_failure_codes``)。
+    # 一通も送らないのだから、解釈すべき応答が存在しない。
+    #
+    # 以前はここを ``send`` と同じ集合にしていた。結果として梯子が閉じた:
+    # 段階4はそれらの座標を **実測で** 埋める工程なのに、段階5を先に走らせて
+    # 確かめることもできない。**送信せずには埋められない座標を、送信しない
+    # コマンドの前提にしていた** -- このモジュール自身の docstring が戒めている
+    # 「鶏と卵」そのものである。
+    "dryrun": frozenset(
+        {
+            "auth.success_marker_selector",
+            "api.base_url",
+            "api.send.paid.url_pattern",
+            "api.send.paid.payload_template",
+        }
+    ),
     "sync-replies": frozenset(
         {
             "auth.success_marker_selector",

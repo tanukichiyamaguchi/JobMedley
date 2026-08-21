@@ -7,7 +7,7 @@
 > 成功しているのに失敗扱いになります。**成功判定は1箇所に集約してください。**
 
 「1箇所に集約」を人間の規律ではなくテストで守るため、
-``tests/guardrails/test_status_compare_only_here.py`` が、本モジュール以外での
+``tests/guardrails/test_source_conventions.py`` が、本モジュール以外での
 ステータスコードの数値比較 (``status == 200`` / ``status_code in (...)`` など) を
 ソース走査で禁止している。
 
