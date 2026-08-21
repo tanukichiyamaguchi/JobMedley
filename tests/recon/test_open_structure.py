@@ -727,3 +727,64 @@ def test_a_write_failure_is_classified_with_the_same_vocabulary_as_a_click() -> 
     """
     assert set(CLICK_FAILURE_KINDS) <= set(WRITE_FAILURE_KINDS)
     assert "書いた値が残らなかった" in WRITE_FAILURE_KINDS
+
+
+# --- redact_url の穴 (段階3の点検で実際に通して見つけたもの) ---------------------
+
+
+def test_an_id_before_a_query_is_masked() -> None:
+    """**後読みが ``/`` か末尾だけだと、``?`` の直前のIDが残る。**
+
+    そして候補者の詳細URLはまさにその形である。
+    """
+    masked = redact_url("https://x.com/customers/members/48211?tab=resume")
+    assert "48211" not in masked
+    assert "members/{id}" in masked
+
+
+def test_an_id_before_a_fragment_is_masked() -> None:
+    """断片 (``#...``) も値である。クエリと同じ扱いにする。"""
+    masked = redact_url("https://x.com/customers/members/48211#profile")
+    assert "48211" not in masked
+    assert "profile" not in masked
+
+
+def test_a_dashed_uuid_is_masked() -> None:
+    """**これが一番重い穴だった。**
+
+    観測した送信 payload には ``searchUuid`` が載っている。その値の形が
+    まさにダッシュ入りUUIDで、旧実装の ``[0-9a-f]{8,}`` には一致しなかった --
+    読み取りAPIの観測でURLに現れたら素通しになっていた。
+    """
+    masked = redact_url("https://x.com/s/550e8400-e29b-41d4-a716-446655440000/list")
+    assert "550e8400" not in masked
+    assert masked == "https://x.com/s/{id}/list"
+
+
+def test_credentials_in_the_url_are_dropped_entirely() -> None:
+    """``https://user:pass@host/`` の形。**伏せるのではなく落とす。**"""
+    masked = redact_url("https://user:s3cr3t@x.com/a")
+    assert "s3cr3t" not in masked
+    assert masked == "https://x.com/a"
+
+
+def test_a_percent_encoded_name_is_masked() -> None:
+    """パーセント符号化された日本語は、氏名や地名でありうる。"""
+    masked = redact_url("https://x.com/search/%E5%B1%B1%E7%94%B0%E5%A4%AA%E9%83%8E")
+    assert "%E5%B1%B1" not in masked
+
+
+def test_route_words_survive_so_the_endpoint_is_still_recognisable() -> None:
+    """**過剰に伏せても座標が読めなくなっては意味が無い。**
+
+    どのエンドポイントかは経路の語から読める必要がある。
+    """
+    url = "https://customers.job-medley.com/api/customers/graphql/SendSingleScout"
+    assert redact_url(url) == url
+    # 短い数字を含む経路名 (v2, 2fa) は残る。
+    assert redact_url("https://x.com/api/v2/scouts") == "https://x.com/api/v2/scouts"
+
+
+def test_the_host_is_never_mistaken_for_a_path_segment() -> None:
+    """ホスト名は経路ではない。数字を含んでいても伏せない。"""
+    assert redact_url("https://a1234.example/api") == "https://a1234.example/api"

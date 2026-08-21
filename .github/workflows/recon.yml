@@ -22,6 +22,7 @@ on:
           - observe-list
           - capture-open
           - follow-send
+          - observe-api
           - read-bundle
           - preflight
           - coordinates
@@ -149,6 +150,13 @@ jobs:
       - name: Follow send (gate armed)
         if: inputs.command == 'follow-send'
         run: scout recon follow-send
+
+      # **押さない偵察。** 一覧を開いて、媒体のGraphQL応答の「キーの形」だけを
+      # 観測する。値は1つも出さない (13.2: 一覧の応答には氏名・会員番号・年齢・
+      # 居住地が入っている)。ボタンには触れないので送信は起こしようがない。
+      - name: Observe API (no clicks)
+        if: inputs.command == 'observe-api'
+        run: scout recon observe-api
 
       - name: Observe list
         if: inputs.command == 'observe-list'
