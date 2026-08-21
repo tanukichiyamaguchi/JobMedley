@@ -67,6 +67,32 @@ class GateMode(StrEnum):
     #: 画面を開くための読み取りも POST で来る -- BLOCK_ALL のままでは送信画面へ
     #: 到達できず、段階3が原理的に終わらない (:mod:`recon.graphql` の冒頭)。
     BLOCK_WRITES = "block_writes"
+    #: 媒体自身のオリジンへの通信は **全部通し**、他所への通信だけを止める。
+    #:
+    #: **これは送信に対する保護ではない。** 送信APIも媒体のオリジンにあるので、
+    #: このモードで送信ボタンを押せば送信は成立する。
+    #:
+    #: 使ってよいのは **ボタンを1つも押さないコマンドだけ** である。押さなければ
+    #: 飛ぶ通信は「運用者が自分でそのページを開いたとき」と同じものだけになり、
+    #: 偵察が新たな副作用を持ち込むことはない。守っているのは遮断ではなく
+    #: 「押さないこと」で、それは試験で固定する
+    #: (``tests/guardrails/test_observe_only_never_presses.py``)。
+    #:
+    #: **なぜ要るのか。** 実測22回目、BLOCK_WRITES のまま一覧を開いたら、候補者を
+    #: 取ってくる通信そのものが止まった::
+    #:
+    #:     POST /api/customers/customer_search_conditions/search_manual/
+    #:     POST /api/customers/received_favorites/search/
+    #:     POST /api/customers/scouted_members/search/
+    #:
+    #: **この媒体の読み取りは GraphQL ではなく REST の POST である。**
+    #: 遮断から見れば書き込みと区別が付かないので、空の応答を返していた。
+    #: 観測したかったものを、観測のための仕掛けが止めていた。
+    #:
+    #: 他所への通信 (計測ビーコン) を止め続けるのは、観測に要らないうえ、
+    #: 止めたほうが安全側で、報告も読める量に収まるからである (実測22回目は
+    #: 534件のうち529件が計測ビーコンだった)。
+    BLOCK_THIRD_PARTY = "block_third_party"
 
 
 @dataclass(frozen=True)
@@ -94,7 +120,9 @@ class SendGate:
         analyse(gate.recorded)
     """
 
-    def __init__(self, *, mode: GateMode = GateMode.BLOCK_ALL) -> None:
+    def __init__(
+        self, *, mode: GateMode = GateMode.BLOCK_ALL, own_host: str = "job-medley.com"
+    ) -> None:
         # 安全メソッドの集合を **注入可能にしていない**。差し替えられる形にすると、
         # ``SendGate(frozenset({"GET", "POST"}))`` の1行で fail-closed が消える --
         # しかもテストは通ったままになる。この集合は :data:`SAFE_METHODS` 固定で、
@@ -104,6 +132,9 @@ class SendGate:
         # 引数名も列挙子の名前も「何を止めるか」をそのまま述べているので、
         # 読み違えて緩められない。
         self._mode = mode
+        #: :data:`GateMode.BLOCK_THIRD_PARTY` が「自分のオリジン」とみなすホスト。
+        #: 既定を媒体に固定してあるので、書き換えるにはモジュールの編集が要る。
+        self._own_host = own_host.lower()
         self._armed = False
         #: 武装中に **通した** 読み取り。通した事実も観測なので残す --
         #: 報告が「何を通したか」を述べられないと、緩和が黙って効く。
@@ -153,6 +184,22 @@ class SendGate:
             return GateDecision.PASS
         if method in self._safe_methods:
             return GateDecision.PASS
+        if self._mode is GateMode.BLOCK_THIRD_PARTY and self._own_host in url.lower():
+            # **媒体自身のオリジンは素通し。** 押さないコマンド専用の緩和である
+            # (:class:`GateMode` の注記)。通した事実は残す。
+            self._sequence += 1
+            self._passed_reads.append(
+                RecordedRequest(
+                    method=method,
+                    url=url,
+                    headers=dict(headers or {}),
+                    # **本文は残さない** (13.2)。一覧の応答を要求する本文には
+                    # 検索条件が載り、そこから個人が絞り込まれうる。
+                    body=None,
+                    sequence=self._sequence,
+                )
+            )
+            return GateDecision.PASS
         if self._mode is GateMode.BLOCK_WRITES and is_read_only_graphql(url, body):
             # **読み取りだけを通す。** 判定は :mod:`recon.graphql` (純粋) が行い、
             # 判定できないものは全て「通さない」側へ倒れる。
@@ -181,7 +228,7 @@ class SendGate:
                 sequence=self._sequence,
             )
         )
-        if self._mode is GateMode.BLOCK_WRITES:
+        if self._mode in (GateMode.BLOCK_WRITES, GateMode.BLOCK_THIRD_PARTY):
             return GateDecision.RECORD_AND_STUB
         return GateDecision.RECORD_AND_ABORT
 
@@ -189,6 +236,10 @@ class SendGate:
     @property
     def mode(self) -> GateMode:
         return self._mode
+
+    @property
+    def own_host(self) -> str:
+        return self._own_host
 
     @property
     def recorded(self) -> tuple[RecordedRequest, ...]:

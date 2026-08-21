@@ -14,11 +14,27 @@
 既存の偵察 (``follow-send`` / ``capture-open``) は一覧が描画されてから武装する
 ので、一覧そのものの通信は記録に入らない。
 
-このコマンドは順序を変える。**最初から武装し、応答を聴きながら一覧を開く。**
+このコマンドは順序を変える。**最初から仕掛け、応答を聴きながら一覧を開く。**
 
-**押さない。** 一覧を開くだけで、カードのボタンには触れない。段階3で分かって
-いるとおり、カードには送信を名乗るボタンが並んでいる (13.6: 送信は取り消せない)。
-レジュメの形は、押さずに取れる範囲だけを報告する。
+**ただし媒体のオリジンは止めない** (:data:`~recon.gate.GateMode.BLOCK_THIRD_PARTY`)。
+実測22回目、書き込みを全部止めたまま一覧を開いたら、候補者を取ってくる通信
+そのものが止まった::
+
+    POST /api/customers/customer_search_conditions/search_manual/
+    POST /api/customers/received_favorites/search/
+    POST /api/customers/scouted_members/search/
+
+**この媒体の読み取りは GraphQL ではなく REST の POST である。** 遮断から見れば
+書き込みと区別が付かない。観測したかったものを、観測のための仕掛けが止めていた。
+
+**押さない。そしてそれがこのコマンドの安全性そのものである。**
+
+媒体のオリジンを素通しにする以上、遮断はもう送信を止めない (送信APIも同じ
+オリジンにある)。守っているのは「押さないこと」で、それは試験で固定してある
+(``tests/guardrails/test_observe_only_never_presses.py``)。
+
+押さなければ、飛ぶ通信は **運用者が自分でそのページを開いたときと同じもの**
+だけになる。偵察が新たな副作用を持ち込むことはない。
 
 **値は1文字も出さない** (13.2)。一覧の応答には氏名・会員番号・年齢・居住地が
 入っている。出すのはキーの名前と値の種別だけで、判定は :mod:`recon.api_shape`
@@ -27,6 +43,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -74,6 +91,40 @@ _MEDIA_HOST = "job-medley.com"
 
 #: 本文を読んでよい応答の種別。画像や動画は読まない (読む意味が無く、重い)。
 _READABLE_TYPES: tuple[str, ...] = ("json", "html", "javascript", "text/plain", "xml")
+
+
+def _group(calls: Sequence[ObservedCall]) -> tuple[tuple[ObservedCall, int], ...]:
+    """Collapse repeats, keeping order and counting them. **Pure.**
+
+    単一ページアプリは同じ数本を何度も取り直す。1回ずつ並べると報告が同じ行で
+    埋まり、本命が見つけられなくなる (実測22回目: 同じ4本で90行)。
+    **回数は落とさない** -- 何度も取り直していること自体が観測だからである。
+    """
+    order: list[ObservedCall] = []
+    counts: dict[tuple[str, str, str], int] = {}
+    for call in calls:
+        key = (call.operation, call.redacted_url, call.method)
+        if key not in counts:
+            counts[key] = 0
+            order.append(call)
+        counts[key] += 1
+    return tuple((call, counts[(call.operation, call.redacted_url, call.method)]) for call in order)
+
+
+def _unique(items: Iterable[str]) -> tuple[str, ...]:
+    """Deduplicate while keeping order. **同じ行を90回出さない。**
+
+    実測22回目、単一ページアプリが同じ4本を何十回も取り直したせいで、座標の
+    候補一覧が同じURLで90行埋まった。読む人が本命を見つけられない報告は、
+    出していないのと大差ない。
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            kept.append(item)
+    return tuple(kept)
 
 
 class ApiStage(StrEnum):
@@ -186,13 +237,14 @@ class ApiObservation:
     session_expired: bool = False
     list_rendered: bool = False
     calls: tuple[ObservedCall, ...] = ()
-    #: 一覧を開いている間に飛んで、遮断が止めた書き込み (URLは伏せ済み)。
-    #:
-    #: **0件でも0件と書く。** これまでどのコマンドも、一覧のロード中は武装して
-    #: いなかった (描画を殺さないため、押す直前に武装する設計)。つまり
-    #: 「一覧を開くだけでは書き込みが飛ばない」は **一度も観測されていない**。
-    #: このコマンドは最初から武装するので、ここで初めてそれが言える。
+    #: 一覧を開いている間に飛んで、**他所へ行くので止めた** 通信 (URLは伏せ済み)。
+    #: ほとんどが計測ビーコンである。
     blocked_on_load: tuple[str, ...] = ()
+    #: 一覧を開いている間に **媒体のオリジンへ実際に飛んだ** 非GET (URLは伏せ済み)。
+    #:
+    #: **止めていない。** 押していないので、これは運用者が自分でページを開いた
+    #: ときに飛ぶものと同じである。ここに候補者一覧の取得が含まれる。
+    passed_on_load: tuple[str, ...] = ()
     #: 応答を聴く仕掛けが実際に張れたか。**張れなかったことを黙らない。**
     #:
     #: 仕掛けは ``suppress(Exception)`` の中で張っている。失敗しても実行は続く
@@ -274,7 +326,8 @@ class ApiObservation:
             lines.extend(self._blocked_lines())
             return "\n".join(lines)
 
-        lines.append(f"  聴いた応答: {len(self.calls)} 件")
+        grouped = _group(self.calls)
+        lines.append(f"  聴いた応答: {len(self.calls)} 件 ({len(grouped)} 種類)")
         lines.extend(self._heard_counts())
         if not self.list_rendered:
             # **描画していないことを黙らない。** 聴けた応答が、一覧を出すための
@@ -282,8 +335,12 @@ class ApiObservation:
             lines.append(f"  ただし **一覧の行は現れませんでした**。{self.note}")
             lines.append("  聴いた応答が一覧の取得だったかは、キーの形で判断してください。")
         lines.append("")
-        for call in self.calls:
+        # **同じ通信を何十回も並べない。** 単一ページアプリは同じ数本を取り直す。
+        # 実測22回目の報告は、同じ4本で90行埋まっていた。
+        for call, times in grouped:
             lines.append(call.render())
+            if times > 1:
+                lines.append(f"    (同じ通信が {times} 回ありました)")
             lines.append("")
 
         lines.append("config/site_coordinates.yaml の該当行:")
@@ -308,17 +365,24 @@ class ApiObservation:
 
     def _blocked_lines(self) -> list[str]:
         """**0件でも書く** (原則2)。黙ると「観測しなかった」と区別が付かない。"""
-        if self.blocked_on_load:
-            out = [
-                f"一覧を開いている間に飛んだ **書き込み**: {len(self.blocked_on_load)} 件 "
-                f"(遮断が止めました。媒体のサーバへは到達していません)"
-            ]
-            out.extend(f"  {url}" for url in self.blocked_on_load[:10])
-            return out
-        return [
-            "一覧を開いている間に飛んだ **書き込み**: 0 件。"
-            "**開くだけでは何も書き込まれない**、と観測で言えました。"
-        ]
+        out: list[str] = []
+        # **媒体へ実際に飛んだもの。** ここに一覧の取得が居る。
+        if self.passed_on_load:
+            out.append(
+                f"一覧を開いている間に媒体のオリジンへ飛んだ非GET: "
+                f"{len(self.passed_on_load)} 件 "
+                f"(**止めていません** -- 押していないので、"
+                f"運用者がページを開いたときと同じ通信です)"
+            )
+            out.extend(f"  {url}" for url in _unique(self.passed_on_load)[:20])
+        else:
+            out.append("一覧を開いている間に媒体のオリジンへ飛んだ非GET: 0 件。")
+        # **他所へ行くので止めたもの。** 観測には要らない。
+        out.append(
+            f"他所のオリジンへ行こうとして **止めた** 通信: "
+            f"{len(self.blocked_on_load)} 件 (計測ビーコン等。媒体とは無関係です)"
+        )
+        return out
 
     def _coordinate_lines(self) -> list[str]:
         out: list[str] = []
@@ -327,9 +391,11 @@ class ApiObservation:
             # **1件に決め打ちしない。** どれが一覧の取得かは操作名だけでは
             # 断定できないので、候補を並べて人間に選ばせる (原則3)。
             out.append(f"  api.candidate_list.url_pattern: {UNRESOLVED_TOKEN}")
-            out.append("    # 聴いた読み取りの候補 (操作名とURL):")
-            for call in listing:
-                out.append(f"    #   {call.operation}  {call.redacted_url}")
+            out.append("    # 聴いた読み取りの候補 (操作名とURL。**同じものはまとめてあります**):")
+            for label in _unique(
+                f"{call.operation}  {call.redacted_url}".strip() for call in listing
+            ):
+                out.append(f"    #   {label}")
             out.append("    # 候補者の並びを返しているものを選んで貼ってください。")
             out.append("    # **どれか1つを機械が選ぶことはしません** -- 応答の値を")
             out.append("    # 見ないと決められず、値は見ない方針だからです (13.2/原則3)。")
@@ -377,7 +443,7 @@ def observe_api(
     if not session.exists():
         return ApiObservation(requested_url=requested_url, session_present=False)
 
-    gate = SendGate(mode=GateMode.BLOCK_WRITES)
+    gate = SendGate(mode=GateMode.BLOCK_THIRD_PARTY)
     listener = _Listener()
     with browser_context(config, storage_state=session) as (_context, page):
         install_gate(page, gate)
@@ -389,6 +455,8 @@ def observe_api(
         except Exception:  # noqa: BLE001 -- 張れなかったことを記録して続ける
             attached = False
         # **最初から武装する。** 押さないので、武装したまま最後まで行く。
+        # 止まるのは他所への通信 (計測ビーコン) だけで、媒体のオリジンは素通しする
+        # -- そうしないと候補者を取ってくる通信まで止まる (実測22回目)。
         gate.arm()
         try:
             goto(page, requested_url, config)
@@ -412,6 +480,11 @@ def observe_api(
                 calls=tuple(listener.calls),
                 blocked_on_load=tuple(
                     f"{entry.method} {redact_url(entry.url)}" for entry in gate.recorded
+                ),
+                passed_on_load=tuple(
+                    f"{entry.method} {redact_url(entry.url)}"
+                    for entry in gate.passed_reads
+                    if entry.method not in ("GET", "HEAD")
                 ),
                 listener_attached=attached,
                 ignored=listener.ignored,
