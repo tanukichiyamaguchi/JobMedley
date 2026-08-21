@@ -47,6 +47,7 @@ from jobmedley_scout.recon.api_shape import (
     ObservedCall,
     describe_response,
     operation_name,
+    scan_text,
 )
 from jobmedley_scout.recon.capture_send import install_gate
 from jobmedley_scout.recon.gate import GateMode, SendGate
@@ -58,10 +59,21 @@ OBSERVE_API_KEYS: tuple[str, ...] = (
     "api.resume.url_pattern",
 )
 
-#: 聴く対象。**媒体自身のオリジンの GraphQL だけ。**
+#: 聴く対象。**媒体自身のオリジンなら全部。**
 #:
-#: 計測ビーコンの応答まで読むと、報告が他所のサービスの形で埋まる。
-_INTERESTING = ("job-medley.com", "graphql")
+#: 最初は ``("job-medley.com", "graphql")`` の両方を求めていた。送信が GraphQL
+#: だったので、読み取りもそうだろうと考えたからである。**実測21回目でそれが
+#: 誤りだと分かった** -- 一覧は描画されたのに、聴けた応答は0件だった。
+#:
+#: 一覧のURLは ``/customers/searches?lg=0&da[0][pid]=14&...`` という長い問い合わせ
+#: つきのページで、**サーバ側で組み立てられて返ってくる**。GraphQL は1本も飛ばない。
+#:
+#: 絞り込みを媒体のオリジンだけにする。計測ビーコンは他所のオリジンなので、
+#: これでも入ってこない。
+_MEDIA_HOST = "job-medley.com"
+
+#: 本文を読んでよい応答の種別。画像や動画は読まない (読む意味が無く、重い)。
+_READABLE_TYPES: tuple[str, ...] = ("json", "html", "javascript", "text/plain", "xml")
 
 
 class ApiStage(StrEnum):
@@ -94,8 +106,15 @@ class _Listener:
     """
 
     calls: list[ObservedCall] = field(default_factory=list)
-    #: 聴いたが媒体のものではなかった応答の数。
+    #: 媒体のオリジンではなかったので聴かなかった応答の数。
+    #:
+    #: **必ず報告に出す。** 実測21回目、聴けた応答は0件だったが「いくつ無視したか」
+    #: を出していなかったので、「本当に応答が無かった」のか「絞り込みが狭すぎた」
+    #: のかが報告から決められなかった。数を出していれば即座に分かった --
+    #: 自分で作った静かなゼロ件である。
     ignored: int = 0
+    #: 読める種別ではなかったので本文を見なかった応答の数 (画像等)。
+    skipped_binary: int = 0
 
     def hear(self, response: Any) -> None:
         url = ""
@@ -103,16 +122,25 @@ class _Listener:
             url = str(response.url)
         if not url:
             return
-        lowered = url.lower()
-        if not all(needle in lowered for needle in _INTERESTING):
+        if _MEDIA_HOST not in url.lower():
             self.ignored += 1
             return
 
         request_body: str | None = None
-        method = "POST"
+        method = "GET"
         with suppress(Exception):
             request_body = response.request.post_data
             method = str(response.request.method)
+
+        content_type = ""
+        with suppress(Exception):
+            content_type = str(response.headers.get("content-type", ""))
+        short_type = content_type.split(";", 1)[0].strip()
+
+        if content_type and not any(kind in content_type.lower() for kind in _READABLE_TYPES):
+            # 画像・動画・フォント。読む意味が無く、重い。**数だけ残す。**
+            self.skipped_binary += 1
+            return
 
         body: str | None = None
         reason = ""
@@ -123,8 +151,13 @@ class _Listener:
 
         keys: tuple[Any, ...] = ()
         dropped = 0
+        uuid_like = 0
+        mentions = 0
         if not reason:
             keys, reason, dropped = describe_response(body)
+            if reason:
+                # JSON では無かった。**値は見ずに、形の数だけ数える。**
+                uuid_like, mentions = scan_text(body)
         # **ここで本文を捨てる。** 以降どこにも残らない。
         body = None
 
@@ -136,6 +169,9 @@ class _Listener:
                 keys=keys,
                 unread_reason=reason,
                 dropped_keys=dropped,
+                content_type=short_type,
+                uuid_like=uuid_like,
+                send_key_mentions=mentions,
             )
         )
 
@@ -157,6 +193,15 @@ class ApiObservation:
     #: 「一覧を開くだけでは書き込みが飛ばない」は **一度も観測されていない**。
     #: このコマンドは最初から武装するので、ここで初めてそれが言える。
     blocked_on_load: tuple[str, ...] = ()
+    #: 応答を聴く仕掛けが実際に張れたか。**張れなかったことを黙らない。**
+    #:
+    #: 仕掛けは ``suppress(Exception)`` の中で張っている。失敗しても実行は続く
+    #: ので、**1件も聴けなかったときに「応答が無かった」と区別が付かない**。
+    listener_attached: bool = False
+    #: 媒体のオリジンではなかったので聴かなかった応答の数。
+    ignored: int = 0
+    #: 読める種別ではなかったので本文を見なかった応答の数。
+    skipped_binary: int = 0
     note: str = ""
 
     def reached(self) -> ApiStage:
@@ -217,12 +262,20 @@ class ApiObservation:
             lines.append("  Copy as cURL からシークレットを取り直してください。")
             return "\n".join(lines)
         if stage is ApiStage.NOTHING_HEARD:
-            # **「静かなゼロ件」を名指しする** (原則2)。
-            lines.append("  一覧は描画されましたが、**媒体のGraphQL応答を1つも聴けませんでした**。")
-            lines.append("  描画がキャッシュから行われたか、聴く条件が狭すぎる可能性があります。")
+            # **「静かなゼロ件」を名指しし、切り分けに要る数を全部出す** (原則2)。
+            lines.append("  **媒体のオリジンからの応答を1つも聴けませんでした。**")
+            lines.extend(self._heard_counts())
+            if not self.listener_attached:
+                lines.append("  → **聴く仕掛けが張れていません。** 応答の有無以前の問題です。")
+            elif self.ignored:
+                lines.append("  → 他所のオリジンの応答は届いています。媒体だけが無言でした。")
+            else:
+                lines.append("  → 応答が1つも届いていません。遷移そのものが起きていない可能性。")
+            lines.extend(self._blocked_lines())
             return "\n".join(lines)
 
         lines.append(f"  聴いた応答: {len(self.calls)} 件")
+        lines.extend(self._heard_counts())
         if not self.list_rendered:
             # **描画していないことを黙らない。** 聴けた応答が、一覧を出すための
             # ものだったかどうかが疑わしくなる (検索が0件だった、エラーだった等)。
@@ -237,25 +290,35 @@ class ApiObservation:
         lines.append("")
         lines.extend(self._coordinate_lines())
         lines.append("")
-        # **0件でも書く** (原則2)。黙ると「観測しなかった」と区別が付かない。
-        if self.blocked_on_load:
-            lines.append(
-                f"一覧を開いている間に飛んだ **書き込み**: {len(self.blocked_on_load)} 件 "
-                f"(遮断が止めました。媒体のサーバへは到達していません)"
-            )
-            for url in self.blocked_on_load[:10]:
-                lines.append(f"  {url}")
-        else:
-            lines.append(
-                "一覧を開いている間に飛んだ **書き込み**: 0 件。"
-                "**開くだけでは何も書き込まれない**、と初めて観測で言えました。"
-            )
+        lines.extend(self._blocked_lines())
         lines.append("")
         lines.append("**このコマンドはボタンを1つも押していません。**")
         lines.append(
             "応答の値は1つも出していません。出したのはキーの名前と値の種別だけです (13.2)。"
         )
         return "\n".join(lines)
+
+    def _heard_counts(self) -> list[str]:
+        """The numbers that tell "nothing was there" from "nothing was looked at"."""
+        return [
+            f"  (聴く仕掛け: {'張れました' if self.listener_attached else '**張れませんでした**'}"
+            f" / 他所のオリジンなので聴かなかった応答: {self.ignored} 件"
+            f" / 読めない種別なので本文を見なかった応答: {self.skipped_binary} 件)",
+        ]
+
+    def _blocked_lines(self) -> list[str]:
+        """**0件でも書く** (原則2)。黙ると「観測しなかった」と区別が付かない。"""
+        if self.blocked_on_load:
+            out = [
+                f"一覧を開いている間に飛んだ **書き込み**: {len(self.blocked_on_load)} 件 "
+                f"(遮断が止めました。媒体のサーバへは到達していません)"
+            ]
+            out.extend(f"  {url}" for url in self.blocked_on_load[:10])
+            return out
+        return [
+            "一覧を開いている間に飛んだ **書き込み**: 0 件。"
+            "**開くだけでは何も書き込まれない**、と観測で言えました。"
+        ]
 
     def _coordinate_lines(self) -> list[str]:
         out: list[str] = []
@@ -319,8 +382,12 @@ def observe_api(
     with browser_context(config, storage_state=session) as (_context, page):
         install_gate(page, gate)
         # **聴くのは遷移より前に仕掛ける。** 後だと最初の応答を取り逃す。
-        with suppress(Exception):
+        attached = False
+        try:
             page.on("response", listener.hear)
+            attached = True
+        except Exception:  # noqa: BLE001 -- 張れなかったことを記録して続ける
+            attached = False
         # **最初から武装する。** 押さないので、武装したまま最後まで行く。
         gate.arm()
         try:
@@ -331,6 +398,7 @@ def observe_api(
                     requested_url=requested_url,
                     session_expired=True,
                     landed_url=redact_url(page.url),
+                    listener_attached=attached,
                 )
             wait_for_structure_to_settle(page, config.selector_timeout_ms)
             rendered = marker_present(page, row_token, timeout_ms=config.selector_timeout_ms)
@@ -345,6 +413,9 @@ def observe_api(
                 blocked_on_load=tuple(
                     f"{entry.method} {redact_url(entry.url)}" for entry in gate.recorded
                 ),
+                listener_attached=attached,
+                ignored=listener.ignored,
+                skipped_binary=listener.skipped_binary,
                 note="" if rendered else f"行 ({row_token}) が現れませんでした。",
             )
         finally:

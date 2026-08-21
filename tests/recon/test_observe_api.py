@@ -39,10 +39,13 @@ class _Request:
 
 
 class _Response:
-    def __init__(self, url: str, body: str, request: _Request) -> None:
+    def __init__(
+        self, url: str, body: str, request: _Request, content_type: str = "application/json"
+    ) -> None:
         self.url = url
         self.request = request
         self._body = body
+        self.headers = {"content-type": content_type}
 
     def text(self) -> str:
         return self._body
@@ -346,3 +349,127 @@ def test_a_write_during_the_list_load_is_named_with_its_url_masked(monkeypatch) 
     assert "書き込み**: 1 件" in report
     assert "mark_read" in report
     assert "48211" not in report, "会員IDが伏せられていない"
+
+
+# --- 実測21回目: 一覧はサーバ側で組み立てられていた -----------------------------
+
+SERVER_RENDERED = (
+    "<html><body>"
+    '<div data-search-uuid="b1e2c3d4-0000-0000-0000-000000000000">'
+    '<script>window.__DATA__={"searchUuid":"b1e2c3d4-0000-0000-0000-000000000000",'
+    '"memberId":3323741}</script>'
+    "山田太郎</body></html>"
+)
+
+
+def test_a_server_rendered_list_is_heard_at_all(monkeypatch) -> None:
+    """**GraphQL だけを聴いていたら、一覧は永久に聴こえない。**
+
+    実測21回目、一覧は描画されたのに聴けた応答は0件だった。送信が GraphQL だった
+    ので読み取りもそうだろうと考えて絞り込んでいたが、一覧のURLは
+    ``/customers/searches?lg=0&...`` という問い合わせつきのページで、
+    **サーバ側で組み立てられて返ってくる**。GraphQL は1本も飛ばない。
+    """
+    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page.responses = [
+        _Response(
+            "https://customers.job-medley.com/customers/searches?lg=0",
+            SERVER_RENDERED,
+            _Request(None, "GET"),
+            content_type="text/html; charset=utf-8",
+        ),
+    ]
+    observed = _run(monkeypatch, page)
+    assert observed.reached() is ApiStage.HEARD, "サーバ描画の一覧が聴けていない"
+    assert observed.calls[0].content_type == "text/html"
+
+
+def test_a_non_json_document_is_measured_without_reading_its_values(monkeypatch) -> None:
+    """**値は取り出さない。数だけ数える。**
+
+    JSON でなければキーパスは辿れない。それでも「送信に要る値がこの文書に
+    入っているのか」は、UUIDの形の数と **キーの名前** の出現数で分かる。
+    数は個人データではない。
+    """
+    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page.responses = [
+        _Response(
+            "https://customers.job-medley.com/customers/searches?lg=0",
+            SERVER_RENDERED,
+            _Request(None, "GET"),
+            content_type="text/html",
+        ),
+    ]
+    report = _run(monkeypatch, page).render()
+    assert "UUIDの形が 1 個" in report
+    assert "送信キーの名前が" in report
+    for leaked in ("b1e2c3d4", "山田太郎", "3323741"):
+        assert leaked not in report, f"{leaked} が報告に漏れている"
+
+
+def test_hearing_nothing_reports_the_numbers_that_make_it_diagnosable(monkeypatch) -> None:
+    """**「無かった」と「見ていなかった」を、報告だけで切り分けられること。**
+
+    実測21回目、聴けた応答は0件だったが「いくつ無視したか」を出していなかった。
+    そのため「本当に応答が無かった」のか「絞り込みが狭すぎた」のかが報告からは
+    決められなかった -- **自分で作った静かなゼロ件である**。
+    """
+    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page.responses = [
+        _Response(
+            "https://www.google-analytics.com/g/collect",
+            "{}",
+            _Request(None, "POST"),
+        ),
+    ]
+    observed = _run(monkeypatch, page)
+    assert observed.reached() is ApiStage.NOTHING_HEARD
+    report = observed.render()
+    assert "聴く仕掛け: 張れました" in report
+    assert "聴かなかった応答: 1 件" in report
+    assert "媒体だけが無言でした" in report
+    # 書き込みの件数は、聴けなかった実行でも出す。
+    assert "書き込み**: 0 件" in report
+
+
+def test_a_listener_that_never_attached_says_so(monkeypatch) -> None:
+    """**張れなかったことを黙らない。** 応答の有無以前の問題である。"""
+    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+
+    def _refuse(self: _Page, event: str, handler: object) -> None:
+        raise RuntimeError("張れません")
+
+    monkeypatch.setattr(_Page, "on", _refuse)
+    observed = _run(monkeypatch, page)
+    assert observed.reached() is ApiStage.NOTHING_HEARD
+    report = observed.render()
+    assert "張れませんでした" in report
+    assert "応答の有無以前の問題" in report
+
+
+def test_binary_responses_are_counted_but_not_read(monkeypatch) -> None:
+    """画像は読む意味が無く、重い。**数だけ残す。**"""
+
+    class _Exploding(_Response):
+        def text(self) -> str:
+            raise AssertionError("画像の本文を読んでいる")
+
+    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page.responses = [
+        _Exploding(
+            "https://customers.job-medley.com/assets/logo.png",
+            "",
+            _Request(None, "GET"),
+            content_type="image/png",
+        ),
+        _Response(
+            "https://customers.job-medley.com/customers/searches",
+            SERVER_RENDERED,
+            _Request(None, "GET"),
+            content_type="text/html",
+        ),
+    ]
+    observed = _run(monkeypatch, page)
+    assert len(observed.calls) == 1
+    assert observed.skipped_binary == 1
+    assert "本文を見なかった応答: 1 件" in observed.render()

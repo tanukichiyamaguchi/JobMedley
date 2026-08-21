@@ -139,9 +139,11 @@ def test_an_unreadable_response_says_so_instead_of_looking_empty() -> None:
     assert keys == ()
     assert "JSONとして読めませんでした" in reason
     call = ObservedCall(operation="", redacted_url="u", method="POST", unread_reason=reason)
-    assert "応答を読めませんでした" in call.render()
+    rendered = call.render()
+    assert "キーパスは取れませんでした" in rendered
+    assert "JSONとして読めませんでした" in rendered
     # 生の本文は報告に混ぜない。
-    assert "<html>" not in call.render()
+    assert "<html>" not in rendered
 
 
 def test_a_flood_of_keys_is_capped() -> None:
