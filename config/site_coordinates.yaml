@@ -156,6 +156,22 @@ api.base_url: "https://customers.job-medley.com"
 # (api.send.paid.payload_template を参照)。つまり送信は「どの検索から辿り着いた
 # 候補者か」に紐づいており、**一覧の応答から searchUuid を持ち出せなければ
 # 送信は組み立てられない**。
+#
+# 2026-08-21 observe-api 2回目で **候補が見えた**。一覧を開いた瞬間に媒体の
+# オリジンへ飛ぶ非GETは、計測ビーコンを除くとこの5本だけだった::
+#
+#     POST /api/customers/customer_search_conditions/search_manual/
+#     POST /api/customers/customer_search_conditions/search_recommend/
+#     POST /api/customers/received_favorites/search/
+#     POST /api/customers/scouted_members/search/
+#     POST /api/customers/customer_search_conditions/label/
+#
+# **この媒体の読み取りは GraphQL ではなく REST の POST である。** 送信だけが
+# GraphQL で、読み取りは別の作りになっている。
+#
+# ただしこの回は遮断がこれらを止めていたので、**どれが候補者の並びを返すのかは
+# まだ分からない**。名前から選ぶのは推測である (原則3)。次の observe-api は
+# 媒体のオリジンを素通しするので、応答のキーの形で決着する。
 api.candidate_list.url_pattern: UNRESOLVED
 
 # 候補者レジュメ取得APIのURL。

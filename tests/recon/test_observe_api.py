@@ -162,7 +162,7 @@ def _run(monkeypatch, page: _Page, **kwargs) -> ApiObservation:
 
 def test_the_search_identifier_is_found_without_showing_its_value(monkeypatch) -> None:
     """**送信を止めている値の出所が分かる。** そして値は出ない。"""
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     observed = _run(monkeypatch, page)
 
     assert observed.reached() is ApiStage.HEARD
@@ -180,23 +180,33 @@ def test_this_command_never_presses_anything(monkeypatch) -> None:
     偽のページは要素に触られたら例外を投げる。触っていないことが、
     「押さない」の証明になる。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     _run(monkeypatch, page)
     assert page.clicks == []
 
 
-def test_the_gate_is_armed_before_the_page_is_opened(monkeypatch) -> None:
-    """**武装の位置がこのコマンドの要点である。**
+def test_the_media_search_post_is_not_blocked(monkeypatch) -> None:
+    """**観測したかったものを、観測のための仕掛けが止めてはいけない。**
 
-    follow-send は一覧が描画されてから武装するので、一覧そのものの通信が記録に
-    入らない。こちらは最初から武装するので、開いた瞬間の読み取りが聴ける。
+    実測22回目、書き込みを全部止めたまま一覧を開いたら、候補者を取ってくる通信
+    そのものが止まった::
+
+        POST /api/customers/customer_search_conditions/search_manual/
+        POST /api/customers/received_favorites/search/
+        POST /api/customers/scouted_members/search/
+
+    **この媒体の読み取りは GraphQL ではなく REST の POST である。** 遮断から見れば
+    書き込みと区別が付かない。だから媒体のオリジンは素通しにする。
+
+    安全性は遮断ではなく **押さないこと** で担保する
+    (``tests/guardrails/test_observe_only_never_presses.py``)。
 
     検査するのは **observe_api が自分で作った遮断** である。偽ページが持つ別の
     遮断を見ていた時期があり、そのときは何も検査できていなかった。
     """
     import jobmedley_scout.recon.observe_api as module
 
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     captured = _install(monkeypatch, page)
     armed_during: list[bool] = []
 
@@ -210,25 +220,29 @@ def test_the_gate_is_armed_before_the_page_is_opened(monkeypatch) -> None:
     observe_api(_Config(), Path("/x"), URL, "div.c-search-member-card")  # type: ignore[arg-type]
 
     assert captured, "遮断が仕掛けられていない"
-    assert armed_during == [True], "一覧を開く時点で武装していない"
-    # **書き込みは1つも通らない。** 読み取り (GraphQL の query) だけが通る。
+    assert armed_during == [True], "一覧を開く時点で仕掛けが効いていない"
+
     real = captured[0]
-    assert real.mode is GateMode.BLOCK_WRITES
+    assert real.mode is GateMode.BLOCK_THIRD_PARTY
     real.arm()
     try:
-        blocked = real.decide("POST", "https://customers.job-medley.com/api/x", "{}")
-        passed = real.decide("POST", GRAPHQL, json.dumps({"query": "query SearchMembers { x }"}))
+        search = real.decide(
+            "POST",
+            "https://customers.job-medley.com/api/customers/received_favorites/search/",
+            "{}",
+        )
+        beacon = real.decide("POST", "https://www.google-analytics.com/g/collect", "{}")
     finally:
         real.disarm()
-    assert blocked is not GateDecision.PASS, "書き込みが通った"
-    assert passed is GateDecision.PASS, "読み取りまで止めている"
+    assert search is GateDecision.PASS, "候補者を取ってくる通信を止めている"
+    assert beacon is not GateDecision.PASS, "計測ビーコンまで通している"
 
 
 def test_the_gate_is_disarmed_even_if_the_page_blows_up(monkeypatch) -> None:
     """**武装は必ず解除する。** finally で外れることを確かめる (3章)。"""
     import jobmedley_scout.recon.observe_api as module
 
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     captured = _install(monkeypatch, page)
 
     def _boom(p: _Page, url: str, config: object) -> None:
@@ -246,7 +260,7 @@ def test_the_gate_is_disarmed_even_if_the_page_blows_up(monkeypatch) -> None:
 
 def test_beacons_from_other_origins_are_not_listened_to(monkeypatch) -> None:
     """計測ビーコンの応答まで読むと、報告が他所のサービスの形で埋まる。"""
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     observed = _run(monkeypatch, page)
     assert len(observed.calls) == 1
     assert "google-analytics" not in observed.render()
@@ -254,7 +268,7 @@ def test_beacons_from_other_origins_are_not_listened_to(monkeypatch) -> None:
 
 def test_hearing_nothing_is_reported_as_such(monkeypatch) -> None:
     """**「聴けなかった」を「応答が無かった」にしない** (原則2)。"""
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     page.responses = []
     observed = _run(monkeypatch, page)
     assert observed.reached() is ApiStage.NOTHING_HEARD
@@ -270,7 +284,7 @@ def test_a_list_that_never_rendered_still_reports_what_it_heard(monkeypatch) -> 
 
     描画しなかった事実は捨てず、報告に併記する。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     observed = _run(monkeypatch, page, rendered=False)
     assert observed.reached() is ApiStage.HEARD, "聴けたのに聴けなかったことにしている"
     report = observed.render()
@@ -284,7 +298,7 @@ def test_the_report_refuses_to_pick_the_list_endpoint_for_the_operator(monkeypat
     決められないものを機械が1つに決めると、それは推測で座標を埋めることになる
     (原則3)。候補を並べて、選ぶのは人間に委ねる。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     report = _run(monkeypatch, page).render()
     assert "api.candidate_list.url_pattern: UNRESOLVED" in report
     assert "どれか1つを機械が選ぶことはしません" in report
@@ -312,32 +326,30 @@ def test_a_broken_chain_raises_rather_than_reporting_a_lie() -> None:
         lying.reached()
 
 
-def test_writes_during_the_list_load_are_reported_even_when_there_are_none(monkeypatch) -> None:
-    """**0件でも0件と書く** (原則2)。
+def test_both_what_flew_and_what_was_stopped_are_reported(monkeypatch) -> None:
+    """**0件でも0件と書く** (原則2)。そして **飛んだ側と止めた側を分ける。**
 
-    これまでどのコマンドも、一覧のロード中は武装していなかった (描画を殺さない
-    ため、押す直前に武装する設計)。つまり「一覧を開くだけでは書き込みが飛ばない」
-    は **一度も観測されていない**。最初から武装するこのコマンドで初めて言える。
-
-    黙ると「観測しなかった」と区別が付かない。
+    媒体へ飛んだ非GET には候補者一覧の取得が含まれる (座標の本命)。他所へ行こう
+    として止めたものは計測ビーコンで、観測には要らない。混ぜて数えると本命が
+    雑音に埋もれる -- 実測22回目は534件のうち529件が計測ビーコンだった。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     report = _run(monkeypatch, page).render()
-    assert "書き込み**: 0 件" in report
-    assert "開くだけでは何も書き込まれない" in report
+    assert "媒体のオリジンへ飛んだ非GET: 0 件" in report
+    assert "止めた** 通信: 0 件" in report
 
 
-def test_a_write_during_the_list_load_is_named_with_its_url_masked(monkeypatch) -> None:
-    """飛んでいたら、**伏せたURLで** 名指しする。"""
+def test_a_media_post_that_flew_is_named_with_its_url_masked(monkeypatch) -> None:
+    """飛んだものも、**伏せたURLで** 名指しする。ここに一覧の取得が居る。"""
     import jobmedley_scout.recon.observe_api as module
 
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     captured = _install(monkeypatch, page)
 
     def _goto(p: _Page, url: str, config: object) -> None:
-        # 媒体が既読化のPOSTを飛ばす。遮断が止めて記録する。
+        # 媒体が候補者を取ってくる。**止めない。** 通した事実を記録する。
         captured[0].decide(
-            "POST", "https://customers.job-medley.com/api/customers/members/48211/mark_read", "{}"
+            "POST", "https://customers.job-medley.com/api/customers/members/48211/search/", "{}"
         )
         p.deliver()
 
@@ -346,9 +358,26 @@ def test_a_write_during_the_list_load_is_named_with_its_url_masked(monkeypatch) 
 
     observed = observe_api(_Config(), Path("/x"), URL, "div.c-search-member-card")  # type: ignore[arg-type]
     report = observed.render()
-    assert "書き込み**: 1 件" in report
-    assert "mark_read" in report
+    assert "媒体のオリジンへ飛んだ非GET: 1 件" in report
+    assert "search/" in report
     assert "48211" not in report, "会員IDが伏せられていない"
+
+
+def test_the_same_endpoint_is_not_listed_ninety_times(monkeypatch) -> None:
+    """**同じ行を何十回も出す報告は、出していないのと大差ない。**
+
+    実測22回目、単一ページアプリが同じ4本を取り直したせいで、座標の候補一覧が
+    同じURLで90行埋まった。読む人が本命を見つけられない。
+    """
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
+    same = _Response(
+        "https://customers.job-medley.com/api/customers/version/",
+        '{"version":"1"}',
+        _Request(None, "GET"),
+    )
+    page.responses = [same] * 30
+    report = _run(monkeypatch, page).render()
+    assert report.count("api/customers/version/") <= 3, "同じURLが何度も並んでいる"
 
 
 # --- 実測21回目: 一覧はサーバ側で組み立てられていた -----------------------------
@@ -370,7 +399,7 @@ def test_a_server_rendered_list_is_heard_at_all(monkeypatch) -> None:
     ``/customers/searches?lg=0&...`` という問い合わせつきのページで、
     **サーバ側で組み立てられて返ってくる**。GraphQL は1本も飛ばない。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     page.responses = [
         _Response(
             "https://customers.job-medley.com/customers/searches?lg=0",
@@ -391,7 +420,7 @@ def test_a_non_json_document_is_measured_without_reading_its_values(monkeypatch)
     入っているのか」は、UUIDの形の数と **キーの名前** の出現数で分かる。
     数は個人データではない。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     page.responses = [
         _Response(
             "https://customers.job-medley.com/customers/searches?lg=0",
@@ -414,7 +443,7 @@ def test_hearing_nothing_reports_the_numbers_that_make_it_diagnosable(monkeypatc
     そのため「本当に応答が無かった」のか「絞り込みが狭すぎた」のかが報告からは
     決められなかった -- **自分で作った静かなゼロ件である**。
     """
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     page.responses = [
         _Response(
             "https://www.google-analytics.com/g/collect",
@@ -428,13 +457,13 @@ def test_hearing_nothing_reports_the_numbers_that_make_it_diagnosable(monkeypatc
     assert "聴く仕掛け: 張れました" in report
     assert "聴かなかった応答: 1 件" in report
     assert "媒体だけが無言でした" in report
-    # 書き込みの件数は、聴けなかった実行でも出す。
-    assert "書き込み**: 0 件" in report
+    # 飛んだ/止めたの件数は、聴けなかった実行でも出す。
+    assert "媒体のオリジンへ飛んだ非GET: 0 件" in report
 
 
 def test_a_listener_that_never_attached_says_so(monkeypatch) -> None:
     """**張れなかったことを黙らない。** 応答の有無以前の問題である。"""
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
 
     def _refuse(self: _Page, event: str, handler: object) -> None:
         raise RuntimeError("張れません")
@@ -454,7 +483,7 @@ def test_binary_responses_are_counted_but_not_read(monkeypatch) -> None:
         def text(self) -> str:
             raise AssertionError("画像の本文を読んでいる")
 
-    page = _Page(SendGate(mode=GateMode.BLOCK_WRITES))
+    page = _Page(SendGate(mode=GateMode.BLOCK_THIRD_PARTY))
     page.responses = [
         _Exploding(
             "https://customers.job-medley.com/assets/logo.png",
