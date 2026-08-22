@@ -280,39 +280,70 @@ api.candidate_list.payload_template: |
 
 # 候補者レジュメ取得APIのURL。
 #
-# **手がかりはあるが、確定していない。** 偵察が通した読み取りの中に
-#   graphql/MemberOnScoutProfileModalOfDesktop
-# があり、名前と出る場面 (カードの「プロフィール確認」を押したとき) からは
-# これらしい。ただし **応答の中身を見ていない** ので、レジュメの全項目が
-# ここで取れるのかは分からない。推測で埋めない (原則3)。
+# 2026-08-22 observe-resume 2回目で **観測した**。カードの「プロフィール確認」を
+# 押すと飛び、応答は101キーで実画面の項目がすべて載っていた。
 #
-# **``scout recon observe-resume`` がこれを決着させる。** レジュメはカードを
-# 押さないと飛ばないので、押さない ``observe-api`` では原理的に観測できない。
-# 押すかわりに遮断を許可制にしてある (:data:`recon.gate.GateMode.BLOCK_SEND`)
-# ので、押し間違えても送信 (mutation) はサーバへ届かない。
+# **1回目 (押した直後の応答で打ち切っていた回) との違いは打ち切り条件だけである。**
+# 書き込み (members/mark_read) は受け入れずに済んだ -- 報告は「受け入れた書き込み:
+# なし (遮断は厳しいまま)」で、mark_read は止めたまま25件の中に残っている。
+# つまり **止めても観測できた**。前回「止めたことが観測を殺した」と考えたのは
+# 誤りで、殺していたのはこちらの打ち切り条件だった。
+api.resume.url_pattern: "https://customers.job-medley.com/api/customers/graphql/MemberOnScoutProfileModalOfDesktop"
+
+# レジュメ取得の要求本文の雛形。
 #
-# **2026-08-22 実測25回目は取れなかった。** 何が起きたかは分かっている::
+# 形は観測した (5キー)::
 #
-#     押せた: label.c-checkbox.c-checkbox--blue       (新しい応答 0 件)
-#     押せた: input.c-checkbox__input                 (新しい応答 0 件)
-#     押せた: button.c-button.u-wd-100p.c-button--small (新しい応答 1 件)
+#   { "operationName": <string>,
+#     "variables": { "input": { "id": <number> } },
+#     "query": <string> }
 #
-#     届いた1件: POST /api/customers/members/mark_read/  {"member_ids": [...]}
-#     遮断が止めた通信に含まれる = **通していない**
-#     GraphQL は1本も飛んでいない
+# **``query`` の中身をまだ持っていない。** キーが在ることは分かったが、値
+# (問い合わせ文そのもの) は観測していない。GraphQL は query の無いリクエストを
+# 受け付けないので、**URLが決まっても呼べない**。送信payloadで一度同じ穴を
+# 開けている (api.send.paid.payload_template の注記)。
 #
-# 分かったことが3つある。
+# 次: ``scout recon read-bundle`` が配信JSから問い合わせ文を読む。GETだけで、
+# ボタンを1つも押さない。
+api.resume.payload_template: UNRESOLVED
+
+# ------------------------------------------------------------------------
+# **レジュメの応答で新たに分かったこと** (2026-08-22 observe-resume 2回目)。
 #
-# 1. **``members/mark_read`` という書き込みが在る。** プロフィールを開くと飛び、
-#    一覧の ``members[].read_profile`` を立てる。許可制の遮断が、予期していな
-#    かった書き込みを実際に捕まえた -- 既定の正しい振る舞いである。
-# 2. **それを止めたら、モーダルはレジュメの取得まで進まなかった。** GraphQL が
-#    1本も飛んでいないので、止めたことが観測を殺したと考えられる (実測22回目と
-#    同じ形)。次はこの1つだけを名前で受け入れて再試行する。
-# 3. **こちらの打ち切り条件が誤っていた。** 「何か届いたら止める」だったので、
-#    ``mark_read`` の (差し替えられた) 空の応答で打ち切っていた。
-#    「レジュメが届いたら止める」に直した -- 「届いた」は「効いた」ではない。
-api.resume.url_pattern: UNRESOLVED
+# 101キーを値抜きで読んだ。実画面より多いものが3つある。
+#
+# 1. **スカウト履歴が構造化されて載っている。** 9章の重複判定と追客に直結する::
+#
+#      scoutHistories[].jobOffer.id / .facility.name / .jobCategory.name
+#      scoutHistories[].jobOffer.altJobCategoryName / .salaries[]
+#      scoutHistories[].latestSentAt    <string>   最後に送った日時
+#      scoutHistories[].sentCount       <number>   送った回数
+#      scoutHistories[].latestRefusedAt <null>     **辞退された日時**
+#
+#    **latestRefusedAt は画面に出ていなかった。** 候補者はスカウトを辞退できる。
+#    辞退された相手へ送り続けるのは最悪の失敗なので、送信前判定に必ず入れる。
+#    ただし **null 以外の値をまだ見ていない** ので、形も意味も推測しない (原則3)。
+#
+# 2. **こだわり条件が id 付きで取れる**::
+#
+#      desiredCondition.features[].id / .name
+#
+#    実画面の「社会保険完備, 週休2日, ネイルOK, 育児支援あり…」がこれである。
+#    **氏名が無い以上、これが個別化の主材料になる。** 求人側の features[] と
+#    同じ語彙なら突き合わせられるが、**同じ語彙である確認はまだ取れていない**。
+#
+# 3. **資格に取得年月と取得予定フラグが付く**::
+#
+#      appeal.qualifications[].name / .isScheduled
+#      appeal.qualifications[].acquisitionYear / .acquisitionMonth
+#
+#    isScheduled は「取得予定」である。**取得済みと取得予定を混ぜて
+#    「◯◯をお持ちの方へ」と書くと嘘になる。**
+#
+# **氏名はやはり無い。** personalInformation に在るのは address / age / gender /
+# employmentStatus / recentlyRegistered の5つだけで、名前の欄は101キーのどこにも
+# 無い。運用者の「取得できるのは会員番号のみ」が API 側でも裏付けられた。
+# ------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------
 # **レジュメに何が載っているか** (2026-08-22 運用者が実画面を提供)。
@@ -638,39 +669,74 @@ api.auth_failure_codes: UNRESOLVED
 
 # **経験してきた**業界のキーパス。
 # 希望条件配下の同名キーと取り違えないこと -- 参照実装の「ご希望の◯◯業界」という虚偽はこの取り違えが原因 (6.4)。
-resume.fields.experienced_industries: UNRESOLVED
+# **この媒体に業界の軸は無い。** 観測した101キーに industry / 業界に相当する
+# ものは1つも無く、在るのは職種 (jobCategory) だけである。参照実装から
+# 引き写した軸で、確認した結果 **存在しなかった** -- UNRESOLVED ではない。
+resume.fields.experienced_industries: null
 
 # **経験してきた**職種のキーパス。
-resume.fields.experienced_occupations: UNRESOLVED
+# 経験職種。要素は {jobCategoryId, label, careerYear}。
+# **careerYear が経験年数である** -- 実画面の「歯科衛生士(3年)」の3年。
+resume.fields.experienced_occupations: "data.memberGet.member.appeal.careerJobCategories"
 
 # **希望する**業界のキーパス。
-resume.fields.desired_industries: UNRESOLVED
+# 業界の軸が無いので希望側にも無い。
+resume.fields.desired_industries: null
 
 # **希望する**職種のキーパス。
-resume.fields.desired_occupations: UNRESOLVED
+# 希望職種。要素は {id, yearsOfExperience, jobCategory:{id,name}}。
+# **経験側 (appeal.careerJobCategories) と取り違えないこと** -- 6.4 の
+# 「ご希望の◯◯業界」はこの取り違えが原因である。包みの名前が
+# appeal と desiredCondition で分かれているので、辿る経路を間違えなければ
+# 混ざらない。
+resume.fields.desired_occupations: "data.memberGet.member.desiredCondition.jobCategories"
 
 # 職歴リストのキーパス。
-resume.fields.employments: UNRESOLVED
+# 職歴。実画面の「職務経歴」タブの中身で、**同じ応答に載っている**
+# (別の通信は要らなかった)。観測した候補者は空配列で、一覧の
+# members[].has_careers が false だったことと一致する。
+# **中身の形は未観測である** (空だったため)。埋まっている候補者で
+# 確認するまで、要素のキーは推測しない (原則3)。
+resume.fields.employments: "data.memberGet.member.careers"
 
 # 学歴リストのキーパス。
-resume.fields.educations: UNRESOLVED
+# 最終学歴。{id, major, status, schoolType, department, graduatedDate}。
+# **リストではなく単数である** (「最終」学歴なので1件)。モデル側の
+# ResumeFacts.educations はタプルなので、抽出側で1件の列に包むこと。
+resume.fields.educations: "data.memberGet.member.latestEducationBackground"
 
 # 語学欄のキーパス。
 # 外国語ネイティブ判定は**この欄にのみ**適用する (7.2)。
 # 範囲を絞る以上、この欄が実際に取れているかの確認が新たな前提になるので、抽出実装とログ確認をセットで行うこと。
-resume.fields.language_text: UNRESOLVED
+# **語学欄が無い。** 観測した101キーに language / 語学に相当するものは無い。
+# 7.2 の外国語ネイティブ判定は、この媒体では適用先そのものが存在しない。
+resume.fields.language_text: null
 
 # 年齢のキーパス。
-resume.fields.age: UNRESOLVED
+# 年齢。数値で来る (一覧側の members[].age は文字列だった)。
+resume.fields.age: "data.memberGet.member.personalInformation.age"
 
 # 会員ステータスのキーパス。
-resume.fields.membership_status: UNRESOLVED
+# **会員ステータスは無い。**
+# 近いものに personalInformation.employmentStatus (就業状況: 就業中/離職中)
+# が在るが、**別概念である**。ここへ入れるとモデルには
+# 「会員ステータス: 就業中」として渡る -- 6.4 の取り違えと同じ形なので
+# 入れない。就業状況を使いたくなったら、専用の欄を作ってから入れること。
+resume.fields.membership_status: null
 
 # 専門/得意領域のキーパス。
-resume.fields.specialty: UNRESOLVED
+# **専門/得意領域という欄が無い。**
+resume.fields.specialty: null
 
 # 職務要約のキーパス。
-resume.fields.summary: UNRESOLVED
+# **職務要約という欄が無い。**
+# 近いものに appeal.selfPr (自己PR) が在るが、**別物である**。職務要約は
+# 職歴の要約で、自己PRは自己売り込みである。ここへ入れるとモデルには
+# 「職務要約」として渡り、モデルはそう扱う (6.4)。
+# **自己PRは個別化の主材料なので、専用の欄を作って渡すこと** --
+# 実画面では未入力の候補者も多いので、空とマスクの扱いに注意
+# (recon.masked: 「未入力」は値ではない)。
+resume.fields.summary: null
 
 # 学歴の生値→EducationLevel の完全一致マップ。
 # 実データで観測した値だけを書く。
