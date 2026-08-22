@@ -83,6 +83,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "observe-api", help="一覧を開いて読み取りAPIの応答の形を観測 (押下なし・値は出さない)"
     )
     recon_sub.add_parser(
+        "observe-resume",
+        help="カードを押してレジュメAPIの応答の形を観測 (送信は遮断・値は出さない)",
+    )
+    recon_sub.add_parser(
         "read-bundle", help="配信JSから送信APIの操作名と変数の形を読む (GETのみ・押下なし)"
     )
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
@@ -203,6 +207,8 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "follow-send": "recon-capture-send",
     # 一覧を開くだけ。必要な座標は capture-open と同じ (一覧URLと行の目印)。
     "observe-api": "recon-capture-send",
+    # 一覧URLと行のセレクタさえ在れば押せる。送信は遮断で止めてある。
+    "observe-resume": "recon-capture-send",
     # 一覧URLさえ在れば読める (押下も送信も無い)。capture-open と同じ座標で足りる。
     "read-bundle": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
@@ -347,6 +353,20 @@ def _dispatch_recon(
             coordinates.selector("nav.list_ready_selector"),
         )
         print(api_observed.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "observe-resume":
+        from jobmedley_scout.recon.observe_resume import observe_resume
+
+        # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
+        _restore_session_from_secrets(config)
+        resume_observed = observe_resume(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
+            coordinates.selector("nav.list_ready_selector"),
+        )
+        print(resume_observed.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "verify-session":
