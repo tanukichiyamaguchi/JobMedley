@@ -63,6 +63,37 @@ READ_PATH_SEGMENTS: frozenset[str] = frozenset(
 )
 
 
+#: **知っていて受け入れる書き込み。** 読み取りではない。
+#:
+#: :data:`READ_PATH_SEGMENTS` とは別にしてあるのが要点である。あちらは
+#: 「副作用が無いと観測できたもの」で、こちらは **「副作用が在ると分かっていて、
+#: それでも通すもの」** である。混ぜれば、受け入れた覚えのない書き込みが
+#: 読み取りの顔をして増えていく。
+#:
+#: 呼び出し側が名前で明示したときだけ効く (``SendGate(accepted_writes=...)``)。
+#: 既定は空である。
+#:
+#: 実測25回目に見つかった1つ::
+#:
+#:     POST /api/customers/members/mark_read/   {"member_ids": [...]}
+#:
+#: プロフィールを開くと飛ぶ。一覧の ``members[].read_profile`` を立てる書き込み
+#: で、**運用者が「プロフィール確認」を押すたびに起きているもの** と同じである。
+#: 遮断がこれを止めたら、モーダルはプロフィールの取得まで進まなかった --
+#: 止めたことでレジュメが観測できなくなった。
+KNOWN_WRITE_MARK_READ = "mark_read"
+
+
+def is_accepted_write(url: str, accepted: frozenset[str]) -> bool:
+    """Whether this URL is a write the caller explicitly agreed to. Pure."""
+    if not accepted:
+        return False
+    segments = [segment for segment in urlsplit(url).path.split("/") if segment]
+    if not segments:
+        return False
+    return segments[-1].lower() in accepted
+
+
 def is_read_path(url: str) -> bool:
     """Whether a REST URL's path names one of the observed read endpoints. Pure.
 
@@ -202,7 +233,11 @@ class SendGate:
     """
 
     def __init__(
-        self, *, mode: GateMode = GateMode.BLOCK_ALL, own_host: str = "job-medley.com"
+        self,
+        *,
+        mode: GateMode = GateMode.BLOCK_ALL,
+        own_host: str = "job-medley.com",
+        accepted_writes: frozenset[str] = frozenset(),
     ) -> None:
         # 安全メソッドの集合を **注入可能にしていない**。差し替えられる形にすると、
         # ``SendGate(frozenset({"GET", "POST"}))`` の1行で fail-closed が消える --
@@ -216,7 +251,14 @@ class SendGate:
         #: :data:`GateMode.BLOCK_THIRD_PARTY` が「自分のオリジン」とみなすホスト。
         #: 既定を媒体に固定してあるので、書き換えるにはモジュールの編集が要る。
         self._own_host = own_host.lower()
+        #: **知っていて受け入れる書き込み** (:data:`KNOWN_WRITE_MARK_READ`)。
+        #: 既定は空 -- 受け入れるかどうかは呼び出し側が名前で明示する。
+        #: :data:`GateMode.BLOCK_SEND` でのみ効く。
+        self._accepted_writes = frozenset(item.lower() for item in accepted_writes)
         self._armed = False
+        #: 受け入れた書き込みのうち、実際に通したもの。**必ず報告に出すこと。**
+        #: 何を書いたか分からないまま偵察が終わるのが一番悪い。
+        self._accepted_passed: list[RecordedRequest] = []
         #: 武装中に **通した** 読み取り。通した事実も観測なので残す --
         #: 報告が「何を通したか」を述べられないと、緩和が黙って効く。
         self._passed_reads: list[RecordedRequest] = []
@@ -270,8 +312,17 @@ class SendGate:
         if (
             self._mode is GateMode.BLOCK_SEND
             and is_own_origin(url, self._own_host)
-            and (is_read_only_graphql(url, body) or is_read_path(url))
+            and (
+                is_read_only_graphql(url, body)
+                or is_read_path(url)
+                or is_accepted_write(url, self._accepted_writes)
+            )
         ):
+            if is_accepted_write(url, self._accepted_writes) and not is_read_path(url):
+                # **書き込みを通したことは別枠で数える。** 読み取りに混ぜない。
+                self._accepted_passed.append(
+                    RecordedRequest(method=method, url=url, headers=dict(headers or {}), body=None)
+                )
             self._sequence += 1
             self._passed_reads.append(
                 RecordedRequest(
@@ -345,6 +396,15 @@ class SendGate:
     @property
     def recorded(self) -> tuple[RecordedRequest, ...]:
         return tuple(self._recorded)
+
+    @property
+    def accepted_writes(self) -> frozenset[str]:
+        return self._accepted_writes
+
+    @property
+    def accepted_passed(self) -> tuple[RecordedRequest, ...]:
+        """Writes that were **knowingly let through**. 報告に必ず出すこと。"""
+        return tuple(self._accepted_passed)
 
     @property
     def passed_reads(self) -> tuple[RecordedRequest, ...]:
