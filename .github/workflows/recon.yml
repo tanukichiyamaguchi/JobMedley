@@ -23,6 +23,7 @@ on:
           - capture-open
           - follow-send
           - observe-api
+          - observe-resume
           - read-bundle
           - preflight
           - coordinates
@@ -157,6 +158,15 @@ jobs:
       - name: Observe API (no clicks)
         if: inputs.command == 'observe-api'
         run: scout recon observe-api
+
+      # **押す偵察。だが送信は通らない。** 遮断を許可制にしてあるので、GraphQL は
+      # 読み取り (query) だけ、REST は観測済みの読み取り経路だけが通る。送信
+      # (SendSingleScout) は mutation なので、押し間違えてもサーバへ届かない (13.6)。
+      # レジュメはカードを押さないと飛ばないので、押さない observe-api では
+      # 原理的に観測できない。
+      - name: Observe resume (send blocked)
+        if: inputs.command == 'observe-resume'
+        run: scout recon observe-resume
 
       - name: Observe list
         if: inputs.command == 'observe-list'

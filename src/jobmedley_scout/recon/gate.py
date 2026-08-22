@@ -43,6 +43,37 @@ from jobmedley_scout.recon.graphql import is_read_only_graphql
 #: 「安全そう」ではなく「安全と確実に分かる」ものだけを通す方針のため。
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
 
+#: :data:`GateMode.BLOCK_SEND` が読み取りとみなす REST の経路の末尾。
+#:
+#: **推測ではない。** 実測23/24回目、一覧を開いた瞬間に媒体のオリジンへ飛んだ
+#: 非GETは、計測ビーコンを除くとこの6本だけで、末尾はすべてここに在る::
+#:
+#:     customer_search_conditions/search_manual/
+#:     customer_search_conditions/search_recommend/
+#:     received_favorites/search/
+#:     scouted_members/search/
+#:     customer_search_conditions/label/
+#:     members/search/
+#:
+#: 足すときは「名前がそれらしいから」ではなく、**押さない偵察で実際に飛んだ**
+#: ことを根拠にすること。ここに書き込み経路を1つ入れれば、このモードの
+#: 意味が消える。
+READ_PATH_SEGMENTS: frozenset[str] = frozenset(
+    {"search", "search_manual", "search_recommend", "label"}
+)
+
+
+def is_read_path(url: str) -> bool:
+    """Whether a REST URL's path names one of the observed read endpoints. Pure.
+
+    末尾の空の節 (``.../search/`` の末尾スラッシュ) は落としてから見る。
+    判定できない形は **すべて False** -- 通さない側へ倒す。
+    """
+    segments = [segment for segment in urlsplit(url).path.split("/") if segment]
+    if not segments:
+        return False
+    return segments[-1].lower() in READ_PATH_SEGMENTS
+
 
 def is_own_origin(url: str, own_host: str) -> bool:
     """Whether ``url`` addresses ``own_host`` itself. Pure.
@@ -122,6 +153,27 @@ class GateMode(StrEnum):
     #: 止めたほうが安全側で、報告も読める量に収まるからである (実測22回目は
     #: 534件のうち529件が計測ビーコンだった)。
     BLOCK_THIRD_PARTY = "block_third_party"
+    #: 媒体の **読み取りだけ** を通す。送信は通さない。押してよい。
+    #:
+    #: :data:`BLOCK_THIRD_PARTY` は媒体のオリジンを丸ごと素通しにするので、
+    #: 押せば送信が成立した。だから「押さないこと」が唯一の保護だった。
+    #: **このモードは押せる。** 通す条件を許可制にしてあるからである::
+    #:
+    #:     GraphQL          読み取り (query) だけ通す。mutation は止める
+    #:                      -- 送信 (SendSingleScout) は mutation である
+    #:     REST の POST     経路の末尾が :data:`READ_PATH_SEGMENTS` のものだけ
+    #:     それ以外         止める (他所のオリジンを含む)
+    #:
+    #: **なぜ許可制なのか。** 「送信のURLだけ止める」は拒否制で、知らない
+    #: 送信路に対して素通しになる。許可制なら、知らないものは全部止まる。
+    #: 中身は推測ではなく実測である -- 実測23/24回目で一覧を開いたときに飛んだ
+    #: REST の POST は、末尾が ``search`` 系か ``label`` のものだけだった。
+    #:
+    #: **残るリスクを隠さない。** 許可した経路が実は書き込みだった場合は通す。
+    #: ``search`` / ``label`` という名前と、それらが「ページを開いただけで
+    #: 飛ぶ」という観測が根拠であって、証明ではない。押す対象を
+    #: 「プロフィールを開く操作」に限る規律は、このモードでも要る。
+    BLOCK_SEND = "block_send"
 
 
 @dataclass(frozen=True)
@@ -213,6 +265,26 @@ class SendGate:
             return GateDecision.PASS
         if method in self._safe_methods:
             return GateDecision.PASS
+        # **許可制。** GraphQL は読み取りだけ、REST は観測済みの読み取り経路だけを
+        # 通す。送信 (mutation) も、知らない経路も、ここで止まる。
+        if (
+            self._mode is GateMode.BLOCK_SEND
+            and is_own_origin(url, self._own_host)
+            and (is_read_only_graphql(url, body) or is_read_path(url))
+        ):
+            self._sequence += 1
+            self._passed_reads.append(
+                RecordedRequest(
+                    method=method,
+                    url=url,
+                    headers=dict(headers or {}),
+                    # **本文は残さない** (13.2)。一覧を要求する本文には検索条件が
+                    # 載り、そこから個人が絞り込まれうる。
+                    body=None,
+                    sequence=self._sequence,
+                )
+            )
+            return GateDecision.PASS
         if self._mode is GateMode.BLOCK_THIRD_PARTY and is_own_origin(url, self._own_host):
             # **媒体自身のオリジンは素通し。** 押さないコマンド専用の緩和である
             # (:class:`GateMode` の注記)。通した事実は残す。
@@ -257,7 +329,7 @@ class SendGate:
                 sequence=self._sequence,
             )
         )
-        if self._mode in (GateMode.BLOCK_WRITES, GateMode.BLOCK_THIRD_PARTY):
+        if self._mode in (GateMode.BLOCK_WRITES, GateMode.BLOCK_THIRD_PARTY, GateMode.BLOCK_SEND):
             return GateDecision.RECORD_AND_STUB
         return GateDecision.RECORD_AND_ABORT
 

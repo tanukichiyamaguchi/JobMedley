@@ -137,7 +137,9 @@ class Candidate(BaseModel):
     #: :data:`generation.facts.UNDISCLOSED` として渡るので、モデルは名前に
     #: 言及できない。嘘の発生経路が構造的に塞がる。
     #:
-    #: レジュメ側に在るかは未確認である (``api.resume.url_pattern`` が未確定)。
-    #: 在ると分かったらそのとき埋める。
+    #: **2026-08-22 運用者が確定させた**: 「氏名は取れない。取得できるのは
+    #: 会員番号のみである。」レジュメ側にも無い。つまりこの欄は **この媒体では
+    #: 永久に空である** -- 「まだ知らない」ではなく、確定した答えとしての
+    #: 「無い」である。埋める実装を後から足す必要は無い。
     display_name: str | None = None
     resume: ResumeFacts = Field(default_factory=ResumeFacts)
