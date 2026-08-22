@@ -160,6 +160,13 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
         CoordKind.URL,
         "候補者一覧取得APIのURL (ページング付き)。偵察中の応答インデックスから特定する。",
     ),
+    CoordinateSpec(
+        "api.candidate_list.payload_template",
+        _S3,
+        CoordKind.JSON_PATH,
+        "候補者一覧の **要求本文** の雛形。この媒体の一覧取得は POST なので、"
+        "URLだけでは呼べない。偵察が記録した実リクエストボディをそのまま雛形にする。",
+    ),
     CoordinateSpec("api.resume.url_pattern", _S3, CoordKind.URL, "候補者レジュメ取得APIのURL。"),
     CoordinateSpec(
         "api.precheck.url_pattern",
@@ -405,6 +412,10 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
             "nav.candidate_list_url",
             "nav.list_ready_selector",
             "api.candidate_list.url_pattern",
+            # **URLだけでは呼べない。** 一覧は POST なので、要求本文が要る。
+            # 雛形が無いまま呼べば 400 か「絞り込み無しの全件」が返り、
+            # どちらも静かに間違う (原則2)。
+            "api.candidate_list.payload_template",
             "api.resume.url_pattern",
         }
     ),

@@ -74,6 +74,8 @@ from jobmedley_scout.recon.resume_keys import KeyPath
 #: このコマンドが埋めうる座標キー。
 OBSERVE_API_KEYS: tuple[str, ...] = (
     "api.candidate_list.url_pattern",
+    # 応答だけでなく **要求本文の形も出す** ので、雛形もここで埋まる。
+    "api.candidate_list.payload_template",
     "api.resume.url_pattern",
 )
 

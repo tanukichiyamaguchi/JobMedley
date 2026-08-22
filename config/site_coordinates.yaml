@@ -170,27 +170,98 @@ api.base_url: "https://customers.job-medley.com"
 # **GET ではなく POST である。** api/endpoints.py の method もそれに合わせた。
 api.candidate_list.url_pattern: "https://customers.job-medley.com/api/customers/members/search/"
 
+# 候補者一覧の **要求本文** の雛形。
+#
+# 2026-08-22 observe-api 4回目で **観測した**。一覧が飛ばした POST の本文を、
+# 値抜きでキーの形だけ読んだ (40キー)。
+#
+# **``label.search_form`` とは別物だった。** 前回「似ている」と書いたが、実際は
+# 包み (``search_form``) が無く、``version`` / ``ignore`` / ``customer`` /
+# ``name`` / ``mail`` / ``created_at`` / ``updated_at`` も無い。逆に
+# ``desired_areas[].city_id`` と ``desired_areas[].cities`` はこちらにしかない。
+# **名前が似ていることは同じものである証明ではない** (原則3) -- 貼っていたら
+# 通らない本文になっていた。
+#
+# 実際の値は **運用者が保存した検索条件そのもの** なので、ここには入れない
+# (13.2)。``<...>`` は「この種別の値がここに入る」という観測であって、
+# 送る値ではない。実行時に差し替えるのは下の2つの目印だけである::
+#
+#   {{SEARCH_CONDITION_ID}}   保存した検索条件のID (画面の「実践会＿衛生士」)
+#   {{PAGE}} / {{PAGE_SIZE}}  ページ繰り
+#
+# **注意: 本文の ``member_id`` は絞り込み条件であって、送信payloadの memberId
+# ではない。** 同名の別物である (6.4 の業界/職種の取り違えと同じ形)。
+api.candidate_list.payload_template: |
+  {
+    "age": {"from": "<string>", "to": "<string>"},
+    "desired_areas": [
+      {
+        "prefecture_id": "<string>",
+        "city_ids": ["<string>"],
+        "city_id": "<string>",
+        "cities": []
+      }
+    ],
+    "addresses": [
+      {"prefecture_id": "<string>", "city_ids": [], "cities": []}
+    ],
+    "desired_features": ["<number>"],
+    "desired_job_category_ids": ["<number>"],
+    "employment_statuses": [],
+    "employment_types": ["<number>"],
+    "favorite": "<bool>",
+    "careers": "<bool>",
+    "career_job_categories": [{"job_category_id": "<number>"}],
+    "career_job_contents": [],
+    "self_pr": "<bool>",
+    "scout": "<number>",
+    "read_profile": "<number>",
+    "genders": ["<number>"],
+    "last_education_ids": [],
+    "last_login": "<string>",
+    "member_id": [],
+    "member_qualification_ids": [],
+    "qualifications_match_all": "<bool>",
+    "include_qualifications_acquisition_scheduled": "<bool>",
+    "desired_join_times": [],
+    "recommend": "<bool>",
+    "customer_search_condition_id": "{{SEARCH_CONDITION_ID}}",
+    "recently_registered": "<bool>",
+    "pagination": {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"},
+    "sort": "<string>",
+    "nav_type": "<number>"
+  }
+
 # ------------------------------------------------------------------------
-# **要求本文の形はまだ観測していない。**
+# **候補者一覧に氏名は無い。**
 #
-# URLが決まっても、**何を送れば同じ並びが返るのかは分からない**。
-# 3回目の observe-api は応答しか出していなかった (こちらの手落ちである)。
+# 2026-08-22 observe-api 4回目で応答のキーを全部読んだ。候補者1件あたりに
+# 載っているのはこれだけである::
 #
-# 手がかりはある。同じ回に観測した
-#   POST /api/customers/customer_search_conditions/label/
-# の応答が ``label.search_form`` という46キーの入れ物を返しており、中身は
-# 一覧の絞り込みそのものに見える::
+#     id / code / age / gender_name / short_address / desired_cities
+#     member_desired_employment_types / member_education_background
+#     member_careers / employment_status_name / qualifications[]
+#     member_desired_job_categories[] / member_career_job_categories[]
+#     member_desired_join_time / last_sign_in_at
+#     scouted / scouted_at_list[] / scouted_job_offer_ids[]
+#     added_favorite_job_offers_of_customer
+#     has_careers / has_self_pr / unqualified / recently_registered
+#     read_profile / hot
 #
-#   search_form.pagination.{limit,page,cursor}
-#   search_form.desired_job_category_ids[] / member_qualification_ids[]
-#   search_form.desired_areas[].{prefecture_id,city_ids[]}
-#   search_form.age.{from,to} / genders[] / employment_types[]
-#   search_form.last_login / desired_features[] / career_job_categories[]
-#   search_form.ignore.{favorite,scouted} / customer_search_condition_id
+# **氏名の欄が無い。** ``code`` は会員番号であって名前ではない。
 #
-# **これが members/search の要求本文だとは、まだ言えない** (原則3)。
-# 名前が似ていることは同じものである証明ではない。次の observe-api は
-# 要求本文のキーの形も出すので、それで決着する。
+# 参照実装は氏名がある前提で書かれており、models.candidate.Candidate は
+# display_name を必須にしていた。**この媒体では埋めようがない。**
+# ``code`` を入れれば「氏名: 3323741」として生成に渡り、モデルはそれを名前と
+# 見なして文面に書く -- 6.4 の取り違えと同じ事故になる。
+#
+# したがって display_name は **空のままにする** (6.4 の手順3)。空なら
+# generation.facts が「非公開」として渡すので、モデルは名前に言及できない。
+#
+# **レジュメ側に在るかは未確認** (api.resume.url_pattern が未確定のため)。
+# 在ると分かったらそのとき埋める。無いと分かるまで「無い」とも書かない。
+# ------------------------------------------------------------------------
+
 # ------------------------------------------------------------------------
 
 # 候補者レジュメ取得APIのURL。
