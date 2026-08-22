@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from jobmedley_scout.recon.graphql import is_read_only_graphql
 
@@ -41,6 +42,34 @@ from jobmedley_scout.recon.graphql import is_read_only_graphql
 #: 中身はテストで固定してある。``OPTIONS`` は仕様上は安全だが入れていない --
 #: 「安全そう」ではなく「安全と確実に分かる」ものだけを通す方針のため。
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
+
+
+def is_own_origin(url: str, own_host: str) -> bool:
+    """Whether ``url`` addresses ``own_host`` itself. Pure.
+
+    **部分一致で判定してはいけない。** 実測23回目、``own_host in url`` で
+    判定していたせいで、他所への計測ビーコンが :data:`GateMode.BLOCK_THIRD_PARTY`
+    を素通りした::
+
+        POST https://www.google-analytics.com/g/collect?...
+             &dl=https%3A%2F%2Fcustomers.job-medley.com%2Fcustomers%2Fsearches...
+
+    ビーコンは「どのページから送ったか」を ``dl`` に載せる。そこに媒体のホスト名が
+    そのまま入るので、URL全体を見る部分一致は **他所への通信を媒体の通信と
+    取り違える**。しかも報告はその取り違えを引き継いで「媒体のオリジンへ飛んだ
+    非GET」として並べる -- 止めたつもりのものを通し、通した事実を別の名前で
+    報告していた。
+
+    ホスト名だけを取り出し、完全一致か部分ドメインかで判定する。
+    ホスト名が取れない URL (``data:`` など) と ``own_host=""`` は
+    **通さない側へ倒れる**。部分一致版では ``own_host=""`` が
+    「すべて通す」だったので、そこも同時に塞がる。
+    """
+    host = (urlsplit(url).hostname or "").lower()
+    own = own_host.lower().strip().lstrip(".")
+    if not host or not own:
+        return False
+    return host == own or host.endswith("." + own)
 
 
 class GateDecision(StrEnum):
@@ -184,7 +213,7 @@ class SendGate:
             return GateDecision.PASS
         if method in self._safe_methods:
             return GateDecision.PASS
-        if self._mode is GateMode.BLOCK_THIRD_PARTY and self._own_host in url.lower():
+        if self._mode is GateMode.BLOCK_THIRD_PARTY and is_own_origin(url, self._own_host):
             # **媒体自身のオリジンは素通し。** 押さないコマンド専用の緩和である
             # (:class:`GateMode` の注記)。通した事実は残す。
             self._sequence += 1

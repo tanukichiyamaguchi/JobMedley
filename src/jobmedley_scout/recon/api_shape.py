@@ -25,6 +25,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from jobmedley_scout.recon.resume_keys import KeyPath, discover_key_paths
 
@@ -140,6 +141,17 @@ class ObservedCall:
     uuid_like: int = 0
     #: 同じ文書の中に現れた、送信キーの **名前** の出現数。
     send_key_mentions: int = 0
+    #: **要求** 本文のキーパスと値の種別。**値は含まれない。** GETなら空。
+    #:
+    #: 応答の形が分かっても、**要求の形が分からなければ自分では呼べない。**
+    #: 実測23回目で候補者一覧のURL (``members/search``) は決まったが、その回の
+    #: 報告は応答しか出していなかったので、「何を送れば同じ並びが返るのか」は
+    #: 分からないままだった -- 座標が1つ埋まっただけで、呼べるようにはならない。
+    request_keys: tuple[KeyPath, ...] = ()
+    #: 要求本文を読めなかった理由 (定型句のみ)。空なら読めた、または本文が無い。
+    request_unread_reason: str = ""
+    #: 要求本文で個人データに見えたので落としたキーの数。
+    request_dropped_keys: int = 0
 
     def search_id_candidates(self) -> tuple[str, ...]:
         """Key paths whose **name** suggests the search identifier. **Pure.**"""
@@ -149,11 +161,36 @@ class ObservedCall:
         """Key paths whose **name** matches something the send payload needs."""
         return _matching(self.keys, SEND_INPUT_HINTS)
 
+    def request_lines(self) -> tuple[str, ...]:
+        """The shape of what the platform **sent**. 呼ぶために要る。
+
+        **応答と同じ扱いで値は1つも出さない** (13.2)。一覧を要求する本文には
+        検索条件 (都道府県・年齢・資格) が載り、そこから個人が絞り込まれうるが、
+        出すのはキーの名前と値の種別だけである。
+        """
+        if self.method in ("GET", "HEAD"):
+            return ()
+        if self.request_unread_reason:
+            return (f"    要求本文: 読めませんでした ({self.request_unread_reason})",)
+        if not self.request_keys:
+            return ("    要求本文: ありません (本文なしのPOST)",)
+        out = [
+            f"    **要求本文** のキー ({len(self.request_keys)} 個。"
+            f"**値は含まれていません** -- 13.2):"
+        ]
+        out.extend(f"      {path.render()}" for path in self.request_keys)
+        if self.request_dropped_keys:
+            out.append(f"    要求本文で落としたキー: {self.request_dropped_keys} 個")
+        return tuple(out)
+
     def render(self) -> str:
         lines = [f"  操作: {self.operation or '(名前を読めませんでした)'}"]
         lines.append(f"    {self.method} {self.redacted_url}")
         if self.content_type:
             lines.append(f"    種別: {self.content_type}")
+        # **要求を先に出す。** 応答は長い。呼ぶために要るのは要求の形なので、
+        # 何百行のキー一覧の下に埋めない。
+        lines.extend(self.request_lines())
         if self.unread_reason:
             # **読めなかったことを、キーが無かったことにしない** (原則2)。
             lines.append(f"    キーパスは取れませんでした: {self.unread_reason}")
@@ -179,7 +216,20 @@ class ObservedCall:
             )
         if found := self.search_id_candidates():
             lines.append(f"    **検索の識別子らしいキー**: {', '.join(found)}")
+        if inputs := self.send_input_candidates():
+            # **候補であって決定ではない** (原則3)。名前が似ていることは、
+            # 送信payloadが要る値と同じであることの証明ではない。
+            shown = ", ".join(inputs[:_MAX_INPUT_CANDIDATES])
+            more = len(inputs) - _MAX_INPUT_CANDIDATES
+            lines.append(
+                f"    送信payloadが要る値らしいキー (候補): {shown}"
+                + (f" ほか {more} 個" if more > 0 else "")
+            )
         return "\n".join(lines)
+
+
+#: 送信payloadの候補として並べるキーの上限。全部並べると本命が埋まる。
+_MAX_INPUT_CANDIDATES = 8
 
 
 def _matching(paths: Sequence[KeyPath], hints: Iterable[str]) -> tuple[str, ...]:
@@ -192,7 +242,38 @@ def _matching(paths: Sequence[KeyPath], hints: Iterable[str]) -> tuple[str, ...]
     return tuple(found)
 
 
-def operation_name(request_body: str | None) -> str:
+#: 名前付けから落とすURLの節。**入れ物の名前であってAPIの語彙ではない。**
+#: これを残すと どの呼び出しも "api/customers" で始まり、見分けが付かなくなる。
+_UNINFORMATIVE_SEGMENTS: frozenset[str] = frozenset({"api", "customers", "graphql"})
+
+#: :func:`recon.open_structure.redact_url` が伏せ字へ置き換えた節。
+#: **名前に混ぜない** -- 伏せ字そのものは何も述べていない。
+_REDACTED_SEGMENTS: frozenset[str] = frozenset({"{id}", "{value}"})
+
+
+def operation_name(request_body: str | None, url: str = "") -> str:
+    """A readable name for one call. ``""`` when nothing is readable. **Pure.**
+
+    GraphQL なら封筒の ``operationName`` をそのまま使う。
+
+    **RESTには操作名が無い。** 実測23回目の報告は、聴いた19本が **すべて**
+    「(名前を読めませんでした)」で始まっていた -- この媒体の読み取りは REST の
+    POST なので、GraphQL の封筒を探しても名前は出てこない。名前の無い19本を
+    長いURLだけで見分けさせるのは読む側の負担であり、**読めない報告は
+    観測していないことに近づく** (実測22回目に同じ失敗をしている)。
+
+    そこでURLの経路から名付ける。伏せ字の節と入れ物の節を落とすので
+    ``/api/customers/members/search/`` は ``members/search`` になる。
+
+    **個人データは入らない。** 落とす対象に伏せ字が含まれており、伏せ損ねた
+    識別子も :func:`looks_like_an_identifier` が落とす。
+    """
+    if name := _graphql_operation_name(request_body):
+        return name
+    return _path_label(url)
+
+
+def _graphql_operation_name(request_body: str | None) -> str:
     """The GraphQL operation name from a request body. ``""`` if unreadable. **Pure.**"""
     if not request_body:
         return ""
@@ -203,6 +284,21 @@ def operation_name(request_body: str | None) -> str:
     if not isinstance(payload, Mapping):
         return ""
     return str(payload.get("operationName") or "")
+
+
+def _path_label(url: str) -> str:
+    """The last two informative path segments of a URL. **Pure.**"""
+    if not url:
+        return ""
+    segments = [
+        segment
+        for segment in urlsplit(url).path.split("/")
+        if segment
+        and segment not in _UNINFORMATIVE_SEGMENTS
+        and segment not in _REDACTED_SEGMENTS
+        and not looks_like_an_identifier(segment)
+    ]
+    return "/".join(segments[-2:])
 
 
 def describe_response(body: str | None) -> tuple[tuple[KeyPath, ...], str, int]:

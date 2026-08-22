@@ -158,3 +158,126 @@ def test_the_operation_name_comes_from_the_request_not_the_response() -> None:
     assert operation_name(json.dumps({"operationName": "SearchMembers"})) == "SearchMembers"
     assert operation_name("not json") == ""
     assert operation_name(None) == ""
+
+
+# ===========================================================================
+# 名前付け -- **RESTには操作名が無い** (実測23回目)
+# ===========================================================================
+
+
+def test_a_graphql_envelope_still_wins() -> None:
+    from jobmedley_scout.recon.api_shape import operation_name
+
+    body = '{"operationName": "SendSingleScout", "variables": {}}'
+    assert operation_name(body, "https://customers.job-medley.com/api/x/y/") == "SendSingleScout"
+
+
+def test_a_rest_call_is_named_from_its_path() -> None:
+    """実測23回目の報告は、19本すべてが「(名前を読めませんでした)」だった。
+
+    この媒体の読み取りは REST の POST なので、GraphQL の封筒を探しても
+    名前は出てこない。**読めない報告は観測していないことに近づく。**
+    """
+    from jobmedley_scout.recon.api_shape import operation_name
+
+    cases = {
+        "https://customers.job-medley.com/api/customers/members/search/": "members/search",
+        "https://customers.job-medley.com/api/customers/messages/scout_count/": (
+            "messages/scout_count"
+        ),
+        "https://customers.job-medley.com/api/prefectures/": "prefectures",
+        "https://customers.job-medley.com/api/customers/job_offers/published/?limit=100": (
+            "job_offers/published"
+        ),
+    }
+    for url, expected in cases.items():
+        assert operation_name(None, url) == expected, url
+
+
+def test_redacted_segments_never_become_the_name() -> None:
+    """伏せ字は何も述べていないので、名前に混ぜない。
+
+    ``customer_users/{id}/notifications/`` が ``{id}/notifications`` に
+    なると、読む側は毎回同じ無意味な語を読まされる。
+    """
+    from jobmedley_scout.recon.api_shape import operation_name
+
+    url = "https://customers.job-medley.com/api/customers/customer_users/{id}/notifications/"
+    assert operation_name(None, url) == "customer_users/notifications"
+
+
+def test_a_raw_identifier_in_the_path_never_becomes_the_name() -> None:
+    """**伏せ損ねた識別子も落とす** (13.2)。
+
+    名前付けは ``redact_url`` の後を前提にしているが、前提が崩れたときに
+    会員番号が報告に出るのは事故なので、ここでも落とす。
+    """
+    from jobmedley_scout.recon.api_shape import operation_name
+
+    url = "https://customers.job-medley.com/api/customers/members/3323741/resume/"
+    name = operation_name(None, url)
+    assert "3323741" not in name
+    assert name == "members/resume"
+
+
+def test_nothing_readable_stays_empty() -> None:
+    from jobmedley_scout.recon.api_shape import operation_name
+
+    assert operation_name(None, "") == ""
+    assert operation_name("not json", "") == ""
+
+
+# ===========================================================================
+# 要求本文の形 -- **応答だけ分かっても呼べない** (実測23回目)
+# ===========================================================================
+
+
+def test_the_request_shape_is_reported_without_values() -> None:
+    """一覧のURLが決まっても、**送る中身が分からなければ呼べない。**"""
+    from jobmedley_scout.recon.api_shape import ObservedCall, describe_response
+
+    keys, reason, dropped = describe_response(
+        '{"pagination": {"page": 1, "limit": 25}, "age": {"from": 20, "to": 40}}'
+    )
+    assert not reason
+    call = ObservedCall(
+        operation="members/search",
+        redacted_url="https://customers.job-medley.com/api/customers/members/search/",
+        method="POST",
+        request_keys=keys,
+        request_dropped_keys=dropped,
+    )
+    rendered = "\n".join(call.request_lines())
+    assert "pagination.page: <number>" in rendered
+    assert "age.from: <number>" in rendered
+    # **値は1つも出ない** (13.2)。検索条件から個人が絞り込まれうる。
+    for value in ("25", "20", "40"):
+        assert f": {value}" not in rendered
+
+
+def test_a_get_reports_no_request_body() -> None:
+    """GETに本文は無い。**「読めなかった」と書くと嘘になる。**"""
+    from jobmedley_scout.recon.api_shape import ObservedCall
+
+    call = ObservedCall(operation="prefectures", redacted_url="https://x/", method="GET")
+    assert call.request_lines() == ()
+
+
+def test_a_post_without_a_body_says_so_rather_than_going_silent() -> None:
+    """0件を黙らない (原則2)。**本文が無いことと、読めなかったことは違う。**"""
+    from jobmedley_scout.recon.api_shape import ObservedCall
+
+    call = ObservedCall(operation="x/y", redacted_url="https://x/", method="POST")
+    assert call.request_lines() == ("    要求本文: ありません (本文なしのPOST)",)
+
+
+def test_an_unreadable_request_body_says_why() -> None:
+    from jobmedley_scout.recon.api_shape import ObservedCall
+
+    call = ObservedCall(
+        operation="x/y",
+        redacted_url="https://x/",
+        method="POST",
+        request_unread_reason="JSONとして読めませんでした",
+    )
+    assert call.request_lines() == ("    要求本文: 読めませんでした (JSONとして読めませんでした)",)

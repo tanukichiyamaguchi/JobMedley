@@ -502,3 +502,96 @@ def test_binary_responses_are_counted_but_not_read(monkeypatch) -> None:
     assert len(observed.calls) == 1
     assert observed.skipped_binary == 1
     assert "本文を見なかった応答: 1 件" in observed.render()
+
+
+# ===========================================================================
+# 実測23回目で分かった2つの穴
+# ===========================================================================
+
+#: 実測した候補者一覧の応答の形 (キー名だけ本物、値は捨て値)。
+REST_LIST_BODY = json.dumps(
+    {
+        "members": [{"id": 1, "code": "M-1", "age": "20代", "scouted": False}],
+        "search_uuid": "b1e2c3d4-0000-0000-0000-000000000000",
+        "total": 1,
+        "page": 1,
+        "limit": 25,
+        "next_cursor": "zzz",
+    }
+)
+
+#: 一覧を要求する本文。**検索条件が載る。値は報告に出してはいけない** (13.2)。
+REST_LIST_REQUEST = json.dumps(
+    {"pagination": {"page": 1, "limit": 25}, "age": {"from": 20, "to": 40}}
+)
+
+REST_LIST_URL = "https://customers.job-medley.com/api/customers/members/search/"
+
+#: 実測23回目に素通ししてしまったビーコン。**クエリに媒体のホスト名が入る。**
+BEACON_NAMING_THE_MEDIA = (
+    "https://www.google-analytics.com/g/collect?v=2&tid=G-X"
+    "&dl=https%3A%2F%2Fcustomers.job-medley.com%2Fcustomers%2Fsearches"
+)
+
+
+class _RestPage(_Page):
+    """一覧が **REST の POST** で来るページ。実測どおりの作り。"""
+
+    def __init__(self, gate: SendGate) -> None:
+        super().__init__(gate)
+        self.responses = [
+            _Response(REST_LIST_URL, REST_LIST_BODY, _Request(REST_LIST_REQUEST, "POST")),
+            _Response(BEACON_NAMING_THE_MEDIA, '{"ok":1}', _Request("{}", "POST")),
+        ]
+
+
+def test_a_beacon_that_names_the_media_in_its_query_is_still_ignored(monkeypatch) -> None:
+    """**URL全体の部分一致では、計測ビーコンが媒体の通信に化ける。**
+
+    実測23回目の報告は、Google のビーコンを「媒体のオリジンへ飛んだ非GET」
+    として並べていた。ビーコンは送信元ページのURLを ``dl=`` に載せるので、
+    URLの文字列の中には媒体のホスト名がそのまま入っている。
+
+    既存の試験がこれを捕まえられなかったのは、偽のビーコンURLが素っ気なさ
+    すぎて ``dl=`` を持っていなかったからである -- **偽物が本物より
+    行儀が良いと、試験は穴を通す。**
+    """
+    observed = _run(monkeypatch, _RestPage(SendGate(mode=GateMode.BLOCK_THIRD_PARTY)))
+    assert len(observed.calls) == 1, "計測ビーコンを媒体の応答として聴いています"
+    assert observed.ignored == 1
+    assert "google-analytics" not in observed.render()
+
+
+def test_a_rest_call_is_named_so_the_report_can_be_read(monkeypatch) -> None:
+    """実測23回目の報告は、19本すべてが「(名前を読めませんでした)」だった。"""
+    observed = _run(monkeypatch, _RestPage(SendGate(mode=GateMode.BLOCK_THIRD_PARTY)))
+    report = observed.render()
+    assert "操作: members/search" in report
+    assert "名前を読めませんでした" not in report
+
+
+def test_the_request_shape_is_reported_so_the_endpoint_can_be_called(monkeypatch) -> None:
+    """**URLが分かっても、送る中身が分からなければ呼べない。**
+
+    3回目の observe-api は応答しか出していなかったので、``members/search`` の
+    URLは決まったのに「何を送れば同じ並びが返るか」は分からないままだった。
+    """
+    observed = _run(monkeypatch, _RestPage(SendGate(mode=GateMode.BLOCK_THIRD_PARTY)))
+    report = observed.render()
+    assert "**要求本文** のキー" in report
+    assert "pagination.limit: <number>" in report
+    assert "age.from: <number>" in report
+
+
+def test_the_request_shape_never_carries_the_search_values(monkeypatch) -> None:
+    """要求本文には検索条件が載る。**そこから個人が絞り込まれうる** (13.2)。"""
+    observed = _run(monkeypatch, _RestPage(SendGate(mode=GateMode.BLOCK_THIRD_PARTY)))
+    report = observed.render()
+    for leaked in (": 25", ": 20", ": 40", "M-1", "b1e2c3d4"):
+        assert leaked not in report, f"{leaked} が報告に漏れている"
+
+
+def test_the_search_identifier_is_found_in_the_rest_response(monkeypatch) -> None:
+    """``search_uuid`` は **候補者一覧と同じ応答に載っている**。"""
+    observed = _run(monkeypatch, _RestPage(SendGate(mode=GateMode.BLOCK_THIRD_PARTY)))
+    assert observed.search_id_candidates() == ("members/search: search_uuid",)
