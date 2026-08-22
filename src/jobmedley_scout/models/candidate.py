@@ -118,5 +118,26 @@ class Candidate(BaseModel):
     #: 正規化前の、媒体から実際に返ってきた表記。``id_aliases`` に蓄積して
     #: 「両表記を試す」照合 (9.3 の4点目) に使う。
     raw_id_observed: str
-    display_name: str
+    #: 氏名。**この媒体では埋まらない。**
+    #:
+    #: 参照実装は氏名がある前提で、ここを必須にしていた。2026-08-22
+    #: observe-api 4回目で候補者一覧の応答のキーを全部読んだところ、
+    #: **氏名の欄が無かった**::
+    #:
+    #:     id / code / age / gender_name / short_address / desired_cities
+    #:     qualifications[] / member_desired_job_categories[] / ...
+    #:
+    #: ``code`` は会員番号であって名前ではない。必須のまま残せば、取り込みは
+    #: 「何かを入れる」しかなくなり、入るのは ``code`` になる。それは
+    #: :mod:`generation.facts` を通って「氏名: 3323741」としてモデルに渡り、
+    #: モデルはそれを名前として文面に書く -- 6.4 の業界/職種の取り違えと
+    #: 同じ事故である。
+    #:
+    #: そこで **空を許す** (6.4 の手順3: 確定するまで空のままにする)。空なら
+    #: :data:`generation.facts.UNDISCLOSED` として渡るので、モデルは名前に
+    #: 言及できない。嘘の発生経路が構造的に塞がる。
+    #:
+    #: レジュメ側に在るかは未確認である (``api.resume.url_pattern`` が未確定)。
+    #: 在ると分かったらそのとき埋める。
+    display_name: str | None = None
     resume: ResumeFacts = Field(default_factory=ResumeFacts)

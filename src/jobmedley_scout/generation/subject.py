@@ -120,7 +120,10 @@ def build_subject(
     経路が渡し忘れ、衝突検知が黙って無効になる (8.4 と同じ失敗の形)。当該実行で
     払い出し済みの件名を渡すこと。
     """
-    name = _clean_part(candidate.display_name)
+    # **氏名が無い媒体がある。** ジョブメドレーの候補者一覧に氏名の欄は無い
+    # (config/site_coordinates.yaml の注記)。空のまま進めば「様」だけの件名に
+    # なるので、下の分岐が例外にする -- **それが正しい振る舞いである。**
+    name = _clean_part(candidate.display_name or "")
     # 媒体側の氏名に敬称が付いて返ることがある。「様様」を避ける。
     name = name.removesuffix("様").strip()
     if not name:

@@ -32,8 +32,17 @@ def upsert_candidate(
         (
             candidate.candidate_id,
             candidate.raw_id_observed,
-            candidate.display_name,
-            normalize_name(candidate.display_name),
+            # **氏名が無い媒体がある。** ジョブメドレーの候補者一覧に氏名の欄は
+            # 無く、``Candidate.display_name`` は ``None`` のままになる
+            # (models.candidate の注記)。列は NOT NULL なので空文字で入れる。
+            #
+            # 空文字にしてよいのは、ここが **保存の境界であってプロンプトの
+            # 境界ではない** からである。モデルへ渡るのは Candidate 側で、
+            # そちらは ``None`` のまま「非公開」として渡る (8.3 対策1)。
+            # 氏名を必要とする組み立て (generation.subject) は空を見て
+            # 例外にするので、空文字が名前として使われる経路は無い。
+            candidate.display_name or "",
+            normalize_name(candidate.display_name or ""),
             now,
             source,
         ),
