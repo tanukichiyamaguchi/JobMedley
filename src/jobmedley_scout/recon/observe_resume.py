@@ -55,7 +55,7 @@ from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN, Coord, require
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.api_shape import ObservedCall
 from jobmedley_scout.recon.capture_send import install_gate
-from jobmedley_scout.recon.gate import GateMode, SendGate
+from jobmedley_scout.recon.gate import KNOWN_WRITE_MARK_READ, GateMode, SendGate
 from jobmedley_scout.recon.list_structure import indices_with_token, subtree_sizes
 from jobmedley_scout.recon.listen import ResponseShapeListener
 from jobmedley_scout.recon.open_structure import (
@@ -147,6 +147,13 @@ class ResumeObservation:
     #: 遮断が **止めた** 通信。送信が飛べなかったことの証拠でもある。
     blocked: tuple[str, ...] = ()
     listener_attached: bool = False
+    #: 2回目 (書き込みを1つ受け入れた試行) を行ったか。
+    #:
+    #: **行ったなら必ず報告に出す。** 何を書いたか分からないまま偵察が終わるのが
+    #: 一番悪い。
+    accepted_a_write: bool = False
+    #: 実際に通した書き込み (URLは伏せ済み)。
+    writes_passed: tuple[str, ...] = ()
     note: str = ""
 
     def reached(self) -> ResumeStage:
@@ -200,6 +207,7 @@ class ResumeObservation:
             f" / 聴く仕掛け: {'張れました' if self.listener_attached else '**張れませんでした**'}"
         )
         lines.extend(self._attempt_lines())
+        lines.extend(self._write_lines())
 
         if stage is ResumeStage.NO_ROWS:
             lines.append("")
@@ -248,6 +256,22 @@ class ResumeObservation:
                 )
             else:
                 out.append(f"    押せなかった: {attempt.selector} -- {attempt.failure}")
+        return out
+
+    def _write_lines(self) -> list[str]:
+        """**何を書いたかを黙らない。** 0件でも書く (原則2)。"""
+        if not self.accepted_a_write:
+            return ["  受け入れた書き込み: なし (遮断は厳しいまま)"]
+        out = [
+            "  **1回目でレジュメが取れなかったので、書き込みを1つ受け入れて再試行しました。**",
+            f"  受け入れた対象: {KNOWN_WRITE_MARK_READ} "
+            "(プロフィールを「確認済み」にする。運用者が手で開くのと同じ)",
+        ]
+        if self.writes_passed:
+            out.append(f"  実際に通した書き込み: {len(self.writes_passed)} 件")
+            out.extend(f"    {entry}" for entry in self.writes_passed)
+        else:
+            out.append("  実際には1件も飛びませんでした。")
         return out
 
     def _blocked_lines(self) -> list[str]:
@@ -305,6 +329,20 @@ def _mentions(keys: Sequence[KeyPath], hint: str) -> bool:
     return any(flat in path.path.lower().replace("_", "") for path in keys)
 
 
+#: 押しても何も開かない部品。**押す価値が無く、状態だけ変える。**
+#:
+#: 実測25回目、探索は最初にチェックボックスを2回押した (``label`` と ``input``)。
+#: どちらも新しい応答は0件で、変わったのは候補者の選択状態だけである。
+#: 押す予算 (:data:`MAX_PRESSES`) をここで使い切ると本命に届かない。
+NON_OPENING_CLASS_HINTS: tuple[str, ...] = ("checkbox", "radio", "toggle", "switch")
+
+
+def _cannot_open_anything(candidate: ActionCandidate) -> bool:
+    """Whether this control only flips state. **Pure.**"""
+    haystack = " ".join(candidate.tokens).lower()
+    return any(hint in haystack for hint in NON_OPENING_CLASS_HINTS)
+
+
 def _pressable(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, ...]:
     """Controls we are willing to press. **閉じる・禁止・無効は外す。**
 
@@ -315,7 +353,10 @@ def _pressable(candidates: Sequence[ActionCandidate]) -> tuple[ActionCandidate, 
     return tuple(
         candidate
         for candidate in candidates
-        if not is_closing(candidate) and not is_forbidden(candidate) and not is_disabled(candidate)
+        if not is_closing(candidate)
+        and not is_forbidden(candidate)
+        and not is_disabled(candidate)
+        and not _cannot_open_anything(candidate)
     )
 
 
@@ -339,8 +380,41 @@ def observe_resume(
     if not session.exists():
         return ResumeObservation(requested_url=requested_url, session_present=False)
 
-    gate = SendGate(mode=GateMode.BLOCK_SEND)
+    strict = _attempt(config, session, requested_url, row_token, accepted_writes=frozenset())
+    if strict.reached() is not ResumeStage.HEARD or not strict.resume_candidates():
+        # **1回目で取れなかったときだけ、書き込みを1つ受け入れて2回目を行う。**
+        #
+        # 実測25回目、遮断は ``members/mark_read`` を止めた。プロフィールを開くと
+        # 飛ぶ書き込みで、止めた結果モーダルはレジュメの取得まで進まなかった --
+        # 止めたことが観測を殺した (実測22回目と同じ形である)。
+        #
+        # **受け入れてよい根拠**: これは運用者が「プロフィール確認」を押すたびに
+        # 起きている書き込みそのもので、立てるのは一覧の ``read_profile`` だけで
+        # ある。送信でも、枠の消費でも、候補者へ届くものでもない (13.6 が守って
+        # いるのは送信である)。**それでも書き込みなので、報告に必ず出す。**
+        second = _attempt(
+            config,
+            session,
+            requested_url,
+            row_token,
+            accepted_writes=frozenset({KNOWN_WRITE_MARK_READ}),
+        )
+        return second
+    return strict
+
+
+def _attempt(
+    config: BrowserConfig,
+    session: Path,
+    requested_url: str,
+    row_token: str,
+    *,
+    accepted_writes: frozenset[str],
+) -> ResumeObservation:
+    """One pass: open the list, press, listen. **武装は遷移より前。**"""
+    gate = SendGate(mode=GateMode.BLOCK_SEND, accepted_writes=accepted_writes)
     listener = ResponseShapeListener()
+    accepted_a_write = bool(accepted_writes)
     with browser_context(config, storage_state=session) as (_context, page):
         install_gate(page, gate)
         attached = False
@@ -359,6 +433,7 @@ def observe_resume(
                     requested_url=requested_url,
                     session_expired=True,
                     listener_attached=attached,
+                    accepted_a_write=accepted_a_write,
                 )
             wait_for_structure_to_settle(page, config.selector_timeout_ms)
             rendered = marker_present(page, row_token, timeout_ms=config.selector_timeout_ms)
@@ -369,6 +444,8 @@ def observe_resume(
                     before=before,
                     blocked=_blocked(gate),
                     listener_attached=attached,
+                    accepted_a_write=accepted_a_write,
+                    writes_passed=_writes(gate),
                     note=f"行 ({row_token}) が現れませんでした。",
                 )
 
@@ -381,6 +458,8 @@ def observe_resume(
                 attempts=attempts,
                 blocked=_blocked(gate),
                 listener_attached=attached,
+                accepted_a_write=accepted_a_write,
+                writes_passed=_writes(gate),
             )
         finally:
             gate.disarm()
@@ -388,6 +467,10 @@ def observe_resume(
 
 def _blocked(gate: SendGate) -> tuple[str, ...]:
     return tuple(f"{entry.method} {redact_url(entry.url)}" for entry in gate.recorded)
+
+
+def _writes(gate: SendGate) -> tuple[str, ...]:
+    return tuple(f"{entry.method} {redact_url(entry.url)}" for entry in gate.accepted_passed)
 
 
 def _press_until_something_arrives(
@@ -427,9 +510,13 @@ def _press_until_something_arrives(
                 failure=failure,
             )
         )
-        if arrived:
-            # **届いたら止める。** これ以上押しても分かることは増えず、
-            # 意図しない何かを押す機会だけが増える (13.6)。
+        if any(looks_like_a_resume(call) for call in listener.calls[seen_before:]):
+            # **レジュメが届いたら止める。**
+            #
+            # 実測25回目はここが「何か届いたら止める」だった。最初に届いたのは
+            # ``members/mark_read`` の (遮断が差し替えた) 空の応答で、そこで
+            # 打ち切ったせいでレジュメを待たずに終わった。**「届いた」は
+            # 「取れた」ではない** (実測18回目と同じ形の間違いである)。
             break
     return tuple(attempts)
 

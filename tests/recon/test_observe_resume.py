@@ -225,3 +225,89 @@ def test_key_paths_carry_no_values() -> None:
     keys, _reason, _dropped = describe_response(RESUME_BODY)
     assert all(isinstance(path, KeyPath) for path in keys)
     assert all("<" in path.render() for path in keys)
+
+
+# ===========================================================================
+# 実測25回目で分かったこと
+# ===========================================================================
+
+
+def test_state_only_controls_are_not_pressed() -> None:
+    """チェックボックスを押しても何も開かない。**予算を使うだけ。**
+
+    実測25回目、探索は最初にチェックボックスを2回押した (``label`` と ``input``)。
+    どちらも新しい応答は0件で、変わったのは候補者の選択状態だけである。
+    """
+    from jobmedley_scout.recon.observe_resume import _pressable
+    from jobmedley_scout.recon.open_structure import ActionCandidate
+
+    checkbox_label = ActionCandidate(
+        index=1,
+        tag="label",
+        tokens=("label.c-checkbox", "label.c-checkbox--blue"),
+        looks_like_send=False,
+    )
+    checkbox_input = ActionCandidate(
+        index=2, tag="input", tokens=("input.c-checkbox__input",), looks_like_send=False
+    )
+    button = ActionCandidate(
+        index=3,
+        tag="button",
+        tokens=("button.c-button", "button.c-button--small"),
+        looks_like_send=False,
+    )
+    kept = _pressable((checkbox_label, checkbox_input, button))
+    assert kept == (button,)
+
+
+def test_the_walk_stops_on_a_resume_not_on_any_response() -> None:
+    """**「届いた」は「取れた」ではない** (実測18回目と同じ形)。
+
+    実測25回目は「何か届いたら止める」だった。最初に届いたのは
+    ``members/mark_read`` の空の応答で、そこで打ち切ったせいでレジュメを
+    待たずに終わった。
+    """
+    source = Path("src/jobmedley_scout/recon/observe_resume.py").read_text(encoding="utf-8")
+    assert "if any(looks_like_a_resume(call) for call in listener.calls[seen_before:]):" in source
+    assert (
+        "        if arrived:\n" not in source
+    ), "「何か届いたら止める」に戻っています。mark_read の空応答で打ち切ります。"
+
+
+def test_a_run_that_accepted_a_write_says_so() -> None:
+    """**何を書いたかを黙らない。** 分からないまま偵察が終わるのが一番悪い。"""
+    from jobmedley_scout.recon.observe_resume import PressAttempt
+
+    observed = ResumeObservation(
+        requested_url="https://x/",
+        list_rendered=True,
+        attempts=(PressAttempt(selector="b", pressed=True, new_responses=1),),
+        after=(_call(RESUME_URL, RESUME_BODY),),
+        accepted_a_write=True,
+        writes_passed=("POST https://customers.job-medley.com/api/customers/members/mark_read/",),
+    )
+    report = observed.render()
+    assert "書き込みを1つ受け入れて再試行" in report
+    assert "mark_read" in report
+
+
+def test_a_strict_run_says_it_accepted_nothing() -> None:
+    """0件でも書く (原則2)。黙ると「受け入れたか」が報告から決められない。"""
+    from jobmedley_scout.recon.observe_resume import PressAttempt
+
+    observed = ResumeObservation(
+        requested_url="https://x/",
+        list_rendered=True,
+        attempts=(PressAttempt(selector="b", pressed=True, new_responses=1),),
+        after=(_call(RESUME_URL, RESUME_BODY),),
+    )
+    assert "受け入れた書き込み: なし" in observed.render()
+
+
+def test_the_accepted_write_is_only_the_read_marker() -> None:
+    """**受け入れるのは1つだけ。** 増やすならレビューが要る。"""
+    source = Path("src/jobmedley_scout/recon/observe_resume.py").read_text(encoding="utf-8")
+    assert "frozenset({KNOWN_WRITE_MARK_READ})" in source
+    assert (
+        source.count("accepted_writes=frozenset({") == 1
+    ), "受け入れる書き込みが増えています。1つずつ根拠を書いてください。"

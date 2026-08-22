@@ -205,3 +205,93 @@ def test_the_allowlist_names_only_read_endpoints() -> None:
 
 def test_the_default_mode_is_still_the_strict_one() -> None:
     assert SendGate().mode is GateMode.BLOCK_ALL
+
+
+# ===========================================================================
+# 知っていて受け入れる書き込み (実測25回目)
+# ===========================================================================
+
+MARK_READ_URL = f"{MEDIA}/api/customers/members/mark_read/"
+
+
+def test_a_write_is_blocked_unless_the_caller_names_it() -> None:
+    """**既定は空。** 受け入れるかどうかは呼び出し側が名前で明示する。
+
+    実測25回目、遮断は ``members/mark_read`` を止めた。許可制が予期していなかった
+    書き込みを実際に捕まえたということで、**これが既定の正しい振る舞いである**。
+    """
+    gate = _armed()
+    try:
+        decision = gate.decide("POST", MARK_READ_URL, '{"member_ids": [1]}')
+    finally:
+        gate.disarm()
+    assert decision is not GateDecision.PASS
+    assert not gate.accepted_passed
+
+
+def test_a_named_write_passes_and_is_counted_separately() -> None:
+    """**読み取りに混ぜない。** 何を書いたかが報告から消えると意味が無い。"""
+    from jobmedley_scout.recon.gate import KNOWN_WRITE_MARK_READ
+
+    gate = SendGate(mode=GateMode.BLOCK_SEND, accepted_writes=frozenset({KNOWN_WRITE_MARK_READ}))
+    gate.arm()
+    try:
+        decision = gate.decide("POST", MARK_READ_URL, '{"member_ids": [1]}')
+    finally:
+        gate.disarm()
+    assert decision is GateDecision.PASS
+    assert len(gate.accepted_passed) == 1
+    assert gate.accepted_passed[0].body is None, "書き込みの本文を残しています (13.2)"
+
+
+def test_accepting_one_write_does_not_accept_the_send() -> None:
+    """**ここが崩れたら全部が無意味になる。**
+
+    受け入れ集合は経路の末尾で照合する。送信は GraphQL の mutation なので、
+    どの書き込みを受け入れても通ってはいけない。
+    """
+    from jobmedley_scout.recon.gate import KNOWN_WRITE_MARK_READ
+
+    gate = SendGate(mode=GateMode.BLOCK_SEND, accepted_writes=frozenset({KNOWN_WRITE_MARK_READ}))
+    gate.arm()
+    try:
+        decision = gate.decide("POST", SEND_URL, SEND_BODY)
+    finally:
+        gate.disarm()
+    assert decision is not GateDecision.PASS
+
+
+def test_accepting_a_write_does_not_open_other_writes() -> None:
+    from jobmedley_scout.recon.gate import KNOWN_WRITE_MARK_READ
+
+    gate = SendGate(mode=GateMode.BLOCK_SEND, accepted_writes=frozenset({KNOWN_WRITE_MARK_READ}))
+    gate.arm()
+    try:
+        other = gate.decide("POST", f"{MEDIA}/api/customers/favorites/", "{}")
+    finally:
+        gate.disarm()
+    assert other is not GateDecision.PASS
+
+
+def test_an_accepted_write_on_another_origin_is_still_blocked() -> None:
+    from jobmedley_scout.recon.gate import KNOWN_WRITE_MARK_READ
+
+    gate = SendGate(mode=GateMode.BLOCK_SEND, accepted_writes=frozenset({KNOWN_WRITE_MARK_READ}))
+    gate.arm()
+    try:
+        borrowed = gate.decide("POST", "https://evil.example/api/members/mark_read/", "{}")
+    finally:
+        gate.disarm()
+    assert borrowed is not GateDecision.PASS
+
+
+def test_accepted_writes_are_kept_out_of_the_read_allowlist() -> None:
+    """**分けてあることそのものを固定する。**
+
+    ``READ_PATH_SEGMENTS`` は「副作用が無いと観測できたもの」、受け入れ集合は
+    「副作用が在ると分かっていて、それでも通すもの」である。混ぜれば、受け入れた
+    覚えのない書き込みが読み取りの顔をして増えていく。
+    """
+    from jobmedley_scout.recon.gate import KNOWN_WRITE_MARK_READ
+
+    assert KNOWN_WRITE_MARK_READ not in READ_PATH_SEGMENTS

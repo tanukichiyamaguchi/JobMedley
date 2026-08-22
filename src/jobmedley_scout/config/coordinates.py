@@ -169,6 +169,14 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
     ),
     CoordinateSpec("api.resume.url_pattern", _S3, CoordKind.URL, "候補者レジュメ取得APIのURL。"),
     CoordinateSpec(
+        "api.resume.payload_template",
+        _S3,
+        CoordKind.JSON_PATH,
+        "レジュメ取得の **要求本文** の雛形。レジュメは GraphQL なので、URLだけでは"
+        "呼べない -- 問い合わせ文 (query) が要る。"
+        "`scout recon read-bundle` が配信JSから読む。",
+    ),
+    CoordinateSpec(
         "api.precheck.url_pattern",
         _S3,
         CoordKind.URL,
@@ -248,7 +256,9 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
         _S3,
         CoordKind.JSON_PATH,
         "**経験してきた**業界のキーパス。希望条件配下の同名キーと取り違えないこと -- "
-        "参照実装の「ご希望の◯◯業界」という虚偽はこの取り違えが原因 (6.4)。",
+        "参照実装の「ご希望の◯◯業界」という虚偽はこの取り違えが原因 (6.4)。"
+        "この媒体に業界の軸は無い (職種のみ)。無ければ null。",
+        nullable=True,
     ),
     CoordinateSpec(
         "resume.fields.experienced_occupations",
@@ -257,7 +267,11 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
         "**経験してきた**職種のキーパス。",
     ),
     CoordinateSpec(
-        "resume.fields.desired_industries", _S3, CoordKind.JSON_PATH, "**希望する**業界のキーパス。"
+        "resume.fields.desired_industries",
+        _S3,
+        CoordKind.JSON_PATH,
+        "**希望する**業界のキーパス。この媒体に業界の軸は無い。無ければ null。",
+        nullable=True,
     ),
     CoordinateSpec(
         "resume.fields.desired_occupations",
@@ -273,16 +287,33 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
         CoordKind.JSON_PATH,
         "語学欄のキーパス。外国語ネイティブ判定は**この欄にのみ**適用する (7.2)。"
         "範囲を絞る以上、この欄が実際に取れているかの確認が新たな前提になるので、"
-        "抽出実装とログ確認をセットで行うこと。",
+        "抽出実装とログ確認をセットで行うこと。無ければ null。",
+        nullable=True,
     ),
     CoordinateSpec("resume.fields.age", _S3, CoordKind.JSON_PATH, "年齢のキーパス。"),
     CoordinateSpec(
-        "resume.fields.membership_status", _S3, CoordKind.JSON_PATH, "会員ステータスのキーパス。"
+        "resume.fields.membership_status",
+        _S3,
+        CoordKind.JSON_PATH,
+        "会員ステータスのキーパス。**就業状況とは別概念である** -- 取り違えると"
+        "「会員ステータス: 就業中」になる (6.4)。無ければ null。",
+        nullable=True,
     ),
     CoordinateSpec(
-        "resume.fields.specialty", _S3, CoordKind.JSON_PATH, "専門/得意領域のキーパス。"
+        "resume.fields.specialty",
+        _S3,
+        CoordKind.JSON_PATH,
+        "専門/得意領域のキーパス。無ければ null。",
+        nullable=True,
     ),
-    CoordinateSpec("resume.fields.summary", _S3, CoordKind.JSON_PATH, "職務要約のキーパス。"),
+    CoordinateSpec(
+        "resume.fields.summary",
+        _S3,
+        CoordKind.JSON_PATH,
+        "職務要約のキーパス。**自己PRとは別物である** -- 自己PRを入れると"
+        "「職務要約」として渡り、モデルはそう扱う (6.4)。無ければ null。",
+        nullable=True,
+    ),
     # ---- enum の実値 (6.5) -------------------------------------------------
     CoordinateSpec(
         "enums.education.exact_map",
@@ -417,6 +448,8 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
             # どちらも静かに間違う (原則2)。
             "api.candidate_list.payload_template",
             "api.resume.url_pattern",
+            # **URLだけでは呼べない。** GraphQL なので問い合わせ文が要る。
+            "api.resume.payload_template",
         }
     ),
     # 生成は媒体座標をほとんど要求しない -- 純粋ロジックとLLMだけで完結する。
