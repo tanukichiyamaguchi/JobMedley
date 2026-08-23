@@ -60,6 +60,12 @@ FACT_LABELS: Final[dict[str, str]] = {
     "desired_industries": "希望業界",
     "desired_occupations": "希望職種",
     "desired_locations": "希望勤務地",
+    "desired_features": "こだわり条件",
+    "qualifications": "保有資格",
+    # **保有と分けてある。** 混ぜて「◯◯をお持ちの方へ」と書けば、まだ持って
+    # いない人にそう言うことになる (6.4 と同じ形)。
+    "qualifications_scheduled": "取得予定の資格",
+    "self_pr": "自己PR",
 }
 
 
@@ -121,6 +127,10 @@ class PromptFacts(BaseModel):
     desired_industries: Fact
     desired_occupations: Fact
     desired_locations: Fact
+    desired_features: Fact
+    qualifications: Fact
+    qualifications_scheduled: Fact
+    self_pr: Fact
 
     def iter_facts(self) -> Iterator[Fact]:
         """Every fact, in declaration order.
@@ -225,6 +235,10 @@ def build_facts(candidate: Candidate) -> PromptFacts:
         desired_industries=_fact("desired_industries", resume.desired_industries),
         desired_occupations=_fact("desired_occupations", resume.desired_occupations),
         desired_locations=_fact("desired_locations", resume.desired_locations),
+        desired_features=_fact("desired_features", resume.desired_features),
+        qualifications=_fact("qualifications", resume.qualifications),
+        qualifications_scheduled=_fact("qualifications_scheduled", resume.qualifications_scheduled),
+        self_pr=_fact("self_pr", [resume.self_pr]),
     )
 
 
