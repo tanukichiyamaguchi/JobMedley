@@ -233,6 +233,7 @@ class ResumeObservation:
         lines.append("")
         for call in self.after:
             lines.append(call.render())
+            lines.extend(call.template_lines())
             lines.append("")
 
         lines.append("config/site_coordinates.yaml の該当行:")
@@ -307,6 +308,31 @@ class ResumeObservation:
         out.append("    # 実画面の項目 (会員番号/年齢/居住地/最終学歴/資格/経験職種/")
         out.append("    # 希望職種/希望勤務地/希望勤務形態/希望年収/こだわり条件/自己PR)")
         out.append("    # が揃っているものを選んで貼ってください。")
+        out.extend(self._template_lines(found))
+        return out
+
+    def _template_lines(self, found: Sequence[ObservedCall]) -> list[str]:
+        """The request envelope, ready to paste into the coordinate file.
+
+        **URLだけでは呼べない。** GraphQL は ``query`` の無いリクエストを受け付け
+        ないので、問い合わせ文の中身が要る。実測26回目はキーパスだけを出していた
+        ので、URLが決まったのに呼べないままだった -- 送信payloadで一度開けたのと
+        同じ穴である。
+        """
+        templates = [call for call in found if call.request_template]
+        if not templates:
+            return [
+                "",
+                f"  api.resume.payload_template: {UNRESOLVED_TOKEN}",
+                "    # **封筒を取れませんでした。** GraphQL でない応答だったか、",
+                "    # 要求本文を読めませんでした。URLだけでは呼べません。",
+            ]
+        out = ["", "  api.resume.payload_template: |"]
+        for line in templates[0].request_template.splitlines():
+            out.append(f"    {line}")
+        if len(templates) > 1:
+            out.append(f"    # 封筒が取れた応答は他に {len(templates) - 1} 件あります。")
+        out.append("    # **値は入っていません** -- variables は種別に伏せてあります (13.2)。")
         return out
 
 

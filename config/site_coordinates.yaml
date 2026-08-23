@@ -524,6 +524,29 @@ api.send.paid.success_statuses: UNRESOLVED
 #
 # 埋め忘れたまま送ろうとしても、api.payloads.assert_fully_filled が送信の前に
 # 止める。``<string>`` という文字列がスカウトとして飛ぶことは無い (13.6)。
+# ------------------------------------------------------------------------
+# **送信の入力型の名前** (2026-08-22 read-bundle 実測27回目)。
+#
+# 配信ファイルから読んだ mutation は2本だった::
+#
+#     mutation SendSingleScout($input: MessageScoutSendInput!)
+#     mutation BulkSendScout($input: MessageScoutBulkSendInput!)
+#
+# **入力型の名前は MessageScoutSendInput である。** docs/ladder.md は
+# SendSingleScoutInput と書いていたが、それは操作名から推測した名前で、実際の
+# 型名ではなかった。訂正した。
+#
+# **一括送信の経路が在る。** BulkSendScout / MessageScoutBulkSendInput --
+# 画面の「スカウトを送る(0/50)」がこれである。存在は確定したが、payload も
+# 成功判定も未観測なので api.send.free.* は UNRESOLVED のままにする。
+# (そもそも「無料枠」かどうかも分かっていない。名前は一括送信としか言っていない。)
+#
+# **この経路では dryRun の有無は分からない。** 配信ファイルに入っているのは
+# 操作の定義 (クエリ文書) であって、スキーマではない。文書に出るのは変数の
+# *型名* だけで、その型がどんなフィールドを持つかは書かれていない。
+# `scout recon introspect` がスキーマに直接尋ねる (query なので送信は起こらない)。
+# ------------------------------------------------------------------------
+
 api.send.paid.payload_template: |
   {
     "operationName": "SendSingleScout",

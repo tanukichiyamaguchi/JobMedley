@@ -83,6 +83,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "observe-api", help="一覧を開いて読み取りAPIの応答の形を観測 (押下なし・値は出さない)"
     )
     recon_sub.add_parser(
+        "introspect",
+        help="送信の入力型をスキーマに尋ねる (query 2本のみ・押下なし・値は出さない)",
+    )
+    recon_sub.add_parser(
         "observe-resume",
         help="カードを押してレジュメAPIの応答の形を観測 (送信は遮断・値は出さない)",
     )
@@ -209,6 +213,8 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "observe-api": "recon-capture-send",
     # 一覧URLと行のセレクタさえ在れば押せる。送信は遮断で止めてある。
     "observe-resume": "recon-capture-send",
+    # 尋ねるだけ。要るのは API のオリジンだけである。
+    "introspect": "recon-capture-send",
     # 一覧URLさえ在れば読める (押下も送信も無い)。capture-open と同じ座標で足りる。
     "read-bundle": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
@@ -367,6 +373,19 @@ def _dispatch_recon(
             coordinates.selector("nav.list_ready_selector"),
         )
         print(resume_observed.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "introspect":
+        from jobmedley_scout.recon.introspect import introspect_send_input
+
+        # 認証済みの問い合わせにはセッションが要る。12.7 のとおり毎回復元する。
+        _restore_session_from_secrets(config)
+        schema = introspect_send_input(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("api.base_url"),
+        )
+        print(schema.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "verify-session":
