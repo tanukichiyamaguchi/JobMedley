@@ -162,6 +162,78 @@ def test_non_success_status_reports_failure_without_raising() -> None:
     assert result.slot is SendSlot.PAID
 
 
+def test_a_send_that_only_says_errorMessage_is_not_recorded_as_sent() -> None:
+    """**3本目の失敗経路** (2026-08-23 実測31回目)。
+
+    実測した mutation の選択集合には ``errorMessage`` が在る::
+
+        result: messageScoutSend(input: $input) {
+          scoutedMemberId
+          errorMessage
+          __typename
+        }
+
+    ここへ文言が入った応答は、**成功ステータスで来て、errors 配列も空である**。
+    見落とすと送信済みとして記録され、その候補者は重複送信の防止に掛かって二度と
+    対象にならない -- **送っていないのに送ったことになる** (原則2)。
+    """
+    coords = _coordinates()
+    endpoints = build_endpoints(coords)
+    body = json.dumps(
+        {
+            "data": {
+                "result": {
+                    "scoutedMemberId": None,
+                    "errorMessage": "スカウトの送信上限に達しています",
+                    "__typename": "MessageScoutSendPayload",
+                }
+            }
+        },
+        ensure_ascii=False,
+    )
+    # **成功ステータス** (この座標では 201) で返す。1本目も2本目も通り抜ける形。
+    transport = RecordedTransport([HttpResponse(status=201, body_text=body)])
+    result = send_message(
+        _client(transport, coords),
+        endpoints[SEND_PAID],
+        _reserved(),
+        _message(),
+        payload_template=coords.json_path("api.send.paid.payload_template"),
+    )
+    assert not result.succeeded
+    assert result.slot is SendSlot.PAID
+
+
+def test_a_failure_reason_says_more_than_the_status_code() -> None:
+    """**「HTTP 201」とだけ書かれた失敗記録を残さない。**
+
+    送信は GraphQL なので、失敗も成功ステータスで来る。理由がステータスだけの
+    記録は、読んだ人間に成功と区別がつかず、原因も分からない。
+    あわせて **媒体の文言は記録しない** (13.2) -- 候補者名が混ざりうる。
+    """
+    coords = _coordinates()
+    endpoints = build_endpoints(coords)
+    body = json.dumps(
+        {"data": {"result": {"errorMessage": "山田太郎さん (会員番号 03323741) へは送れません"}}},
+        ensure_ascii=False,
+    )
+    transport = RecordedTransport([HttpResponse(status=201, body_text=body)])
+    result = send_message(
+        _client(transport, coords),
+        endpoints[SEND_PAID],
+        _reserved(),
+        _message(),
+        payload_template=coords.json_path("api.send.paid.payload_template"),
+    )
+    assert result.failure_reason is not None
+    assert result.failure_reason != "HTTP 201"
+    assert "data.result.errorMessage" in result.failure_reason
+    assert "山田" not in result.failure_reason
+    assert "03323741" not in result.failure_reason
+    # 会員IDをメッセージIDとして詰めない (応答にメッセージIDは無い)。
+    assert result.platform_message_id is None
+
+
 def test_401_raises_permanent_auth_error() -> None:
     """6.6: 認証切れは **送出する**。空の値を返して警告ログを出すのが事故の原因。"""
     coords = _coordinates()

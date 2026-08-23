@@ -13,6 +13,31 @@
 
 新しいエンドポイントを足すときは、成功ステータスを **実測してから** 座標に書くこと。
 推測で 200 を書くと、この事故をそのまま再現する。
+
+**失敗を運んでくる経路は3本ある。** 実測31回目 (follow-send) で送信の mutation 文書
+そのものを観測して、3本目が在ることが分かった::
+
+    mutation SendSingleScout($input: MessageScoutSendInput!) {
+      result: messageScoutSend(input: $input) {
+        scoutedMemberId
+        errorMessage        <- **これ**
+        __typename
+      }
+    }
+
+1. HTTPステータス          -- 集合に入っているか (6.2)
+2. 本文の ``errors`` 配列   -- GraphQL の伝送・実行時エラー (:func:`graphql_errors`)
+3. **本文の ``errorMessage`` 欄** -- 媒体の業務エラー (:func:`payload_error_paths`)
+
+3本目は 1 も 2 も通り抜ける。**HTTP 200・errors 無し・それでも送れていない** 形が
+ありうる。媒体がわざわざ選択集合に入れている以上、埋まる場面が在るということである。
+見落とすと送信済みとして記録され、その候補者は二度と対象にならない -- 原則2 の
+「静かなゼロ件」が **恒久化** する。だから3本とも見る。
+
+**まだ観測していないのは「どんなときに埋まるか」である。** 欄の存在は確定だが、
+失敗応答そのものは1度も見ていない (実送信をしていないから)。よって判定は保守的に
+倒す -- **空でない値が入っていたら失敗**。逆向き (埋まっているのに成功とみなす) の
+間違いだけは犯さない。
 """
 
 from __future__ import annotations
@@ -57,11 +82,72 @@ def graphql_errors(body: Mapping[str, object] | None) -> tuple[str, ...]:
     return tuple(found)
 
 
+#: 送信 mutation の選択集合に在る、**操作ごとのエラー欄** (2026-08-23 実測31回目)。
+#: 名前は観測そのものである。推測で別名 (``error`` / ``message`` 等) を足さない --
+#: 足すと、たまたま当たったキーを「正しい」と誤認したまま運用に入る (原則3)。
+PAYLOAD_ERROR_FIELD = "errorMessage"
+
+#: ``data`` の下を潜る深さの上限。無限に深い応答で暴走しないための安全弁であって、
+#: 媒体の事実ではない。観測した送信の応答は ``data.result.errorMessage`` の深さ2。
+MAX_PAYLOAD_DEPTH = 6
+
+
+def _is_filled(value: object) -> bool:
+    """Whether this ``errorMessage`` slot actually carries a complaint.
+
+    ``null`` と空文字は「エラー無し」。それ以外は **中身を見ずに** エラーとみなす。
+    形 (文字列か、配列か、オブジェクトか) はまだ観測していないので、形で分岐する
+    判定を書かない -- 想定外の形が来たときに黙って成功へ倒れる。
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping | Sequence | bytes):
+        return bool(value)
+    return True
+
+
+def _walk_payload(node: object, path: str, found: list[str], depth: int) -> None:
+    if depth <= 0:
+        return
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            child = f"{path}.{key}"
+            if key == PAYLOAD_ERROR_FIELD:
+                if _is_filled(value):
+                    found.append(child)
+                continue
+            _walk_payload(value, child, found, depth - 1)
+        return
+    if isinstance(node, Sequence) and not isinstance(node, str | bytes):
+        for index, item in enumerate(node):
+            _walk_payload(item, f"{path}[{index}]", found, depth - 1)
+
+
+def payload_error_paths(body: Mapping[str, object] | None) -> tuple[str, ...]:
+    """Key paths under ``data`` where a non-empty ``errorMessage`` sits.
+
+    **返すのはキーパスだけで、文言は返さない** (13.2)。媒体のエラー文言には
+    候補者名や会員番号が混ざりうるので、Actions のログへ出せない。
+    ``graphql_errors`` が ``message`` を捨ててコードだけ返すのと同じ理由である。
+
+    ``errors`` 配列は見ない -- あちらは :func:`graphql_errors` の担当で、二重に
+    数えると「失敗の内訳」が壊れる。ここが見るのは ``data`` の下だけである。
+    """
+    if not isinstance(body, Mapping):
+        return ()
+    found: list[str] = []
+    _walk_payload(body.get("data"), "data", found, MAX_PAYLOAD_DEPTH)
+    return tuple(found)
+
+
 def is_success(endpoint: Endpoint, status: int, body: Mapping[str, object] | None = None) -> bool:
     """Whether this response means success **for this endpoint**.
 
-    ステータスが成功の集合に入っていること **かつ** 本文にエラーが無いこと。
-    片方だけでは足りない -- 詳細は :func:`graphql_errors` の docstring にある。
+    3本の経路すべてを通ったものだけが成功である。ステータスが集合に入っていること、
+    ``errors`` 配列が空であること、そして **``errorMessage`` 欄が埋まっていない**
+    こと。1本でも欠かすと、失敗が成功として記録される (モジュール冒頭の3本立て)。
     """
     statuses = require(endpoint.success_statuses, used_by=f"api.success.is_success({endpoint.id})")
     if statuses is None:
@@ -77,7 +163,8 @@ def is_success(endpoint: Endpoint, status: int, body: Mapping[str, object] | Non
     # GraphQL 以外のエンドポイント (本文が空の 204 等) が同じ関数を通るからで、
     # そこで「本文が読めない = 失敗」にすると正常な応答を全部落とす。
     # GraphQL の失敗は **errors が在る** ことで示されるので、在るときだけ見る。
-    return not graphql_errors(body)
+    # errorMessage 欄も同じ扱い -- 欄が無い応答は無言、在って埋まっていれば失敗。
+    return not graphql_errors(body) and not payload_error_paths(body)
 
 
 def describe_status(
@@ -85,6 +172,7 @@ def describe_status(
 ) -> str:
     """A human-readable verdict, for logs and the run report."""
     codes = graphql_errors(body)
+    paths = payload_error_paths(body)
     try:
         verdict = "成功" if is_success(endpoint, status, body) else "失敗"
     except (ConfigError, UnresolvedCoordinateError):
@@ -93,5 +181,38 @@ def describe_status(
         verdict = "判定不能(成功ステータスが未確定)"
     # **200 なのに失敗、を必ず言葉にする。** ここを黙ると、ログを読んだ人間が
     # 「200 が並んでいるから送れている」と誤読する。
-    detail = f" (応答本文のエラー: {', '.join(codes)})" if codes else ""
+    details: list[str] = []
+    if codes:
+        details.append(f"応答本文のエラー: {', '.join(codes)}")
+    if paths:
+        details.append(f"エラー欄に文言あり: {', '.join(paths)}")
+    detail = f" ({' / '.join(details)})" if details else ""
     return f"{endpoint.id}: HTTP {status} -> {verdict}{detail}"
+
+
+def describe_failure(
+    endpoint: Endpoint, status: int, body: Mapping[str, object] | None = None
+) -> str | None:
+    """Why this response is *not* a success. ``None`` when it is one.
+
+    送信記録の ``failure_reason`` はここから作る。以前は ``f"HTTP {status}"`` を
+    そのまま入れていたが、**GraphQL の失敗はステータスが 200 なので「HTTP 200」と
+    しか書かれない記録が残る**。読んだ人間には成功と区別がつかず、原因も分からない。
+    レポートが起きたことと食い違うのは、それ自体が事故である。
+
+    ここでも **値は1つも含めない** (13.2)。出すのはエラーコードとキーパスだけで、
+    媒体の文言は出さない -- 候補者名が混ざりうるため。文言そのものは媒体の画面で
+    確認すること。
+    """
+    if is_success(endpoint, status, body):
+        return None
+    parts: list[str] = []
+    codes = graphql_errors(body)
+    if codes:
+        parts.append(f"応答本文の errors: {', '.join(codes)}")
+    paths = payload_error_paths(body)
+    if paths:
+        parts.append(f"エラー欄に文言あり (文言は伏せています): {', '.join(paths)}")
+    if not parts:
+        parts.append("成功とみなすステータスの集合に入っていません")
+    return f"HTTP {status} / " + " / ".join(parts)
