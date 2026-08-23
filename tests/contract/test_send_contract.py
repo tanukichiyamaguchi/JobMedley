@@ -255,3 +255,63 @@ def test_unresolved_send_url_stops_explicitly() -> None:
         )
     # 未確定のまま1件も送っていないこと。
     assert transport.request_count == 0
+
+
+def test_a_graphql_payload_without_a_query_document_is_refused() -> None:
+    """**operationName と variables だけでは送れない。**
+
+    2026-08-23 時点の api.send.paid.payload_template がまさにこれだった。
+    ``assert_fully_filled`` は ``<...>`` の残りを見るが、**キーごと欠けている
+    ものは見えない** -- 「埋まっている」と判定されたまま、サーバに拒否される
+    payload が組み上がっていた。
+
+    穴の由来は偵察側にある。あの雛形を記録した回は「長いから」という理由で
+    query を落としていた。理由が「個人データだから」ではなく「長いから」
+    だったので、13.2 ではなくこちらの都合である。
+    """
+    import pytest
+
+    from jobmedley_scout.api.payloads import assert_sendable_graphql
+    from jobmedley_scout.errors import ConfigError
+
+    broken = {
+        "operationName": "SendSingleScout",
+        "variables": {"input": {"memberId": "1", "scoutMessage": "本文"}},
+    }
+    with pytest.raises(ConfigError, match="問い合わせ文"):
+        assert_sendable_graphql(broken, used_by="test")
+
+
+def test_a_graphql_payload_with_a_query_document_passes() -> None:
+    from jobmedley_scout.api.payloads import assert_sendable_graphql
+
+    ok = {
+        "operationName": "SendSingleScout",
+        "query": "mutation SendSingleScout($input: MessageScoutSendInput!) { x }",
+        "variables": {"input": {}},
+    }
+    assert_sendable_graphql(ok, used_by="test")
+
+
+def test_a_rest_payload_is_not_dragged_into_the_graphql_check() -> None:
+    """**判定できないものは通す側へ倒す。**
+
+    ここは送信の可否ではなく「明らかに送れない形」の門である。GraphQL でない
+    payload まで撥ねると、REST の送信路を持つ媒体で門が誤作動する。
+    """
+    from jobmedley_scout.api.payloads import assert_sendable_graphql
+
+    assert_sendable_graphql({"member_id": "1", "message": "本文"}, used_by="test")
+
+
+def test_an_empty_query_string_is_refused_like_a_missing_one() -> None:
+    """空文字は「在る」ではない。GraphQL は受け付けない。"""
+    import pytest
+
+    from jobmedley_scout.api.payloads import assert_sendable_graphql
+    from jobmedley_scout.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="問い合わせ文"):
+        assert_sendable_graphql(
+            {"operationName": "SendSingleScout", "query": "   ", "variables": {}}, used_by="test"
+        )

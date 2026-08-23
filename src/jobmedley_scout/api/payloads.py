@@ -143,6 +143,42 @@ def assert_fully_filled(payload: Mapping[str, Any], *, used_by: str) -> None:
         )
 
 
+#: GraphQL の要求に **必ず** 要るキー。
+#:
+#: 仕様上、``query`` の無い GraphQL リクエストは受け付けられない。
+GRAPHQL_REQUIRED_KEY = "query"
+
+
+def assert_sendable_graphql(payload: Mapping[str, Any], *, used_by: str) -> None:
+    """Refuse a GraphQL payload with no query document. **貼り忘れを送らせない。**
+
+    :func:`assert_fully_filled` は ``<...>`` の残りを見るが、**キーごと欠けている
+    ものは見えない**。2026-08-23 時点の ``api.send.paid.payload_template`` が
+    まさにそれで、``operationName`` と ``variables`` は在るのに ``query`` が
+    無かった -- 貼っても送れない雛形が「埋まっている」と判定されていた。
+
+    穴の由来は偵察側にある。あの雛形を記録した回の偵察は「長いから」という理由で
+    ``query`` を落としていた (:mod:`recon.payload_shape` の冒頭)。理由が
+    「個人データだから」ではなく「長いから」だったので、13.2 ではなくこちらの
+    都合である。
+
+    **``operationName`` があるのに ``query`` が無い形だけを撥ねる。** GraphQL で
+    ないpayload (REST) を巻き込まないためで、判定できないものは通す側へ倒す --
+    ここは送信の可否ではなく「明らかに送れない形」の門である。
+    """
+    if "operationName" not in payload:
+        return
+    document = payload.get(GRAPHQL_REQUIRED_KEY)
+    if isinstance(document, str) and document.strip():
+        return
+    raise ConfigError(
+        f"{used_by}: GraphQL の payload に問い合わせ文 ({GRAPHQL_REQUIRED_KEY}) が"
+        f"ありません。operationName と variables だけでは送れません -- "
+        f"サーバは受け付けずに拒否します。"
+        f"**偵察 (recon follow-send) が封筒ごと記録した雛形で差し替えてください。**"
+    )
+
+
 def _substitute(node: object, values: Mapping[str, object]) -> object:
     if isinstance(node, str):
         # 値そのものが丸ごとプレースホルダなら、型を保ったまま差し替える
@@ -186,4 +222,7 @@ def build_send_payload(
     # **差し込み漏れは、ここで止める。** 通してしまうと記法そのものが媒体へ渡り、
     # 取り消せない送信になる (13.6)。
     assert_fully_filled(result, used_by=used_by)
+    # **キーごと欠けているものは、上の検査では見えない。** 問い合わせ文の無い
+    # GraphQL は送れないので、送る前に撥ねる。
+    assert_sendable_graphql(result, used_by=used_by)
     return result
