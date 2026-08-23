@@ -27,6 +27,19 @@ safety:
   # 構造でコストの上振れを止める。
   max_llm_requests_per_message: 6
 
+ingest:
+  # 画面「保存した検索条件」の1つ。**運用者が選ぶ番号である。**
+  # 2026-08-22 時点で使っているのは「実践会＿衛生士」で、
+  # nav.candidate_list_url の customer_search_condition_id と同じ値にする。
+  search_condition_id: "739599"
+  # 媒体の画面が引いている件数と揃えてある (pagination[limit]=25)。
+  page_size: 25
+  # **止め木であって目標件数ではない。** 目標は safety.ingest_cap が持つ。
+  max_pages: 20
+  # レジュメを取りに行くか。取らなければ個別化の材料 (こだわり条件・資格・
+  # 自己PR) が無いまま文面を書くことになる。
+  fetch_resumes: true
+
 send:
   # 枠ごとの上限 (9.7)。無料枠が有料枠の上限に食われないよう別建てにする。
   per_run_cap_paid: 20

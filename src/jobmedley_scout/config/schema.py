@@ -299,12 +299,36 @@ class IdConfig(BaseModel):
     observed_patterns: tuple[dict[str, str], ...]
 
 
+class IngestConfig(BaseModel):
+    """候補者をどの検索条件から、どれだけ取り込むか。
+
+    **保存した検索条件のIDが要る。** この媒体の一覧APIは
+    ``customer_search_condition_id`` で引く (config/site_coordinates.yaml の
+    api.candidate_list.payload_template)。運用者が画面で作った条件を指す番号なので、
+    座標 (媒体の作り) ではなく設定 (運用の選択) である。
+    """
+
+    model_config = _STRICT
+
+    #: 画面「保存した検索条件」の1つを指す番号。**運用者が選ぶ。**
+    search_condition_id: str
+    #: 1ページあたりの件数。媒体の画面は 25 で引いている。
+    page_size: int
+    #: 取りに行くページ数の上限。**無限ループの止め木** であって、目標件数では
+    #: ない -- 目標は safety.ingest_cap が持つ。
+    max_pages: int
+    #: レジュメを取りに行くか。**取らなければ個別化の材料が無い。**
+    #: 一覧だけで様子を見たいときのために切れるようにしてある。
+    fetch_resumes: bool
+
+
 class Config(BaseModel):
     """The whole behavior configuration."""
 
     model_config = _STRICT
 
     safety: SafetyConfig
+    ingest: IngestConfig
     send: SendConfig
     browser: BrowserConfig
     waits: WaitsConfig
