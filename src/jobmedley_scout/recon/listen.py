@@ -22,6 +22,7 @@ from jobmedley_scout.recon.api_shape import (
 )
 from jobmedley_scout.recon.gate import is_own_origin
 from jobmedley_scout.recon.open_structure import redact_url
+from jobmedley_scout.recon.payload_shape import shape_of
 from jobmedley_scout.recon.resume_keys import KeyPath
 
 #: 聴く対象。**媒体自身のオリジンなら全部。**
@@ -91,8 +92,23 @@ class ResponseShapeListener:
         request_keys: tuple[KeyPath, ...] = ()
         request_reason = ""
         request_dropped = 0
+        request_template = ""
         if request_body and method not in ("GET", "HEAD"):
             request_keys, request_reason, request_dropped = describe_response(request_body)
+            # **GraphQL は封筒ごと残す。** キーパスだけでは呼べない -- 問い合わせ文
+            # (``query``) の *中身* が要る。GraphQL は query の無いリクエストを
+            # 受け付けないからである。
+            #
+            # 送信payloadで一度この穴を開けている。あのときは「長いから」という
+            # 理由で query を落としており、貼っても送れない雛形になっていた
+            # (:mod:`recon.payload_shape` の冒頭)。
+            #
+            # ``sentinel=""`` で呼ぶと、目印の名指しをせずに **variables の値だけ**
+            # を種別へ伏せる。``query`` と ``operationName`` はスキーマの語彙で
+            # あって個人データではない (13.2)。
+            if "graphql" in url.lower():
+                shape = shape_of(request_body, None, "")
+                request_template = shape.template if shape else ""
 
         content_type = ""
         with suppress(Exception):
@@ -140,6 +156,7 @@ class ResponseShapeListener:
                 request_keys=request_keys,
                 request_unread_reason=request_reason,
                 request_dropped_keys=request_dropped,
+                request_template=request_template,
             )
         )
 

@@ -152,6 +152,12 @@ class ObservedCall:
     request_unread_reason: str = ""
     #: 要求本文で個人データに見えたので落としたキーの数。
     request_dropped_keys: int = 0
+    #: GraphQL の **封筒そのもの** (``variables`` の値だけ種別へ伏せたもの)。
+    #:
+    #: キーパスだけでは呼べない。GraphQL は ``query`` の無いリクエストを受け付け
+    #: ないので、問い合わせ文の *中身* が要る。``query`` と ``operationName`` は
+    #: スキーマの語彙であって個人データではない (13.2)。
+    request_template: str = ""
 
     def search_id_candidates(self) -> tuple[str, ...]:
         """Key paths whose **name** suggests the search identifier. **Pure.**"""
@@ -181,6 +187,14 @@ class ObservedCall:
         out.extend(f"      {path.render()}" for path in self.request_keys)
         if self.request_dropped_keys:
             out.append(f"    要求本文で落としたキー: {self.request_dropped_keys} 個")
+        return tuple(out)
+
+    def template_lines(self) -> tuple[str, ...]:
+        """The GraphQL envelope, ready to paste. **値は入っていない。**"""
+        if not self.request_template:
+            return ()
+        out = ["    **貼れる雛形** (variables の値は種別に伏せてあります -- 13.2):"]
+        out.extend(f"      {line}" for line in self.request_template.splitlines())
         return tuple(out)
 
     def render(self) -> str:

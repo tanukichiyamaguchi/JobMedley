@@ -24,6 +24,7 @@ on:
           - follow-send
           - observe-api
           - observe-resume
+          - introspect
           - read-bundle
           - preflight
           - coordinates
@@ -167,6 +168,14 @@ jobs:
       - name: Observe resume (send blocked)
         if: inputs.command == 'observe-resume'
         run: scout recon observe-resume
+
+      # **尋ねるだけ。** GraphQL の introspection は query なので、送信は起こす
+      # 操作そのものが存在しない。返るのは型とフィールドの名前だけで、誰かの値
+      # ではない (13.2)。配信ファイルには「何という型か」までしか書かれていない
+      # ので、dryRun の有無はここでしか決着しない。
+      - name: Introspect send input (query only)
+        if: inputs.command == 'introspect'
+        run: scout recon introspect
 
       - name: Observe list
         if: inputs.command == 'observe-list'

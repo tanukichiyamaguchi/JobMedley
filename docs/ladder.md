@@ -753,30 +753,66 @@ employmentStatus / recentlyRegistered の5つだけで、名前の欄は101キ�
 
 ### dryRun は「無い」ではなく「未確認」である
 
-段階3が観測した `SendSingleScoutInput` の中身は5つで、dryRun 相当は無い。
+段階3が観測した送信の `variables.input` の中身は5つで、dryRun 相当は無い。
 
 ```
 jobOfferId  jobOfferSalaryId  memberId  scoutMessage  searchUuid
 ```
 
 **これが言えること**: 媒体自身のクライアントは dryRun を使っていない。
-**言えないこと**: サーバの `SendSingleScoutInput` が受け付けないこと。
+**言えないこと**: サーバの入力型が受け付けないこと。
 
 観測したのは「画面が投げた1本のリクエスト」であって、スキーマではない。
-**推測で「無い」と書かない** (原則3)。
+**推測で「無い」と書かない**（原則3）。
 
-### 4-1. スキーマを読む (通信はGETだけ・押下なし)
-
-配信されている JavaScript には GraphQL の操作定義が入っている。
-`SendSingleScoutInput` に dryRun 相当のフィールドがあるかは、**そこを読めば
-送信せずに分かる**。
+### 4-1. 配信ファイルを読む — そして、この経路では答えが出ないと分かった
 
 ```
 Actions → Recon (manual) → read-bundle
 ```
 
-- 見つかった → 4-2 でそれを使う。**送らずに応答の形が分かる**
-- 見つからない → 4-2 は使えない。4-3 へ進む
+実測27回目の結果。**操作は7個見つかり、うち mutation は2個だった。**
+
+```
+mutation SendSingleScout($input: MessageScoutSendInput!)
+mutation BulkSendScout($input: MessageScoutBulkSendInput!)
+```
+
+ここで2つ分かった。
+
+**1. 入力型の名前は `MessageScoutSendInput` である。** このドキュメントは
+`SendSingleScoutInput` と書いていたが、それは操作名から推測した名前で、
+**実際の型名ではなかった**。訂正した。
+
+**2. 一括送信の経路が在る。** `BulkSendScout` / `MessageScoutBulkSendInput` —
+画面の「スカウトを送る(0/50)」がこれである。存在は確定したが、payload も
+成功判定も未観測である。
+
+**そして、この経路では dryRun の問いに答えられない。**
+
+配信ファイルに入っているのは **操作の定義（クエリ文書）であって、スキーマでは
+ない**。文書に出てくるのは変数の *型名* だけで、その型が **どんなフィールドを
+持つか** は書かれていない。`MessageScoutSendInput` に dryRun 相当が在るかは、
+ここからは分からない。
+
+段階4-1 の前提そのものが誤っていた。読めば分かると考えたが、読めるのは
+「何という型か」までである。
+
+### 4-1b. スキーマに直接尋ねる (introspection・押下なし・読み取りのみ)
+
+GraphQL には「このサーバはどんな型を受け付けるか」を尋ねる標準の問い合わせが
+ある。**これは query であって mutation ではない** ので、送信は起こらない。
+
+```
+Actions → Recon (manual) → introspect
+```
+
+- 型が返った → `MessageScoutSendInput` のフィールド名が分かる。dryRun の有無が
+  **送らずに** 決着する
+- introspection が無効だった → それも確定した答えである。4-2 は使えないので
+  4-3（少件数の実送信）へ進む
+
+どちらに転んでも、**推測ではなく観測で次が決まる。**
 
 ### 4-2. 認証失敗の形を実測する (読み取りだけ・副作用なし)
 

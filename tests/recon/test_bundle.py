@@ -226,8 +226,16 @@ def test_scripts_skipped_by_the_cap_are_reported() -> None:
     assert "上限で読まなかった: 10 個" in report
 
 
-def test_an_unexpected_non_get_is_reported() -> None:
-    """GETしかしない設計なので、遮断が発生したこと自体が観測である。"""
+def test_the_pages_own_non_gets_are_reported_as_blocked() -> None:
+    """**「想定外」ではない。** 画面を開けば単一ページアプリが自分の通信を始める。
+
+    以前ここには「GETだけの設計なので、非GETが0でないこと自体が観測である」と
+    書いてあった。実測27回目がその前提を否定した -- 遮断は329件止めており、
+    それは異常ではなくこの媒体の画面が普通に出す量である。
+
+    数えているのは「こちらが出した非GET」ではなく「画面が出して遮断が止めた
+    非GET」で、後者は0にならない。
+    """
     report = BundleObservation(
         requested_url=LIST_URL,
         origin=ORIGIN,
@@ -237,4 +245,23 @@ def test_an_unexpected_non_get_is_reported() -> None:
         blocked_non_get=2,
     ).render()
 
-    assert "想定外: 非GETを 2 件遮断しました" in report
+    assert "画面が出した非GETを 2 件 **止めました**" in report
+    assert "こちらが出したものではありません" in report
+    assert "想定外" not in report, (
+        "329件を「想定外」と呼ぶ報告に戻っています。読む人が毎回驚くだけで、"
+        "本当の異常が埋もれます。"
+    )
+
+
+def test_a_run_with_no_blocked_traffic_says_nothing_alarming() -> None:
+    """0件なら黙る。**在ることが正常なので、無いことも正常である。**"""
+    report = BundleObservation(
+        requested_url=LIST_URL,
+        origin=ORIGIN,
+        html_read=True,
+        scripts_found=1,
+        scripts_read=1,
+        blocked_non_get=0,
+    ).render()
+
+    assert "止めました" not in report
