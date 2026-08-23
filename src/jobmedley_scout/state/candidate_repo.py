@@ -23,11 +23,13 @@ def upsert_candidate(
     now = isoformat_utc(clock.now())
     connection.execute(
         "INSERT INTO candidates ("
-        "  candidate_id, raw_id_observed, display_name, name_norm, ingested_at, source"
-        ") VALUES (?, ?, ?, ?, ?, ?) "
+        "  candidate_id, raw_id_observed, display_name, name_norm, member_code,"
+        "  ingested_at, source"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(candidate_id) DO UPDATE SET "
         "  display_name = excluded.display_name, "
         "  name_norm = excluded.name_norm, "
+        "  member_code = excluded.member_code, "
         "  raw_id_observed = excluded.raw_id_observed",
         (
             candidate.candidate_id,
@@ -43,6 +45,9 @@ def upsert_candidate(
             # 例外にするので、空文字が名前として使われる経路は無い。
             candidate.display_name or "",
             normalize_name(candidate.display_name or ""),
+            # **氏名の代わりではない。** 画面に出る番号で、宛名に使う
+            # (運用者のプロンプト STEP3 (2))。
+            candidate.member_code,
             now,
             source,
         ),
@@ -84,6 +89,21 @@ def resolve_alias(connection: sqlite3.Connection, observed: str) -> str | None:
         if row is not None:
             return str(row["candidate_id"])
     return None
+
+
+def member_code_of(connection: sqlite3.Connection, candidate_id: str) -> str | None:
+    """The displayed member number, or ``None`` if it was never observed.
+
+    **``None`` と空文字を区別する。** 空文字は「観測したが空だった」で、
+    ``None`` は「取れなかった」である -- 宛名に使えないのは同じだが、
+    報告で理由が変わる。
+    """
+    row = connection.execute(
+        "SELECT member_code FROM candidates WHERE candidate_id = ?", (candidate_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0] if isinstance(row[0], str) else None
 
 
 def candidate_ids(connection: sqlite3.Connection) -> tuple[str, ...]:
