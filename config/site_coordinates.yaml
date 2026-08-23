@@ -292,20 +292,26 @@ api.resume.url_pattern: "https://customers.job-medley.com/api/customers/graphql/
 
 # レジュメ取得の要求本文の雛形。
 #
-# 形は観測した (5キー)::
+# 2026-08-22 observe-resume 3回目で **封筒ごと観測した**。値は入っていない --
+# variables の中身は目印1つだけである。
 #
-#   { "operationName": <string>,
-#     "variables": { "input": { "id": <number> } },
-#     "query": <string> }
+# **中身は GraphQL の問い合わせ文で、スキーマの語彙である。** 誰かの値ではない
+# ので 13.2 に触れない。長いのは fragment を15個展開しているためで、媒体自身の
+# クライアントが送っている文書をそのまま使っている。**自分で短く書き直さない** --
+# ``... on AppliedMember`` / ``... on UnAppliedMember`` の出し分けを間違えると
+# 静かに空の応答になる (後述)。
 #
-# **``query`` の中身をまだ持っていない。** キーが在ることは分かったが、値
-# (問い合わせ文そのもの) は観測していない。GraphQL は query の無いリクエストを
-# 受け付けないので、**URLが決まっても呼べない**。送信payloadで一度同じ穴を
-# 開けている (api.send.paid.payload_template の注記)。
-#
-# 次: ``scout recon read-bundle`` が配信JSから問い合わせ文を読む。GETだけで、
-# ボタンを1つも押さない。
-api.resume.payload_template: UNRESOLVED
+# 差し替えるのは ``{{MEMBER_ID}}`` だけである。
+api.resume.payload_template: |
+  {
+    "operationName": "MemberOnScoutProfileModalOfDesktop",
+    "query": "query MemberOnScoutProfileModalOfDesktop($input: MemberGetInput!) {\n  memberGet(input: $input) {\n    member {\n      id\n      ...CareersOnMemberProfileOfPC\n      ...ApplicationsOnMemberProfileOfPC\n      ...ProfileOnMemberProfileOfPC\n      ...FootOnMemberProfileOfPC\n      ...ScoutHistoriesOnMember\n      __typename\n    }\n    __typename\n  }\n}\n\nfragment CareersOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    careers {\n      id\n      position\n      jobContent\n      companyName\n      jobSubject\n      employmentType\n      businessContent {\n        facilityForm {\n          id\n          name\n          __typename\n        }\n        features {\n          id\n          name\n          __typename\n        }\n        __typename\n      }\n      retiredDate\n      startedDate\n      __typename\n    }\n    __typename\n  }\n  ... on UnAppliedMember {\n    careers {\n      id\n      position\n      jobContent\n      employmentType\n      businessContent {\n        facilityForm {\n          id\n          name\n          __typename\n        }\n        features {\n          id\n          name\n          __typename\n        }\n        __typename\n      }\n      retiredDate\n      startedDate\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n\nfragment ApplicationsOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    applications {\n      id\n      createdAt\n      jobCategoryName\n      facilityName\n      employmentTypes\n      source\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n\nfragment ProfileOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    resumeUrl\n    careerSheetUrl\n    __typename\n  }\n  ...BasicInformationOnMemberProfileOfPC\n  ...DesiredConditionOnMemberProfileOfPC\n  ...PersonalityOnMemberProfileOfPC\n  __typename\n}\n\nfragment BasicInformationOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    appeal {\n      ...CommonBasicInfoAppealOnMemberProfileOfPC\n      __typename\n    }\n    personalInformation {\n      name {\n        firstName\n        lastName\n        firstNameKana\n        lastNameKana\n        __typename\n      }\n      address {\n        prefecture {\n          id\n          name\n          __typename\n        }\n        city {\n          id\n          name\n          __typename\n        }\n        town\n        building\n        __typename\n      }\n      age\n      gender\n      tel\n      contactNotes\n      numberOfDependents\n      hasSpouse\n      employmentStatus\n      recentlyRegistered\n      __typename\n    }\n    latestSalary {\n      salaryType\n      salary\n      __typename\n    }\n    latestEducationBackground {\n      id\n      major\n      status\n      schoolName\n      schoolType\n      department\n      graduatedDate\n      __typename\n    }\n    __typename\n  }\n  ... on UnAppliedMember {\n    appeal {\n      ...CommonBasicInfoAppealOnMemberProfileOfPC\n      __typename\n    }\n    personalInformation {\n      address {\n        prefecture {\n          id\n          name\n          __typename\n        }\n        city {\n          id\n          name\n          __typename\n        }\n        __typename\n      }\n      age\n      gender\n      employmentStatus\n      recentlyRegistered\n      __typename\n    }\n    latestSalary {\n      salaryType\n      salary\n      __typename\n    }\n    latestEducationBackground {\n      id\n      major\n      status\n      schoolType\n      department\n      graduatedDate\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n\nfragment CommonBasicInfoAppealOnMemberProfileOfPC on MemberAppeal {\n  isUnqualified\n  qualifications(orderByQualificationId: true) {\n    id\n    name\n    isScheduled\n    acquisitionYear\n    acquisitionMonth\n    __typename\n  }\n  careerJobCategories {\n    jobCategoryId\n    label\n    careerYear\n    __typename\n  }\n  __typename\n}\n\nfragment DesiredConditionOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    desiredCondition {\n      id\n      ...CommonDesiredConditionOnMemberProfileOfPC\n      __typename\n    }\n    favoriteJobOffers {\n      id\n      ...CommonFavoriteJobOfferOnMemberProfileOfPC\n      __typename\n    }\n    scoutedJobOffers\n    __typename\n  }\n  ... on UnAppliedMember {\n    desiredCondition {\n      id\n      ...CommonDesiredConditionOnMemberProfileOfPC\n      __typename\n    }\n    favoriteJobOffers {\n      id\n      ...CommonFavoriteJobOfferOnMemberProfileOfPC\n      __typename\n    }\n    scoutedJobOffers\n    __typename\n  }\n  __typename\n}\n\nfragment CommonDesiredConditionOnMemberProfileOfPC on MemberDesiredCondition {\n  id\n  jobCategories {\n    id\n    yearsOfExperience\n    jobCategory {\n      id\n      name\n      __typename\n    }\n    __typename\n  }\n  workplaces {\n    id\n    prefecture {\n      id\n      name\n      __typename\n    }\n    city {\n      id\n      name\n      __typename\n    }\n    __typename\n  }\n  joinTime {\n    id\n    label\n    updatedAt\n    __typename\n  }\n  employmentTypes\n  annualSalary\n  features {\n    id\n    name\n    __typename\n  }\n  __typename\n}\n\nfragment CommonFavoriteJobOfferOnMemberProfileOfPC on FavoriteJobOffer {\n  id\n  jobOffer {\n    id\n    jobCategory {\n      id\n      name\n      __typename\n    }\n    facility {\n      id\n      name\n      prefecture {\n        id\n        name\n        __typename\n      }\n      __typename\n    }\n    salaries {\n      id\n      employmentType\n      __typename\n    }\n    altJobCategoryName\n    status\n    favoriteCount\n    refuseScoutMemberIds\n    __typename\n  }\n  __typename\n}\n\nfragment PersonalityOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    appeal {\n      ...CommonPersonalityOnMemberProfileOfPC\n      __typename\n    }\n    __typename\n  }\n  ... on UnAppliedMember {\n    appeal {\n      ...CommonPersonalityOnMemberProfileOfPC\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n\nfragment CommonPersonalityOnMemberProfileOfPC on MemberAppeal {\n  selfPr\n  __typename\n}\n\nfragment FootOnMemberProfileOfPC on Member {\n  id\n  ... on AppliedMember {\n    ...FootResumeOnMemberProfileOfPC\n    ...FootCareersheetOnMemberProfileOfPC\n    __typename\n  }\n  __typename\n}\n\nfragment FootResumeOnMemberProfileOfPC on AppliedMember {\n  id\n  resumeUrl\n  __typename\n}\n\nfragment FootCareersheetOnMemberProfileOfPC on AppliedMember {\n  id\n  careerSheetUrl\n  __typename\n}\n\nfragment ScoutHistoriesOnMember on Member {\n  id\n  ... on AppliedMember {\n    scoutHistories {\n      ...CommonScoutHistoryOnMember\n      __typename\n    }\n    __typename\n  }\n  ... on UnAppliedMember {\n    scoutHistories {\n      ...CommonScoutHistoryOnMember\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n\nfragment CommonScoutHistoryOnMember on ScoutHistory {\n  jobOffer {\n    id\n    facility {\n      id\n      name\n      __typename\n    }\n    jobCategory {\n      id\n      name\n      __typename\n    }\n    altJobCategoryName\n    salaries {\n      id\n      employmentType\n      __typename\n    }\n    __typename\n  }\n  latestSentAt\n  sentCount\n  latestRefusedAt\n  __typename\n}\n",
+    "variables": {
+      "input": {
+        "id": "{{MEMBER_ID}}"
+      }
+    }
+  }
 
 # ------------------------------------------------------------------------
 # **レジュメの応答で新たに分かったこと** (2026-08-22 observe-resume 2回目)。
@@ -323,6 +329,15 @@ api.resume.payload_template: UNRESOLVED
 #    **latestRefusedAt は画面に出ていなかった。** 候補者はスカウトを辞退できる。
 #    辞退された相手へ送り続けるのは最悪の失敗なので、送信前判定に必ず入れる。
 #    ただし **null 以外の値をまだ見ていない** ので、形も意味も推測しない (原則3)。
+#
+#    **辞退はもう1箇所にも在る。** 問い合わせ文の求人側にこれがある::
+#
+#      jobOffer.refuseScoutMemberIds
+#
+#    「この求人へのスカウトを辞退した会員ID」の列である。scoutHistories が
+#    候補者側から見た辞退で、こちらは求人側から見た辞退である。**同じ事実を
+#    2方向から持っているのか、別の事実なのかは確認していない。**
+#    突き合わせるまでどちらか一方を根拠にしない (原則3)。
 #
 # 2. **こだわり条件が id 付きで取れる**::
 #
@@ -394,10 +409,53 @@ api.resume.payload_template: UNRESOLVED
 # ------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------
+# **なぜ氏名が取れないのか** (2026-08-22 問い合わせ文を読んで分かった)。
+#
+# 画面には「（未応募のため非表示）」と出るので「値が伏せられている」と書いて
+# いた。**仕組みが違った。** 問い合わせ文にはこう書いてある::
+#
+#     fragment BasicInformationOnMemberProfileOfPC on Member {
+#       ... on AppliedMember {
+#         personalInformation {
+#           name { firstName lastName firstNameKana lastNameKana }
+#           address { ... town building }
+#           age gender tel contactNotes numberOfDependents hasSpouse
+#           employmentStatus recentlyRegistered
+#         }
+#         latestEducationBackground { ... schoolName ... }
+#         resumeUrl careerSheetUrl
+#         applications { ... }
+#       }
+#       ... on UnAppliedMember {
+#         personalInformation {
+#           address { prefecture city }     # town も building も無い
+#           age gender employmentStatus recentlyRegistered
+#         }
+#         latestEducationBackground { ... }  # schoolName が無い
+#       }
+#     }
+#
+# **Member は AppliedMember と UnAppliedMember の2種類である。** 氏名・電話番号・
+# 番地・学校名・履歴書URL・応募履歴は **AppliedMember にしか無い**。スカウトの
+# 相手は未応募なので、これらは伏せられているのではなく **返ってこない**。
+#
+# 画面の「（未応募のため非表示）」は、媒体のUIが欄を残して埋めている文言である。
+#
+# **結論は変わらない** (氏名は取れない) が、理由が違う。取れるようになる条件も
+# 違う -- 候補者が応募すれば AppliedMember になり、氏名が返る。
+#
+# **問い合わせ文を自分で短く書き直さないこと。** 出し分け (``... on``) を落とすと
+# 応答が静かに空になる。媒体自身のクライアントが送る文書をそのまま使う。
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
 # **伏せ字を値として扱わないこと。**
 #
-# 氏名と電話番号は欄が在るのに「（未応募のため非表示）」が入る。自己PRと
-# 気になるは未入力だと「未入力」が入る。**どれも空文字ではない。**
+# 自己PRと気になるは未入力だと画面に「未入力」と出る。**それが API から来た
+# 文字列なのか、UIが埋めた文言なのかは確認していない** -- 観測したキーは
+# ``appeal.selfPr: <string>`` で、空文字も「文字列」と数えられるからである。
+#
+# どちらであっても、**素直に写せば「未入力」が自己PRとしてモデルへ渡る**。
 #
 # 素直に写せば display_name に「（未応募のため非表示）」が入り、
 # generation.facts はそれを値として渡し、モデルは「（未応募のため非表示）様」と
@@ -490,6 +548,39 @@ api.idempotency_header: null
 # 遮断された計測ビーコン7件と、推測ではなく観測で区別できている)。
 # **この通信は中断済みで、送信は行われていない。**
 api.send.paid.url_pattern: "https://customers.job-medley.com/api/customers/graphql/SendSingleScout"
+
+# ------------------------------------------------------------------------
+# **送信の入力型** (2026-08-23 introspect 実測29回目)。スキーマが直接答えた。
+#
+#   MessageScoutSendInput
+#     memberId          Id!
+#     jobOfferId        Id!
+#     jobOfferSalaryId  Id!
+#     scoutMessage      String!
+#     searchUuid        String       <- **感嘆符が無い = 省略できる**
+#
+#   MessageScoutBulkSendInput
+#     memberIds         [?]!         <- 後述
+#     jobOfferId        Id!
+#     jobOfferSalaryId  Id!
+#     scoutMessage      String!
+#     searchUuid        String
+#
+# **dryRun 相当は無い。** これは推測ではなく確定である -- スキーマが答えた。
+# 段階4-2 (dryRun での検証) は使えないので、docs/ladder.md の 4-3 (少件数の
+# 実送信) へ進む。
+#
+# **searchUuid は必須ではなかった。** 以前ここには「一覧の応答から持ち出せなければ
+# 送信は組み立てられない」と書いていたが、それは観測した1本のリクエストに載って
+# いたことからの推測だった。スキーマ上は省略できる。
+# **ただし媒体自身のクライアントは常に送っている** ので、取れるときは送る --
+# 省いたときにサーバが何をするかは観測していない (集計が変わるかもしれない)。
+#
+# ``[?]`` はこちらの問い合わせの深さ不足である。``type { name kind ofType {...} }``
+# と2段しか辿っていないので、``[Id!]!`` のような3段の型が解決できていない。
+# **媒体の事実ではなくこちらの限界なので、そう書いてある。** 一括送信を使うときに
+# 深さを足して確かめること。
+# ------------------------------------------------------------------------
 
 # **成功とみなすHTTPステータスの集合。
 # ** エンドポイントごとに違う (参照実装では 200 と 201 が混在した、6.2)。
@@ -718,8 +809,20 @@ resume.fields.desired_occupations: "data.memberGet.member.desiredCondition.jobCa
 # 職歴。実画面の「職務経歴」タブの中身で、**同じ応答に載っている**
 # (別の通信は要らなかった)。観測した候補者は空配列で、一覧の
 # members[].has_careers が false だったことと一致する。
-# **中身の形は未観測である** (空だったため)。埋まっている候補者で
-# 確認するまで、要素のキーは推測しない (原則3)。
+#
+# **要素の形は問い合わせ文から分かった** (2026-08-23、応答ではなく要求から)::
+#
+#   careers[].id / .position / .jobContent / .employmentType
+#   careers[].businessContent.facilityForm { id name }
+#   careers[].businessContent.features[] { id name }
+#   careers[].retiredDate / .startedDate
+#   careers[].companyName / .jobSubject   <- **AppliedMember にしか無い**
+#
+# スカウトの相手は未応募なので、勤務先名 (companyName) と職務内容の見出し
+# (jobSubject) は返らない。**「前職の◯◯様で」と書けない。**
+#
+# なお値そのものは1件も見ていない (観測した候補者は職歴が空だった)。
+# 形は要求文書に書いてあるので推測ではないが、**中身の実データは未観測である**。
 resume.fields.employments: "data.memberGet.member.careers"
 
 # 学歴リストのキーパス。

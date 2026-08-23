@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -35,16 +36,76 @@ def test_the_resume_url_is_the_profile_modal_query() -> None:
     assert _coordinates()["api.resume.url_pattern"] == RESUME_URL
 
 
-def test_the_resume_cannot_be_called_until_the_query_document_is_known() -> None:
+def test_the_resume_envelope_is_recorded_and_parses() -> None:
     """**URLだけでは呼べない。** GraphQL は query の無いリクエストを受け付けない。
 
-    送信 payload で一度同じ穴を開けている。埋まったらこの試験を消すこと --
-    消すのは「読めそう」と思ったときではなく、**問い合わせ文を実測したとき**である。
+    実測28回目で封筒ごと観測した。差し替えるのは会員IDだけである。
     """
-    from jobmedley_scout.config.coordinates import REQUIRED_BY_COMMAND
+    template = _coordinates()["api.resume.payload_template"]
+    assert isinstance(template, str)
+    body = json.loads(template)
+    assert body["operationName"] == "MemberOnScoutProfileModalOfDesktop"
+    assert body["variables"] == {"input": {"id": "{{MEMBER_ID}}"}}
+    assert body["query"].startswith(
+        "query MemberOnScoutProfileModalOfDesktop($input: MemberGetInput!)"
+    )
 
-    assert _coordinates()["api.resume.payload_template"] == "UNRESOLVED"
-    assert "api.resume.payload_template" in REQUIRED_BY_COMMAND["ingest"]
+
+def test_the_envelope_carries_no_mutation() -> None:
+    """**レジュメの取得は読み取りである。** ここに mutation が混ざれば副作用が出る。"""
+    body = json.loads(str(_coordinates()["api.resume.payload_template"]))
+    assert "mutation" not in body["query"]
+
+
+#: 問い合わせ文が展開している fragment。**1つでも欠ければ応答が変わる。**
+REQUIRED_FRAGMENTS: tuple[str, ...] = (
+    "CareersOnMemberProfileOfPC",
+    "ProfileOnMemberProfileOfPC",
+    "BasicInformationOnMemberProfileOfPC",
+    "CommonBasicInfoAppealOnMemberProfileOfPC",
+    "DesiredConditionOnMemberProfileOfPC",
+    "CommonDesiredConditionOnMemberProfileOfPC",
+    "CommonPersonalityOnMemberProfileOfPC",
+    "ScoutHistoriesOnMember",
+    "CommonScoutHistoryOnMember",
+)
+
+
+@pytest.mark.parametrize("fragment", REQUIRED_FRAGMENTS)
+def test_every_fragment_the_response_depends_on_is_present(fragment: str) -> None:
+    """**自分で短く書き直さないこと。**
+
+    問い合わせ文は媒体自身のクライアントが送っている文書そのものである。
+    短くするために fragment を落とすと、その分だけ応答が静かに減る -- 減った
+    ことは例外にならず、「その候補者にはその項目が無かった」に見える (原則2)。
+    """
+    body = json.loads(str(_coordinates()["api.resume.payload_template"]))
+    assert f"fragment {fragment} on" in body["query"]
+
+
+def test_the_applied_and_unapplied_variants_are_both_kept() -> None:
+    """**Member は2種類ある。** 出し分けを落とすと応答が静かに空になる。
+
+    ``careers`` も ``desiredCondition`` も ``Member`` 直下ではなく、
+    ``AppliedMember`` / ``UnAppliedMember`` の各々に生えている。
+    """
+    body = json.loads(str(_coordinates()["api.resume.payload_template"]))
+    assert "... on AppliedMember" in body["query"]
+    assert "... on UnAppliedMember" in body["query"]
+
+
+def test_why_the_name_is_missing_is_recorded_as_a_schema_fact() -> None:
+    """**「伏せられている」ではなく「返ってこない」。**
+
+    画面の「（未応募のため非表示）」から「値が伏せられている」と書いていたが、
+    問い合わせ文を読んで仕組みが違うと分かった -- 氏名は AppliedMember にしか
+    無く、スカウトの相手は未応募なので **フィールドごと返らない**。
+
+    結論 (氏名は取れない) は変わらないが、取れるようになる条件が違う。
+    """
+    text = COORDINATES.read_text(encoding="utf-8")
+    assert "AppliedMember にしか無い" in text
+    assert "伏せられているのではなく **返ってこない**" in text
 
 
 # ---------------------------------------------------------------------------

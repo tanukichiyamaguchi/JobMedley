@@ -814,6 +814,30 @@ Actions → Recon (manual) → introspect
 
 どちらに転んでも、**推測ではなく観測で次が決まる。**
 
+#### 実測29回目の結果 — 型が返った。**dryRun は無い**
+
+```
+MessageScoutSendInput            MessageScoutBulkSendInput
+  memberId          Id!            memberIds         [?]!
+  jobOfferId        Id!            jobOfferId        Id!
+  jobOfferSalaryId  Id!            jobOfferSalaryId  Id!
+  scoutMessage      String!        scoutMessage      String!
+  searchUuid        String         searchUuid        String
+```
+
+**dryRun 相当はありません。** スキーマが答えた以上、これは推測ではなく確定です。
+**段階4-2 は使えません。4-3（少件数の実送信）が唯一の道です。**
+
+**`searchUuid` は必須ではありませんでした。** 感嘆符が無い＝省略できる。以前
+「一覧の応答から持ち出せなければ送信は組み立てられない」と書いていましたが、
+それは観測した1本のリクエストに載っていたことからの推測でした。ただし媒体自身の
+クライアントは常に送っているので、取れるときは送ります — 省いたときにサーバが
+何をするかは観測していません（集計が変わるかもしれない）。
+
+`[?]` はこちらの問い合わせの深さ不足で、**媒体の事実ではありません**。
+`type { name kind ofType {…} }` と2段しか辿っていないので `[Id!]!` のような
+3段の型が解けていません。一括送信を使うときに深さを足して確かめること。
+
 ### 4-2. 認証失敗の形を実測する (読み取りだけ・副作用なし)
 
 `api.auth_failure_codes` は **送信しなくても** 分かる。失効したセッションで
