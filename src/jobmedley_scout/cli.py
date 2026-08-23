@@ -181,6 +181,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         "dryrun": "dryrun",
     }.get(args.command)
 
+    if args.command == "ingest":
+        assert_ready_for(coordinates, "ingest")
+        return _dispatch_ingest(config, coordinates)
+
     if command_key is not None:
         assert_ready_for(coordinates, command_key)
         raise NotImplementedError(
@@ -194,6 +198,61 @@ def _dispatch(args: argparse.Namespace) -> int:
     parser_error = f"未実装のコマンド: {args.command}"
     print(parser_error, file=sys.stderr)
     return int(ExitCode.USAGE)
+
+
+def _dispatch_ingest(config: Config, coordinates: SiteCoordinates) -> int:
+    """候補者を取り込む。**認証済みブラウザの通信路をそのまま使う** (原則1)。
+
+    ブラウザを開くのは Cookie を載せるためだけで、DOM は1つも触らない。
+    ボタンも押さないので、送信は起こす操作そのものが存在しない。
+    """
+    from jobmedley_scout.api.client import JobMedleyApiClient
+    from jobmedley_scout.api.endpoints import build_endpoints
+    from jobmedley_scout.browser import session_store
+    from jobmedley_scout.browser.context import browser_context
+    from jobmedley_scout.browser.transport import PlaywrightTransport
+    from jobmedley_scout.clock import SystemClock
+    from jobmedley_scout.runtime.commands.ingest import ingest
+    from jobmedley_scout.state.db import open_state_db
+
+    # 12.7: **毎回シークレットから復元する。** 実行環境は使い捨てなので、
+    # 前回の実行が残したファイルを当てにできない。
+    _restore_session_from_secrets(config)
+    session = session_store.session_path(config.paths.credentials_dir)
+    if not session.exists():
+        print(
+            "保存セッションがありません。段階1からやり直してください。",
+            file=sys.stderr,
+        )
+        return int(ExitCode.AUTH_EXPIRED)
+
+    clock = SystemClock()
+    connection = open_state_db(config.paths.state_dir / "state.sqlite3", clock)
+    with browser_context(config.browser, storage_state=session) as (context, _page):
+        report = ingest(
+            JobMedleyApiClient(
+                PlaywrightTransport(context),
+                auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
+                idempotency_header=coordinates.optional_string("api.idempotency_header"),
+            ),
+            build_endpoints(coordinates),
+            coordinates,
+            config.ingest,
+            config.safety,
+            connection,
+            clock,
+        )
+    print(report.render())
+    # **取れなかったことを成功で終えない** (原則2)。0件と失敗を終了コードで分ける。
+    from jobmedley_scout.runtime.commands.ingest import IngestStage
+
+    stage = report.reached()
+    if stage is IngestStage.STORED:
+        return int(ExitCode.OK)
+    if stage is IngestStage.NO_ROWS:
+        # 届いてはいる。条件に合う候補者が居ないだけなので、異常ではない。
+        return int(ExitCode.OK)
+    return int(ExitCode.UNKNOWN)
 
 
 #: 偵察サブコマンドから必須座標集合への写像。``login`` と ``verify-session`` が
