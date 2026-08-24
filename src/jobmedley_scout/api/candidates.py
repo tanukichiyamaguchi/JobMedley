@@ -115,7 +115,13 @@ def candidate_from_row(row: Mapping[str, object]) -> Candidate | None:
     observed = str(raw)
     if not observed.strip():
         return None
-    return Candidate(candidate_id=observed, raw_id_observed=observed)
+    # **会員番号は別に持つ。** 画面に出る番号で、宛名に使う (プロンプト STEP3 (2))。
+    code = row.get("code")
+    return Candidate(
+        candidate_id=observed,
+        raw_id_observed=observed,
+        member_code=str(code) if isinstance(code, str | int) and str(code).strip() else None,
+    )
 
 
 def resume_from_response(

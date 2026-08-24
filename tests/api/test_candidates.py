@@ -271,3 +271,33 @@ def test_every_required_resume_axis_is_resolved() -> None:
 def test_value_at_follows_dictionaries_only(path: str, expected: object) -> None:
     """**配列は辿らない。** 辿ると「1件目だけ見た」のか分からなくなる。"""
     assert value_at(RESUME, path) == expected
+
+
+# ---------------------------------------------------------------------------
+# 会員番号: 氏名の代わりではないが、宛名には要る
+# ---------------------------------------------------------------------------
+
+
+def test_the_displayed_member_number_is_kept_apart_from_the_internal_id() -> None:
+    """**別物である。** 実測では id=3323741 に対して code="01613058" だった。
+
+    ``candidate_id`` は API が使う内部の番号、``member_code`` は運用者と候補者が
+    画面で目にする番号である。取り違えると、宛名に内部の番号が出る。
+    """
+    candidate = candidate_from_row({"id": 3323741, "code": "01613058"})
+    assert candidate is not None
+    assert candidate.candidate_id == "3323741"
+    assert candidate.member_code == "01613058"
+    # **氏名の欄には入らない。**
+    assert candidate.display_name is None
+
+
+def test_a_row_without_a_member_number_is_still_taken() -> None:
+    """**取れない候補者が居ても取り込みを止めない。**
+
+    止めると「1件も取れなかった」ことになり、静かなゼロ件に近づく。宛名に
+    使えるかどうかは本文の検査が判定する。
+    """
+    candidate = candidate_from_row({"id": 3323741})
+    assert candidate is not None
+    assert candidate.member_code is None

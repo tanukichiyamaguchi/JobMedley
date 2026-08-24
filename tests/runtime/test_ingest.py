@@ -278,3 +278,23 @@ def test_the_resume_facts_reach_the_database_rows() -> None:
 def test_skipping_resumes_says_so_rather_than_looking_like_zero() -> None:
     report, _transport, _connection = _run([_page(1), _page(0)])
     assert "取りに行っていません" in report.render()
+
+
+def test_the_member_number_survives_into_the_database() -> None:
+    """**取り込みと生成は別のプロセスである。**
+
+    途中で持ち回せるのはDBだけなので、宛名に使う番号をここに残さなければ
+    生成の時点で消えている。
+    """
+    from jobmedley_scout.state import candidate_repo
+
+    page = HttpResponse(
+        status=200,
+        body_text=json.dumps(
+            {"members": [{"id": 3323741, "code": "01613058"}], "search_uuid": "u", "total": 1}
+        ),
+    )
+    _report, _transport, connection = _run([page], config=_ingest_config(max_pages=1))
+    assert candidate_repo.member_code_of(connection, "3323741") == "01613058"
+    # **氏名の欄は空のまま。**
+    assert candidate_repo.display_name_of(connection, "3323741") == ""

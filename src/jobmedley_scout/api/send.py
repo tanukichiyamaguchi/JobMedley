@@ -18,6 +18,7 @@ from __future__ import annotations
 from jobmedley_scout.api.client import JobMedleyApiClient
 from jobmedley_scout.api.endpoints import Endpoint
 from jobmedley_scout.api.payloads import build_send_payload
+from jobmedley_scout.api.success import describe_failure
 from jobmedley_scout.config.placeholders import require
 from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.models.message import AssembledMessage
@@ -87,7 +88,10 @@ def send_message(
         succeeded=outcome.succeeded,
         http_status=outcome.status,
         platform_message_id=_extract_message_id(outcome.json_body()),
-        failure_reason=None if outcome.succeeded else f"HTTP {outcome.status}",
+        # **「HTTP 200」とだけ書かれた失敗記録を残さない。** 送信は GraphQL なので
+        # 失敗もステータスは 200 で来る。何本目の経路で落ちたかを書き残す
+        # (値は含めない -- 13.2)。
+        failure_reason=describe_failure(endpoint, outcome.status, outcome.json_body()),
         idempotency_key=reserved.idempotency_key,
     )
 
@@ -99,6 +103,13 @@ def _extract_message_id(body: object) -> str | None:
     ものを採用する** ような書き方はしない -- 当たってしまうと、それが正しいと
     誤認したまま運用に入る。素直に取れなければ None を返し、レポートには
     「媒体メッセージID未取得」と出す。
+
+    **2026-08-23 実測31回目: 送信の応答にメッセージIDは無い。** 観測した mutation
+    の選択集合は ``scoutedMemberId`` / ``errorMessage`` / ``__typename`` の3つで、
+    ``scoutedMemberId`` は **会員のID** であってメッセージのIDではない。ここへ
+    入れると、返信の突合 (10.2) が会員IDをメッセージIDと信じて回ることになる。
+    だから **入れない**。GraphQL の封筒には最上位の ``id`` も無いので、この関数は
+    送信路では素直に None を返す -- それが事実である。
     """
     if not isinstance(body, dict):
         return None

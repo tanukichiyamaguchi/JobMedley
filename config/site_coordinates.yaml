@@ -590,6 +590,13 @@ api.send.paid.url_pattern: "https://customers.job-medley.com/api/customers/graph
 # 応答本文の errors 配列にエラーを入れる作りが普通である。ステータスコードだけを
 # 見る判定は **失敗を成功と数える** -- 原則2 の「静かなゼロ件」そのものになる。
 # 段階4では本文の errors も併せて実測すること。
+#
+# **さらに、この mutation には3本目の失敗経路がある** (2026-08-23 実測31回目)。
+# 選択集合に ``errorMessage`` が在る。ステータスにも errors 配列にも現れない
+# 業務エラーがここへ来る。判定はすでに3本とも見る (api/success.py)。
+# 段階4-3 の実送信では **3本すべての実測値を書き残すこと** --
+# 成功時のステータス、成功時に errorMessage が null であること、そして
+# 失敗時に何が入るか。
 api.send.paid.success_statuses: UNRESOLVED
 
 # 有料枠のpayload形状。
@@ -604,23 +611,45 @@ api.send.paid.success_statuses: UNRESOLVED
 #   - **searchUuid** が載る。送信は「どの検索から辿り着いた候補者か」に紐づく
 #   - 件名の欄は無い (フォームにも無い)
 #
-# **この雛形はまだ送信に使えない。** 理由は2つある。
+# **2026-08-23 follow-send 4回目 (実測31回目) で query が入った。**
+# 以前ここには「問い合わせ文 (query) が入っていない」と書いてあった -- 記録した
+# 回の偵察が「長いから」という理由で query を落としていたためである。封筒ごと
+# 記録するようにして、丸ごと差し替えた。以後 GraphQL は query 無しでは受け付けない
+# ので、api.payloads.assert_sendable_graphql が送信の直前で撥ねる作りも残してある
+# (座標の UNRESOLVED 検査は **キーごと欠けている穴を見ていない**。値が入っている
+# ので「埋まっている」と判定されていた)。
 #
-# 1. **問い合わせ文 (query) が入っていない。** これを記録した回の偵察は
-#    「長いから」という理由で query を落としていた。GraphQL は query の無い
-#    リクエストを受け付けないので、貼っても送れない。**次の follow-send が
-#    封筒ごと記録するので、その出力で丸ごと差し替えること。**
-#
-#    **2026-08-23 追記: これは送信の直前で止まるようになった。**
-#    api.payloads.assert_sendable_graphql が、operationName が在るのに query が
-#    無い payload を撥ねる。座標の検査 (UNRESOLVED かどうか) はこの穴を見て
-#    いなかった -- 値が入っているので「埋まっている」と判定されていた。
-#    **キーごと欠けているものは、埋まり具合の検査には映らない。**
-# 2. **``<...>`` の欄が埋まっていない。** どれも観測はしたが、こちらが用意する
-#    値である (どの求人へ送るか、どの検索から辿ったか)。
+# **残る宿題は1つ。``<...>`` の欄が埋まっていないこと。** どれも観測はしたが、
+# こちらが用意する値である (どの求人へ送るか、どの検索から辿ったか)。
 #
 # 埋め忘れたまま送ろうとしても、api.payloads.assert_fully_filled が送信の前に
 # 止める。``<string>`` という文字列がスカウトとして飛ぶことは無い (13.6)。
+#
+# ------------------------------------------------------------------------
+# **応答の形も、この query から確定した。** 選択集合はこの3つだけである::
+#
+#     result: messageScoutSend(input: $input) {
+#       scoutedMemberId
+#       errorMessage
+#       __typename
+#     }
+#
+# 2つ、設計に効く事実がある。
+#
+# 1. **``errorMessage`` という業務エラーの欄が在る。** HTTPステータスにも
+#    ``errors`` 配列にも現れない、3本目の失敗経路である。媒体がわざわざ選択集合に
+#    入れている以上、埋まる場面が在るということである。見落とすと HTTP 200・
+#    errors 無しの応答が「送信済み」として記録され、その候補者は重複送信の防止に
+#    掛かって二度と対象にならない -- **送っていないのに送ったことになる** (原則2)。
+#    api/success.py の payload_error_paths がこの欄を見る。判定は保守的に倒して
+#    ある (空でなければ失敗) -- 失敗応答そのものはまだ1度も観測していないので、
+#    「どんなときに埋まるか」は分かっていない (原則3)。
+#
+# 2. **メッセージIDは返らない。** ``scoutedMemberId`` は会員のIDであって
+#    メッセージのIDではない。したがって送信記録の platform_message_id は
+#    送信路では常に空になる。返信の突合 (10.2) は件名で行う設計なので支障は
+#    無いが、**会員IDをメッセージIDとして詰めない**。
+# ------------------------------------------------------------------------
 # ------------------------------------------------------------------------
 # **送信の入力型の名前** (2026-08-22 read-bundle 実測27回目)。
 #
@@ -647,6 +676,7 @@ api.send.paid.success_statuses: UNRESOLVED
 api.send.paid.payload_template: |
   {
     "operationName": "SendSingleScout",
+    "query": "mutation SendSingleScout($input: MessageScoutSendInput!) {\n  result: messageScoutSend(input: $input) {\n    scoutedMemberId\n    errorMessage\n    __typename\n  }\n}\n",
     "variables": {
       "input": {
         "jobOfferId": "<number>",
