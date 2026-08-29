@@ -26,6 +26,7 @@ on:
           - observe-resume
           - introspect
           - read-bundle
+          - observe-job-offers
           - preflight
           - coordinates
 # ヘッドフルの選択肢は **置かない**。CIには画面を見る人間がいないので、
@@ -176,6 +177,14 @@ jobs:
       - name: Introspect send input (query only)
         if: inputs.command == 'introspect'
         run: scout recon introspect
+
+      # **押さない。送信しない。** 一覧を開くと飛ぶ求人一覧の読み取りを聴いて、
+      # 送信payloadに要る jobOfferId / jobOfferSalaryId を取り出すだけである。
+      # このコマンドは値を出すが、返るのは **運用者自身の公開求人票** であって
+      # 候補者の個人データではない (13.2 の対象外)。
+      - name: Observe job offers (no clicks)
+        if: inputs.command == 'observe-job-offers'
+        run: scout recon observe-job-offers
 
       - name: Observe list
         if: inputs.command == 'observe-list'

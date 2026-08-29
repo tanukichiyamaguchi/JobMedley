@@ -93,6 +93,10 @@ def _build_parser() -> argparse.ArgumentParser:
     recon_sub.add_parser(
         "read-bundle", help="配信JSから送信APIの操作名と変数の形を読む (GETのみ・押下なし)"
     )
+    recon_sub.add_parser(
+        "observe-job-offers",
+        help="送信に要る求人ID (jobOfferId/jobOfferSalaryId) を観測 (押下なし・送信なし)",
+    )
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
     recon_sub.add_parser("inbox", help="受信箱の構造を観測")
 
@@ -276,6 +280,8 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "introspect": "recon-capture-send",
     # 一覧URLさえ在れば読める (押下も送信も無い)。capture-open と同じ座標で足りる。
     "read-bundle": "recon-capture-send",
+    # 一覧を開くだけ。押下も送信も無い。
+    "observe-job-offers": "recon-capture-send",
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
 }
@@ -404,6 +410,18 @@ def _dispatch_recon(
             coordinates.selector("nav.list_ready_selector"),
         )
         print(walk.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "observe-job-offers":
+        from jobmedley_scout.recon.observe_job_offers import observe_job_offers
+
+        _restore_session_from_secrets(config)
+        offers_observed = observe_job_offers(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
+        )
+        print(offers_observed.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "observe-api":
