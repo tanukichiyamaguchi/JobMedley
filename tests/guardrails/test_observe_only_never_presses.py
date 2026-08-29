@@ -63,8 +63,14 @@ def test_the_relaxation_is_used_by_exactly_the_commands_that_never_press() -> No
     「一覧に足すか」ではない。
     """
     users = {path.name for path in _modules_using(RELAXATION)}
-    # gate.py は定義そのもの。observe_api.py が唯一の使用者。
-    assert users == {"gate.py", "observe_api.py"}, (
+    # gate.py は定義そのもの。残りが使用者である。
+    #
+    # observe_api.py         一覧を開いて読み取りの形を聴く
+    # observe_job_offers.py  一覧を開いて求人IDを読む
+    #
+    # **どちらも押す操作が存在しない。** それが緩和の安全性の全部であり、
+    # 下の試験がモジュールごとに確かめている。
+    assert users == {"gate.py", "observe_api.py", "observe_job_offers.py"}, (
         f"{RELAXATION} の使用者が変わりました: {sorted(users)}。"
         f"このモードは媒体のオリジンを素通しするので、**送信も通ります**。"
         f"押さないコマンドだけが使えます (13.6)。"

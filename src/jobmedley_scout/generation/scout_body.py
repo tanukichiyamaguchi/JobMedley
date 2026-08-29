@@ -92,6 +92,8 @@ class BodyViolationKind(StrEnum):
     MISSING_SALUTATION = "missing_salutation"
     #: 差し込みの目印が本文に残っている。**そのまま候補者へ届く。**
     UNFILLED_SLOT = "unfilled_slot"
+    #: 医院の住所 (郵便番号・番地) が本文に出た。運用者が「必要ない」とした欄。
+    STREET_ADDRESS_LEAKED = "street_address_leaked"
 
 
 class BodyViolation(BaseModel):
@@ -115,16 +117,77 @@ _WRONG_BRACKET_APPLY: Final[re.Pattern[str]] = re.compile(
 _UNFILLED: Final[re.Pattern[str]] = re.compile(r"\{\{[^{}]+\}\}")
 
 
-def validate_body(body: str, *, member_code: str) -> tuple[BodyViolation, ...]:
+#: 全角と半角を揃えるための対応表。住所は媒体でもモデルでも表記が揺れる。
+_WIDTH_MAP: Final[dict[int, str]] = {
+    **{ord("０") + i: str(i) for i in range(10)},
+    ord("－"): "-",
+    ord("−"): "-",
+    ord("‐"): "-",
+    ord("―"): "-",
+    ord("ー"): "-",
+    ord("〜"): "-",
+}
+
+#: 郵便番号。``〒`` の有無とハイフンの有無を吸収する。
+_POSTAL: Final[re.Pattern[str]] = re.compile(r"(\d{3})-?(\d{4})")
+
+#: 番地。``4丁目3-32`` / ``3-32`` / ``4番地3`` のいずれの書き方も拾う。
+_STREET: Final[re.Pattern[str]] = re.compile(r"\d+丁目[\d-]*|\d+番地?[\d-]*|\d+-\d+-\d+")
+
+
+def _fold(text: str) -> str:
+    """Fold width and dash variants. **空白は残す。** Pure."""
+    return text.translate(_WIDTH_MAP)
+
+
+def _squeeze(text: str) -> str:
+    """Drop every space, so a body split by spaces still matches. Pure."""
+    return _fold(text).replace(" ", "").replace("\u3000", "")
+
+
+def address_markers(address: str) -> tuple[str, ...]:
+    r"""The parts of the clinic address that must **not** appear in the body.
+
+    **市区町村は含めない。** 通勤の話 (STEP1) では「多摩区からですと」のように
+    自然に出るし、運用者が要らないと言ったのは番地まで書き込むことである。
+    ここが拾うのは郵便番号と番地だけで、そこが出たら書きすぎである。
+
+    **住所からの抽出では空白を残す。** 自分の試験がここで落ちた --
+    先に空白を潰すと ``菅4丁目3-32 2階`` が ``菅4丁目3-322階`` になり、
+    ``[\d-]*`` が階数の ``2`` まで飲んで ``4丁目3-322`` という印になる。
+    実在しない印なので **本文の ``4丁目3-32`` と一致せず、漏れが素通りする**。
+    壊れる向きが「見逃す側」なので、静かに効かなくなる種類の間違いだった。
+    空白を潰すのは **本文と印を突き合わせる直前** だけでよい。
+    """
+    folded = _fold(address)
+    markers: list[str] = []
+    if postal := _POSTAL.search(folded):
+        markers.append(f"{postal.group(1)}-{postal.group(2)}")
+        markers.append(f"{postal.group(1)}{postal.group(2)}")
+    # **郵便番号を先に取り除く。** 取り除かないと ``214-0001`` が番地に見える。
+    without_postal = _POSTAL.sub("", folded)
+    markers.extend(match.group(0).replace(" ", "") for match in _STREET.finditer(without_postal))
+    return tuple(dict.fromkeys(marker for marker in markers if marker))
+
+
+def validate_body(
+    body: str, *, member_code: str, clinic_address: str = ""
+) -> tuple[BodyViolation, ...]:
     """Check one generated scout body. Empty result means it may be sent.
 
     **``member_code`` を渡させるのは、宛名の検査に要るからである。**
     このプロンプトは会員番号で呼びかけると決めている (STEP3 (2))。氏名が
     取れない媒体で、宛名を空にも「様」だけにもしないための唯一の手掛かりが
     会員番号である。
+
+    **``clinic_address`` は「渡したものが出ていないか」を見るために要る。**
+    運用者は住所を「本文には必要ない」と言ったが、プロンプトの STEP1 は通勤時間
+    の計算に所在地を要求する。だから住所は **渡す**。渡す以上、書かれない保証は
+    プロンプトの文言ではなく検査が持つ (8.5 と同じ考え方)。空文字なら検査しない。
     """
     violations: list[BodyViolation] = []
     violations.extend(_check_required_parts(body, member_code))
+    violations.extend(_check_address(body, clinic_address))
     violations.extend(_check_forbidden(body))
     violations.extend(_check_formatting(body))
     violations.extend(_check_length(body))
@@ -186,6 +249,31 @@ def _check_required_parts(body: str, member_code: str) -> list[BodyViolation]:
             )
         )
     return out
+
+
+def _check_address(body: str, clinic_address: str) -> list[BodyViolation]:
+    """**渡した住所が本文に出ていないこと。**
+
+    運用者の指示は「住所・アクセスは必要ないです」だった。渡さなければ守られる
+    が、渡さないと STEP1 の通勤時間が出せない。渡したうえで守らせる。
+    """
+    if not clinic_address:
+        return []
+    folded_body = _squeeze(body)
+    for marker in address_markers(clinic_address):
+        if marker in folded_body:
+            return [
+                BodyViolation(
+                    kind=BodyViolationKind.STREET_ADDRESS_LEAKED,
+                    detail=(
+                        "医院の住所 (郵便番号または番地) が本文に出ています。"
+                        "運用者は本文に住所は必要ないと決めています。"
+                        "所在地は通勤時間の見立て (STEP1) にだけ使ってください。"
+                    ),
+                    evidence=marker,
+                )
+            ]
+    return []
 
 
 def _check_forbidden(body: str) -> list[BodyViolation]:

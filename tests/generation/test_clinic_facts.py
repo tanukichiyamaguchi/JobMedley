@@ -57,11 +57,21 @@ def test_the_config_covers_exactly_the_prompts_clinic_slots() -> None:
 
 
 def test_the_operators_declared_unnecessary_fields_are_recorded_as_such() -> None:
-    """運用者は「住所・アクセスは必要ない」と明示した。**宿題ではない。**"""
+    """**「必要ない」が指していたのは、本文に書かないことだった。**
+
+    確認した結果、所在地は受け取った (プロンプトの STEP1 が通勤時間の計算に
+    要求している)。最寄駅と駐車場は受け取っていないので NOT_REQUIRED のまま。
+
+    最寄駅を空にしておくこと自体が意味を持つ。プロンプトは「路線名、駅名、
+    乗換回数は、医院情報に明記されている場合を除いて書かない」と定めているので、
+    **空であることがそのまま推測の禁止を効かせる。** 住所から駅名を補わない。
+    """
     facts = load_clinic_facts(CLINIC_PATH)
-    assert not_required_slots(facts) == ("CLINIC_ACCESS", "CLINIC_ADDRESS", "CLINIC_PARKING")
+    assert not_required_slots(facts) == ("CLINIC_ACCESS", "CLINIC_PARKING")
     # 未確認の欄は無い。**「聞き忘れ」と「要らないと言われた」を分けてある。**
     assert unresolved_slots(facts) == ()
+    # 所在地は市区町村まで入っていること (これが無いと STEP1 が走らない)。
+    assert "川崎市多摩区" in facts["CLINIC_ADDRESS"]
 
 
 def test_an_unresolved_field_stops_the_prompt_rather_than_guessing() -> None:
