@@ -43,7 +43,14 @@ from jobmedley_scout.config.placeholders import Coord, require
 from jobmedley_scout.config.schema import BrowserConfig
 from jobmedley_scout.recon.capture_send import install_gate
 from jobmedley_scout.recon.gate import GateMode, SendGate, is_own_origin
-from jobmedley_scout.recon.job_offers import JobOffer, extract_job_offers, render_offers
+from jobmedley_scout.recon.job_offers import (
+    RETRY_LIMIT,
+    JobOffer,
+    envelope_meta,
+    extract_job_offers,
+    render_offers,
+    widen_limit,
+)
 from jobmedley_scout.recon.listen import MEDIA_HOST
 from jobmedley_scout.recon.open_structure import redact_url
 
@@ -66,6 +73,10 @@ class _OfferListener:
     offers: list[JobOffer]
     answered: bool = False
     read_failed: str = ""
+    #: 最後に聴いた求人一覧のURL。**取り直しに使うので伏せずに持つ。**
+    #: 報告へ出すときは redact_url を通す。
+    observed_url: str = ""
+    meta: tuple[tuple[str, str], ...] = ()
 
     def hear(self, response: Any) -> None:
         url = ""
@@ -76,14 +87,24 @@ class _OfferListener:
         if JOB_OFFERS_PATH not in url:
             return
         self.answered = True
+        self.observed_url = url
         try:
             body = json.loads(response.text())
         except Exception as exc:  # noqa: BLE001 -- 読めなかったことを黙らない
             self.read_failed = type(exc).__name__
             return
+        self.absorb(body)
+
+    def absorb(self, body: object) -> int:
+        """Merge one envelope. Returns how many offers were **new**."""
+        if not self.meta:
+            self.meta = envelope_meta(body)
+        added = 0
         for offer in extract_job_offers(body):
             if all(offer.offer_id != seen.offer_id for seen in self.offers):
                 self.offers.append(offer)
+                added += 1
+        return added
 
 
 class OfferStage(StrEnum):
@@ -107,8 +128,13 @@ class OfferObservation:
     answered: bool = False
     read_failed: str = ""
     offers: tuple[JobOffer, ...] = ()
+    meta: tuple[tuple[str, str], ...] = ()
     blocked_on_load: tuple[str, ...] = ()
     listener_attached: bool = False
+    #: ``limit`` を上げて引き直した結果。空文字なら引き直していない。
+    widened: str = ""
+    #: 引き直しで **新たに** 見つかった求人の数。
+    widened_added: int = 0
 
     def reached(self) -> OfferStage:
         """The single stage the run actually reached. **報告はこれだけを見る。**
@@ -163,8 +189,11 @@ class OfferObservation:
         lines.append(f"  {JOB_OFFERS_PATH} の応答: 届きました")
         if self.read_failed:
             lines.append(f"  ただし **本文が読めませんでした** ({self.read_failed})。")
+        if self.widened:
+            lines.append(f"  件数を上げて引き直しました: {self.widened}")
+            lines.append(f"    新たに見つかった求人: {self.widened_added} 件")
         lines.append("")
-        lines.append(render_offers(self.offers, wanted=WANTED_OFFER))
+        lines.append(render_offers(self.offers, wanted=WANTED_OFFER, meta=self.meta))
         lines.append("")
         lines.extend(self._coordinate_lines())
         lines.append("")
@@ -205,7 +234,7 @@ def observe_job_offers(
 
     gate = SendGate(mode=GateMode.BLOCK_THIRD_PARTY)
     listener = _OfferListener(offers=[])
-    with browser_context(config, storage_state=session) as (_context, page):
+    with browser_context(config, storage_state=session) as (context, page):
         install_gate(page, gate)
         attached = False
         try:
@@ -227,19 +256,51 @@ def observe_job_offers(
             wait_for_structure_to_settle(page, config.selector_timeout_ms)
             # 遅れて届く応答がある。**もう一度落ち着くまで待つ。**
             wait_for_structure_to_settle(page, config.selector_timeout_ms)
+            # **足りないかもしれないので、件数を上げて引き直す。**
+            #
+            # 実測32回目、返った求人は1件だけで、画面に在るはずの求人が入って
+            # いなかった。「1件しか無い」のか「1件しか返っていない」のかは
+            # 応答だけでは決まらない。観測したURLの ``limit`` だけを差し替えて
+            # 同じ経路を引き直す -- **経路もパラメータ名もこちらで組み立てない**
+            # (原則3)。GET の読み取りなので副作用は無い。
+            widened, added = "", 0
+            if listener.observed_url:
+                widened, added = _refetch_wider(context, listener)
             return OfferObservation(
                 requested_url=requested_url,
                 landed_url=redact_url(page.url),
                 answered=listener.answered,
                 read_failed=listener.read_failed,
                 offers=tuple(listener.offers),
+                meta=listener.meta,
                 blocked_on_load=tuple(
                     f"{entry.method} {redact_url(entry.url)}" for entry in gate.recorded
                 ),
                 listener_attached=attached,
+                widened=widened,
+                widened_added=added,
             )
         finally:
             gate.disarm()
+
+
+def _refetch_wider(context: Any, listener: _OfferListener) -> tuple[str, int]:
+    """Ask the same endpoint for more rows. Returns ``(何をしたか, 新規件数)``.
+
+    **失敗しても実行は落とさない。** ここは補いであって本筋ではない。ただし
+    「引き直せなかった」ことは報告に残す -- 黙ると「引き直したが増えなかった」
+    と読めてしまい、次の判断を誤らせる (原則2)。
+
+    **``context.request`` を使うので、遮断は通らない** (browser/transport.py と
+    同じ経路)。GET の読み取りなので押下も送信も起きない。
+    """
+    target = widen_limit(listener.observed_url)
+    try:
+        response = context.request.get(target)
+        body = json.loads(response.text())
+    except Exception as exc:  # noqa: BLE001 -- 補いなので落とさず、事実を残す
+        return (f"引き直せませんでした ({type(exc).__name__})", 0)
+    return (f"limit={RETRY_LIMIT} で引き直しました", listener.absorb(body))
 
 
 __all__ = [
