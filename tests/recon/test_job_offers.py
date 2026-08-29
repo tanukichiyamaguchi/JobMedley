@@ -12,9 +12,12 @@ import pytest
 
 from jobmedley_scout.recon.job_offers import (
     MAX_LABEL_CHARS,
+    MAX_LABELS,
     JobOffer,
+    envelope_meta,
     extract_job_offers,
     render_offers,
+    widen_limit,
 )
 from jobmedley_scout.recon.observe_job_offers import OfferObservation, OfferStage
 
@@ -147,3 +150,116 @@ def test_the_report_never_claims_a_send_happened() -> None:
     assert "送信も1件もしていません" in said
     # **0件でも書く。** 黙ると「観測しなかった」と区別が付かない。
     assert "止めた通信 (他所のオリジンへ): 0 件" in said
+
+
+# ---------------------------------------------------------------------------
+# 実測32回目で分かったこと。**報告が読めず、欲しい求人も入っていなかった。**
+# ---------------------------------------------------------------------------
+
+#: 実測32回目にそのまま出た形。80字に収まるが **改行を含む** 欄が多い。
+REAL_SHAPE = {
+    "data": {
+        "job_offers": [
+            {
+                "id": 1711534,
+                "type": "JMJobOffer",
+                "appeal_title": "【歯科医院のコールセンター】",
+                "holiday": "木・日・祝　※祝日週は木曜振替診療あり",
+                "welfare_programs": "【社会保険】\n・健康保険、厚生年金保険\n・車通勤：車通勤不可",
+                "training": "研修期間3か月\nマニュアルを用いて指導",
+                "job_title": "コールセンター",
+                "job_category_name": "医療事務/受付（コールセンター）",
+                "suggest_name": (
+                    "神奈川県 医療法人幸明会 ヤガサキ歯科医院 医療事務/受付 (コールセンター)"
+                ),
+                "job_offer_salaries": [{"id": 6982360}, {"id": 6982361}],
+            }
+        ],
+        "total": 1,
+        "limit": 1,
+        "page": 1,
+    }
+}
+
+
+def test_multiline_fields_are_not_used_as_labels() -> None:
+    """**80字以内でも改行入りなら見出しにしない。**
+
+    実測32回目、求人票の備考欄 (福利厚生・研修・休日) が80字に収まって通り、
+    報告が改行で散らばって読めなくなった。長さだけでは本文と見出しを分けられない。
+    """
+    offer = extract_job_offers(REAL_SHAPE)[0]
+    keys = [k for k, _ in offer.labels]
+    assert "welfare_programs" not in keys
+    assert "training" not in keys
+    # 見出しの **値** に改行が無いこと (render() 自体は複数行の塊である)。
+    assert all("\n" not in value for _, value in offer.labels)
+
+
+def test_identifying_fields_come_first_and_the_count_is_capped() -> None:
+    """全部出すと読めない。**身元を指す欄を名前で優先する。**"""
+    offer = extract_job_offers(REAL_SHAPE)[0]
+    assert len(offer.labels) <= MAX_LABELS
+    assert offer.labels[0][0] == "suggest_name"
+
+
+def test_the_envelope_gauges_are_reported() -> None:
+    """**「1件しか無い」と「1件しか返っていない」を分ける。**
+
+    実測32回目、返った求人は1件で、画面に在るはずの歯科衛生士の求人が
+    入っていなかった。求人の並びだけを見ても、どちらなのかは決まらない。
+    """
+    meta = envelope_meta(REAL_SHAPE)
+    assert ("total", "1") in meta
+    assert ("limit", "1") in meta
+    # 求人の並びそのものは目盛りに混ぜない。
+    assert not any(k == "job_offers" for k, _ in meta)
+    said = render_offers(extract_job_offers(REAL_SHAPE), wanted="歯科衛生士", meta=meta)
+    assert "封筒の目盛り" in said
+    assert "total = 1" in said
+
+
+def test_the_gauges_are_found_next_to_the_array_not_at_the_root() -> None:
+    """目盛りは並びの隣に置かれる。**持ち主を探して、そこから読む。**"""
+    assert envelope_meta({"a": {"b": {"job_offers": [], "total": 7}}}) == (("total", "7"),)
+    assert envelope_meta({"total": 7}) == ()  # 並びが無ければ目盛りも無い
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://h/api/x/?limit=1", "limit=100"),
+        ("https://h/api/x/?page=1&limit=1", "limit=100"),
+        ("https://h/api/x/", "limit=100"),
+        ("https://h/api/x/?q=%E6%AD%AF%E7%A7%91", "limit=100"),
+    ],
+)
+def test_only_the_limit_is_rewritten(url: str, expected: str) -> None:
+    """**経路もパラメータ名もこちらで組み立てない** (原則3)。
+
+    観測したURLをそのまま使い、``limit`` の値だけ差し替える。組み立てた瞬間、
+    当たったのかどうかが分からなくなる。
+    """
+    out = widen_limit(url)
+    assert expected in out
+    assert out.startswith("https://h/api/x/")
+    assert out.count("limit=") == 1
+
+
+def test_other_query_parameters_survive_the_rewrite() -> None:
+    """引き直しで検索条件を落とすと、**違う質問への答えを見ることになる。**"""
+    out = widen_limit("https://h/api/x/?page=3&q=%E6%AD%AF%E7%A7%91&limit=1")
+    assert "page=3" in out
+    assert "q=%E6%AD%AF%E7%A7%91" in out
+
+
+def test_the_report_says_when_the_refetch_itself_failed() -> None:
+    """**黙ると「引き直したが増えなかった」と読める。** それは嘘になる。"""
+    said = OfferObservation(
+        requested_url="u",
+        answered=True,
+        offers=extract_job_offers(REAL_SHAPE),
+        listener_attached=True,
+        widened="引き直せませんでした (TimeoutError)",
+    ).render()
+    assert "引き直せませんでした" in said

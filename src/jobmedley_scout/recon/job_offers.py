@@ -20,6 +20,18 @@
 **ただし出す範囲は絞る。** 求人オブジェクトの直下にある短い文字列だけを見出しに
 使い、入れ子は辿らない。辿ると、この endpoint が将来なにを抱えるか分からない
 まま全部を印字することになる。
+
+**2026-08-29 実測32回目で2つ分かった。**
+
+1. **見出しが読めなかった。** 「80字以内の文字列」で絞ったが、求人票の欄には
+   改行入りの短い文が多い (福利厚生・研修・休日の備考)。80字に収まるので通り、
+   報告が改行で散らばって読めなくなった。**改行を含む欄は見出しにしない。**
+   あわせて、身元を指す欄を名前で優先し、数も絞る。
+2. **欲しい求人が入っていなかった。** 返ったのは1件だけで、コールセンターの
+   求人だった。歯科衛生士の求人は媒体の画面に在るのに、この応答に無い。
+   **「1件しか無い」のか「1件しか返っていない」のかは、この応答だけでは
+   決まらない。** だから封筒の目盛り (total / limit / page など) を報告に出す。
+   目盛りが読めれば、次に何をすべきかが推測ではなく観測で決まる。
 """
 
 from __future__ import annotations
@@ -27,6 +39,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 #: 求人の並びが入っているキーの名前。**位置は固定しない。**
 #:
@@ -39,6 +52,23 @@ SALARIES_KEY: Final[str] = "job_offer_salaries"
 
 #: 見出しに使う文字列の長さの上限。これを超える欄は本文 (説明文) とみなして出さない。
 MAX_LABEL_CHARS: Final[int] = 80
+
+#: 見出しに使う欄を、**この順で** 探す。実測32回目で観測したキー名である。
+#:
+#: 名前で優先するのは、身元を指す欄と説明文の欄を長さだけでは分けられないため。
+#: ``suggest_name`` が先頭なのは、媒体の検索候補にそのまま出る文字列だからで、
+#: 運用者が画面で見ているものと同じ形になる。
+PREFERRED_LABEL_KEYS: Final[tuple[str, ...]] = (
+    "suggest_name",
+    "job_category_name",
+    "job_title",
+    "facility_name_with_job_category",
+    "employment_type",
+    "appeal_title",
+)
+
+#: 1件あたりに出す見出しの数。**全部出すと読めない** (実測32回目は15欄出た)。
+MAX_LABELS: Final[int] = 4
 
 #: 封筒を潜る深さの上限。暴走止めであって媒体の事実ではない。
 MAX_DEPTH: Final[int] = 6
@@ -70,20 +100,72 @@ def _as_id(value: object) -> str | None:
     return None
 
 
+def _usable_label(value: object) -> str | None:
+    """A short, single-line string, or ``None``.
+
+    **改行を含む欄は見出しにしない。** 実測32回目でここが効かず、報告が改行で
+    散らばって読めなくなった -- 求人票には「80字以内だが改行入り」の欄が多い
+    (福利厚生・研修・休日の備考)。長さだけでは本文と見出しを分けられない。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > MAX_LABEL_CHARS:
+        return None
+    if "\n" in text or "\r" in text:
+        return None
+    return text
+
+
 def _labels(offer: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     """Short direct string fields, for the operator to tell offers apart.
 
     **入れ子は辿らない。** 辿ると、この endpoint が将来なにを抱えるか分からない
     まま全部を印字することになる。
+
+    身元を指す欄を名前で優先し、足りなければ他の短い1行の欄で補う。全部出すと
+    読めない (実測32回目は1件で15欄出た)。
     """
     out: list[tuple[str, str]] = []
-    for key, value in offer.items():
-        if not isinstance(key, str) or key == "id":
+    for key in PREFERRED_LABEL_KEYS:
+        text = _usable_label(offer.get(key))
+        if text is not None:
+            out.append((key, text))
+    if len(out) < MAX_LABELS:
+        taken = {key for key, _ in out}
+        for key, value in offer.items():
+            if len(out) >= MAX_LABELS:
+                break
+            if not isinstance(key, str) or key == "id" or key in taken:
+                continue
+            text = _usable_label(value)
+            if text is not None:
+                out.append((key, text))
+    return tuple(out[:MAX_LABELS])
+
+
+def envelope_meta(body: object) -> tuple[tuple[str, str], ...]:
+    """The envelope's own scalars — ``total`` / ``limit`` / ``page`` and friends.
+
+    **名前を決め打ちしない。** 求人の並びと同じ階層にある数値・真偽値・短い
+    文字列を、名前を問わず拾う。目盛りの呼び名は媒体が決めることなので、
+    こちらが名前を知っている前提で書くと、名前が違うだけで黙って0件になる。
+
+    **これが要る理由。** 実測32回目、返った求人は1件だけで、欲しい求人は
+    入っていなかった。「1件しか無い」のか「1件しか返っていない」のかは、
+    求人の並びだけを見ても決まらない。目盛りが読めれば、次にすることが
+    推測ではなく観測で決まる (原則2/原則3)。
+    """
+    holder = _find_offer_holder(body)
+    if holder is None:
+        return ()
+    out: list[tuple[str, str]] = []
+    for key, value in holder.items():
+        if not isinstance(key, str) or key == JOB_OFFERS_KEY:
             continue
-        if not isinstance(value, str):
-            continue
-        text = value.strip()
-        if text and len(text) <= MAX_LABEL_CHARS:
+        if isinstance(value, bool | int | float):
+            out.append((key, str(value)))
+        elif (text := _usable_label(value)) is not None:
             out.append((key, text))
     return tuple(out)
 
@@ -102,25 +184,61 @@ def _salary_ids(offer: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(found)
 
 
-def _find_offer_array(node: object, depth: int = MAX_DEPTH) -> Sequence[object] | None:
-    """Locate the ``job_offers`` array anywhere in the envelope. **名前で探す。**"""
+def _find_offer_holder(node: object, depth: int = MAX_DEPTH) -> Mapping[str, object] | None:
+    """Locate the object that **holds** the ``job_offers`` array. **名前で探す。**
+
+    並びそのものではなく持ち主を返すのは、目盛り (total / limit / page) が並びの
+    隣に置かれるからである。並びだけを返していると、そこへ手が届かない。
+    """
     if depth <= 0:
         return None
     if isinstance(node, Mapping):
         found = node.get(JOB_OFFERS_KEY)
         if isinstance(found, Sequence) and not isinstance(found, str | bytes):
-            return found
+            return node
         for value in node.values():
-            deeper = _find_offer_array(value, depth - 1)
+            deeper = _find_offer_holder(value, depth - 1)
             if deeper is not None:
                 return deeper
         return None
     if isinstance(node, Sequence) and not isinstance(node, str | bytes):
         for item in node:
-            deeper = _find_offer_array(item, depth - 1)
+            deeper = _find_offer_holder(item, depth - 1)
             if deeper is not None:
                 return deeper
     return None
+
+
+def _find_offer_array(node: object, depth: int = MAX_DEPTH) -> Sequence[object] | None:
+    """Locate the ``job_offers`` array anywhere in the envelope."""
+    holder = _find_offer_holder(node, depth)
+    if holder is None:
+        return None
+    found = holder.get(JOB_OFFERS_KEY)
+    return found if isinstance(found, Sequence) and not isinstance(found, str | bytes) else None
+
+
+#: 取り直すときに要求する件数。**媒体が受け付けるかは分からない。**
+#:
+#: 実測32回目で返ったのは1件だけだった。画面が要求した ``limit`` をそのまま
+#: 大きくして引き直す -- 受け付けなければ同じものが返るだけで、副作用は無い
+#: (GET の読み取りである)。
+RETRY_LIMIT: Final[int] = 100
+
+
+def widen_limit(url: str, limit: int = RETRY_LIMIT) -> str:
+    """Rewrite the observed URL to ask for more rows. **Pure.**
+
+    **URLは観測したものをそのまま使う。** 経路もパラメータ名もこちらで
+    組み立てない -- 組み立てた瞬間、当たったかどうかが分からなくなる (原則3)。
+    ここでするのは ``limit`` の値の差し替えだけで、無ければ足す。
+    """
+    split = urlsplit(url)
+    pairs = parse_qsl(split.query, keep_blank_values=True)
+    replaced = [(k, str(limit) if k == "limit" else v) for k, v in pairs]
+    if not any(k == "limit" for k, _ in replaced):
+        replaced.append(("limit", str(limit)))
+    return urlunsplit(split._replace(query=urlencode(replaced)))
 
 
 def extract_job_offers(body: object) -> tuple[JobOffer, ...]:
@@ -149,9 +267,20 @@ def extract_job_offers(body: object) -> tuple[JobOffer, ...]:
     return tuple(offers)
 
 
-def render_offers(offers: Sequence[JobOffer], *, wanted: str) -> str:
+def render_offers(
+    offers: Sequence[JobOffer],
+    *,
+    wanted: str,
+    meta: Sequence[tuple[str, str]] = (),
+) -> str:
     """The operator-facing report. **0件でも黙らない** (原則2)."""
     lines = ["求人IDの候補 (**運用者自身の公開求人です。候補者の情報ではありません**)", ""]
+    if meta:
+        # **封筒の目盛りを必ず出す。** 「1件しか無い」のか「1件しか返っていない」
+        # のかは、求人の並びだけを見ても決まらない (実測32回目)。
+        lines.append("  封筒の目盛り (この応答が全部かどうかの手掛かり):")
+        lines.extend(f"    {key} = {value}" for key, value in meta)
+        lines.append("")
     if not offers:
         lines.append("  **1件も取り出せませんでした。**")
         lines.append(f"  応答に '{JOB_OFFERS_KEY}' の並びが見つからないか、id が読めませんでした。")
