@@ -365,7 +365,13 @@ def _resume_failure_reason(endpoint: Endpoint, outcome: ApiOutcome) -> str:
     # 成功しているのに読めなかった = 本文がオブジェクトでなかった。
     # **そこで止めない。** 何であるかまで言わないと次の手が決まらない (実測39回目)。
     shape = describe_body_shape(outcome.response.body_text, outcome.response.headers)
-    return f"HTTP {outcome.status} / 応答本文がオブジェクトではありません ({shape})"
+    # **こちらが送ったヘッダも出す。** 実測44回目、ブラウザ側だけを観測していたので
+    # 「ではこちらは何を送っているのか」が報告から分からず、引き算ができなかった。
+    sent = ", ".join(outcome.request_headers) or "(記録がありません)"
+    return (
+        f"HTTP {outcome.status} / 応答本文がオブジェクトではありません ({shape})"
+        f" / こちらが送ったヘッダ: {sent}"
+    )
 
 
 def _resume_payload(outcome: ApiOutcome) -> Mapping[str, object] | None:

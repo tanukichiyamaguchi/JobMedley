@@ -114,7 +114,16 @@ def test_send_request_shape_is_fixed() -> None:
     assert request.method == "POST"
     # 候補者IDがURLに差し込まれている。
     assert request.url == "https://customers.example.test/api/scout/CAND-001"
-    assert request.headers["Content-Type"] == "application/json"
+    # **ブラウザから観測した形に揃えてある** (実測42回目)。
+    #
+    # 長く "application/json" だけを送っていた。ブラウザは charset を付け、
+    # Accept と Accept-Language と Origin も付ける。どれも観測した値であり、
+    # 観測した値を写すことは推測ではない (原則3)。
+    assert request.headers["Content-Type"] == "application/json;charset=UTF-8"
+    assert request.headers["Accept"] == "application/json, text/plain, */*"
+    assert request.headers["Accept-Language"] == "ja-JP,ja;q=0.9,en;q=0.8"
+    # Origin は要求先から作る。座標に書き起こすと、URLを変えたとき黙って食い違う。
+    assert request.headers["Origin"] == "https://customers.example.test"
     # 9.2: 冪等キーが載る。これが無いと再試行がサーバ側で重複排除されない。
     assert request.headers[IDEMPOTENCY_HEADER] == "idem-abc-123"
 
