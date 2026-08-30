@@ -40,10 +40,41 @@ def _parsed(body: str) -> dict[str, object]:
     return dict(json.loads(result.template))
 
 
-def test_the_three_runtime_slots_are_replaced() -> None:
+def test_the_three_runtime_slots_carry_the_observed_kind() -> None:
+    """**型は観測が決める。** 実装が決めれば、それは推測である (原則3)。
+
+    この媒体は型が一貫していない (実測36回目)。同じ職種IDが
+    ``desired_job_category_ids: ["10"]`` では文字列、
+    ``career_job_categories[].job_category_id: 10`` では数値だった。
+    """
     filled = _parsed(CAPTURED)
-    assert filled["customer_search_condition_id"] == "{{SEARCH_CONDITION_ID}}"
-    assert filled["pagination"] == {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"}
+    # 観測では条件番号が数値、ページが数値だった。
+    assert filled["customer_search_condition_id"] == "{{SEARCH_CONDITION_ID:number}}"
+    assert filled["pagination"] == {"limit": "{{PAGE_SIZE:number}}", "page": "{{PAGE:number}}"}
+
+
+def test_a_string_valued_slot_is_marked_as_a_string() -> None:
+    """同じ欄でも、媒体が文字列で送っていれば文字列として運ぶ。"""
+    body = json.dumps({**json.loads(CAPTURED), "pagination": {"limit": "25", "page": "1"}})
+    result = as_template(body)
+    assert result is not None
+    assert json.loads(result.template)["pagination"] == {
+        "limit": "{{PAGE_SIZE:string}}",
+        "page": "{{PAGE:string}}",
+    }
+
+
+def test_a_slot_whose_kind_cannot_be_read_gets_no_marker() -> None:
+    """**型が読めない欄に記法を置かない。** 置けば型をこちらで決めたことになる。
+
+    記法が無ければ差し替えも起きず、``missing_slots`` に出て使えないと分かる。
+    """
+    body = json.dumps({**json.loads(CAPTURED), "pagination": {"limit": None, "page": 1}})
+    result = as_template(body)
+    assert result is not None
+    assert json.loads(result.template)["pagination"]["limit"] is None
+    assert result.missing_slots == ("pagination.limit",)
+    assert result.usable() is False
 
 
 def test_a_field_that_merely_shares_a_value_with_a_slot_is_left_alone() -> None:
@@ -96,6 +127,13 @@ def test_the_produced_template_passes_the_guard_once_the_slots_are_filled() -> N
 
     残るのは3つの差し込み記法だけで、実行時に値が入る。``<...>`` は1つも残らない。
     """
+    from jobmedley_scout.runtime.commands.ingest import (
+        PAGE_SIZE_SLOT,
+        PAGE_SLOT,
+        SEARCH_CONDITION_SLOT,
+        _substitute_slots,
+    )
+
     result = as_template(CAPTURED)
     assert result is not None
     template = json.loads(result.template)
@@ -103,9 +141,13 @@ def test_the_produced_template_passes_the_guard_once_the_slots_are_filled() -> N
         # 差し込む前は「まだ値が決まっていない」ので止まる。
         assert_fully_filled(template, used_by="test")
 
-    template["customer_search_condition_id"] = "739599"
-    template["pagination"] = {"limit": 25, "page": 1}
-    assert_fully_filled(template, used_by="test")  # 例外が出なければ通る
+    filled = _substitute_slots(
+        template, {SEARCH_CONDITION_SLOT: "739599", PAGE_SLOT: 1, PAGE_SIZE_SLOT: 25}
+    )
+    assert_fully_filled(filled, used_by="test")  # 例外が出なければ通る
+    # **観測どおりの型で入っている。** 観測は数値だった。
+    assert filled["customer_search_condition_id"] == 739599
+    assert filled["pagination"] == {"limit": 25, "page": 1}
 
 
 def test_the_operators_own_condition_number_is_reported_for_cross_checking() -> None:

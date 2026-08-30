@@ -47,8 +47,8 @@ COORDINATES = load_site_coordinates(Path("config/site_coordinates.yaml"))
 STAND_IN_TEMPLATE: dict[str, object] = {
     "age": {"from": "0", "to": "40"},
     "member_id": [],
-    "customer_search_condition_id": "{{SEARCH_CONDITION_ID}}",
-    "pagination": {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"},
+    "customer_search_condition_id": "{{SEARCH_CONDITION_ID:string}}",
+    "pagination": {"limit": "{{PAGE_SIZE:number}}", "page": "{{PAGE:number}}"},
 }
 
 

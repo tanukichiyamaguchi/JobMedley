@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,11 +43,28 @@ from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.models.candidate import Candidate
 from jobmedley_scout.state import candidate_repo
 
-#: 一覧の要求本文で差し替える目印。座標側と揃っていること。
-SEARCH_CONDITION_SLOT = "{{SEARCH_CONDITION_ID}}"
-PAGE_SLOT = "{{PAGE}}"
-PAGE_SIZE_SLOT = "{{PAGE_SIZE}}"
-#: レジュメの要求本文で差し替える目印。
+#: 一覧の要求本文で差し替える欄の名前。**座標側と揃っていること**
+#: (:data:`recon.search_payload.RUNTIME_SLOTS`)。
+SEARCH_CONDITION_SLOT = "SEARCH_CONDITION_ID"
+PAGE_SLOT = "PAGE"
+PAGE_SIZE_SLOT = "PAGE_SIZE"
+
+#: 一覧の差し込み記法。**名前と、観測した型を一緒に運ぶ。**
+#:
+#: この媒体は型が一貫していない (実測36回目)。同じ職種IDが
+#: ``desired_job_category_ids: ["10"]`` では文字列、
+#: ``career_job_categories[].job_category_id: 10`` では数値である。だから型を
+#: こちらで決められない -- 決めれば推測になる (原則3)。
+#:
+#: 一番危ないのは ``pagination.page`` である。型違いで媒体が無視した場合、毎回
+#: 1ページ目が返り、**報告だけがページを進む**。エラーは出ないので、重複が
+#: 静かに育つ (原則2)。
+LIST_SLOT_PATTERN = re.compile(r"^\{\{([A-Z_]+):(string|number)\}\}$")
+
+#: レジュメの要求本文で差し替える目印。**こちらは記法のまま。**
+#:
+#: レジュメは GraphQL で、変数の型がスキーマ側で決まっている
+#: (``memberId`` を実測20回目に観測済み)。型を観測から運ぶ必要が無い。
 MEMBER_ID_SLOT = "{{MEMBER_ID}}"
 
 #: 取り込み元の名前。``candidates.source`` に残る。
@@ -327,7 +345,7 @@ def _fill(template: Mapping[str, Any], *, page: int, config: IngestConfig) -> di
     送信路には最初からこの門があった (:func:`api.payloads.assert_fully_filled`)。
     読み取り路に無かったのは非対称で、その非対称に理由は無い。
     """
-    filled = _substitute(
+    filled = _substitute_slots(
         template,
         {
             SEARCH_CONDITION_SLOT: config.search_condition_id,
@@ -349,6 +367,42 @@ def _fill(template: Mapping[str, Any], *, page: int, config: IngestConfig) -> di
     return filled
 
 
+def _substitute_slots(node: Any, values: Mapping[str, object]) -> Any:
+    """Replace ``{{NAME:kind}}`` markers, **coercing to the observed kind**.
+
+    型は観測が決める。ここは運ぶだけである (13.4)。記法に型が付いていなければ
+    置き換えない -- 素通しさせて :func:`api.payloads.assert_fully_filled` に
+    止めさせる。**「たぶん数値だろう」で入れないため。**
+    """
+    if isinstance(node, str):
+        match = LIST_SLOT_PATTERN.match(node)
+        if match is None:
+            return node
+        name, kind = match.group(1), match.group(2)
+        if name not in values:
+            return node
+        return _as_kind(values[name], kind, name=name)
+    if isinstance(node, Mapping):
+        return {key: _substitute_slots(item, values) for key, item in node.items()}
+    if isinstance(node, list):
+        return [_substitute_slots(item, values) for item in node]
+    return node
+
+
+def _as_kind(value: object, kind: str, *, name: str) -> object:
+    """Coerce a config value to the kind the platform was observed to use."""
+    if kind == "string":
+        return str(value)
+    try:
+        return int(str(value))
+    except ValueError as exc:
+        raise ConfigError(
+            f"runtime.commands.ingest: 差し込み欄 {name} は媒体が数値で送る欄ですが、"
+            f"設定の値を数値にできません: {value!r}。"
+            f"config.yaml の ingest を確かめてください。"
+        ) from exc
+
+
 def _substitute(node: Any, values: Mapping[str, object]) -> Any:
     """Replace whole-string markers, keeping everything else as observed."""
     if isinstance(node, str):
@@ -361,6 +415,7 @@ def _substitute(node: Any, values: Mapping[str, object]) -> Any:
 
 
 __all__ = [
+    "LIST_SLOT_PATTERN",
     "MEMBER_ID_SLOT",
     "PAGE_SIZE_SLOT",
     "PAGE_SLOT",
