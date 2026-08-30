@@ -131,7 +131,9 @@ def candidate_slots(
     **氏名の欄は無い。** この媒体に氏名は無く、宛名は会員番号で書くと運用者が
     決めている (プロンプト STEP3 (2))。
     """
-    resume = candidate.resume
+    # **重ねた事実を使う。** レジュメが読めなくても一覧の行に材料がある
+    # (models.candidate.Candidate.facts)。レジュメが読めていればそちらが勝つ。
+    resume = candidate.facts()
     return {
         "MEMBER_CODE": _or_undisclosed(candidate.member_code),
         "RESIDENCE": _or_undisclosed(candidate.residence),
