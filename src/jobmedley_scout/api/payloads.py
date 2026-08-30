@@ -123,7 +123,18 @@ def unfilled_slots(payload: object, prefix: str = "") -> tuple[str, ...]:
     return tuple(found)
 
 
-def assert_fully_filled(payload: Mapping[str, Any], *, used_by: str) -> None:
+#: :func:`assert_fully_filled` の既定の宛先。送信路のための門なので、既定は送信路。
+DEFAULT_TEMPLATE_COORDINATE = "api.send.*.payload_template"
+DEFAULT_UNFILLED_CONSEQUENCE = "**このまま送ると、記法がそのまま本文や項目として媒体へ渡ります。**"
+
+
+def assert_fully_filled(
+    payload: Mapping[str, Any],
+    *,
+    used_by: str,
+    coordinate: str = DEFAULT_TEMPLATE_COORDINATE,
+    consequence: str = DEFAULT_UNFILLED_CONSEQUENCE,
+) -> None:
     """Refuse a payload that still has unfilled slots. **送信は取り消せない。**
 
     これが無いと、埋め忘れは **失敗としてではなく成功として** 現れる。
@@ -132,14 +143,21 @@ def assert_fully_filled(payload: Mapping[str, Any], *, used_by: str) -> None:
 
     「送れなかった」は次の実行でやり直せる。「間違ったものを送った」はやり直せない。
     **だから、迷ったら送らない側に倒す。**
+
+    **読み取り路にも要る** (実測35回目で分かった)。あのとき
+    ``api.candidate_list.payload_template`` は40キーのうち37キーが ``"<bool>"`` や
+    ``"<number>"`` という **文字列** のまま残っており、媒体は HTTP 500 を返した。
+    送信路にはこの門があったのに、一覧路には無かった。結果は「送ってしまった」では
+    なく「1件も取れなかった」だが、**埋め忘れが実行時まで気付かれない** という
+    病気は同じものである。だから宛先と帰結だけを差し替えて同じ門を使う。
     """
     if remaining := unfilled_slots(payload):
         raise ConfigError(
             f"{used_by}: payload に値の決まっていない箇所が残っています: "
             f"{', '.join(remaining)}。"
-            f"座標 api.send.*.payload_template の該当箇所を実際の値、または "
+            f"座標 {coordinate} の該当箇所を実際の値、または "
             f"差し込み用の記法 ({PLACEHOLDER_CANDIDATE_ID} 等) に書き換えてください。"
-            f"**このまま送ると、記法がそのまま本文や項目として媒体へ渡ります。**"
+            f"{consequence}"
         )
 
 

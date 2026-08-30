@@ -67,10 +67,21 @@ def test_the_relaxation_is_used_by_exactly_the_commands_that_never_press() -> No
     #
     # observe_api.py         一覧を開いて読み取りの形を聴く
     # observe_job_offers.py  一覧を開いて求人IDを読む
+    # observe_search.py      一覧を開いて検索POSTの **要求本文** を拾う
     #
-    # **どちらも押す操作が存在しない。** それが緩和の安全性の全部であり、
+    # **どれも押す操作が存在しない。** それが緩和の安全性の全部であり、
     # 下の試験がモジュールごとに確かめている。
-    assert users == {"gate.py", "observe_api.py", "observe_job_offers.py"}, (
+    #
+    # observe_search.py を足したのは2026-08-30。理由は「本文が要るから」ではなく
+    # 「**媒体自身が飛ばす通信を素通しさせないと本文が観測できないから**」である
+    # -- 遮ってしまうと POST が成立せず、聴けるのは失敗した要求だけになる。
+    # 押す呼び出しは1つも無い (goto と待機だけ)。
+    assert users == {
+        "gate.py",
+        "observe_api.py",
+        "observe_job_offers.py",
+        "observe_search.py",
+    }, (
         f"{RELAXATION} の使用者が変わりました: {sorted(users)}。"
         f"このモードは媒体のオリジンを素通しするので、**送信も通ります**。"
         f"押さないコマンドだけが使えます (13.6)。"

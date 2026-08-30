@@ -23,6 +23,8 @@ from jobmedley_scout.api.endpoints import build_endpoints
 from jobmedley_scout.api.transport import HttpResponse, RecordedTransport
 from jobmedley_scout.config.loader import load_site_coordinates
 from jobmedley_scout.config.schema import IngestConfig, SafetyConfig
+from jobmedley_scout.config.site_coordinates import SiteCoordinates
+from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.runtime.commands.ingest import (
     MEMBER_ID_SLOT,
     PAGE_SLOT,
@@ -35,6 +37,28 @@ from jobmedley_scout.state.db import connect, migrate
 from tests.generation.helpers import make_clock
 
 COORDINATES = load_site_coordinates(Path("config/site_coordinates.yaml"))
+
+#: 検査用の要求本文。**本物の座標は使わない。**
+#:
+#: 2026-08-30 に ``api.candidate_list.payload_template`` を UNRESOLVED へ戻した
+#: (形しか観測できていないものを確定扱いしていたため)。ここで見たいのはページ繰り
+#: と報告の規律であって座標そのものではないので、呼べる形の代役を立てる。
+#: 座標の中身は tests/guardrails/test_observed_read_coordinates.py が見る。
+STAND_IN_TEMPLATE: dict[str, object] = {
+    "age": {"from": "0", "to": "40"},
+    "member_id": [],
+    "customer_search_condition_id": "{{SEARCH_CONDITION_ID}}",
+    "pagination": {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"},
+}
+
+
+def _coordinates(template: object = None) -> SiteCoordinates:
+    """The real coordinates, with the list body swapped for a callable stand-in."""
+    values = dict(COORDINATES.raw_items())
+    values["api.candidate_list.payload_template"] = (
+        json.dumps(STAND_IN_TEMPLATE, ensure_ascii=False) if template is None else template
+    )
+    return SiteCoordinates(values)
 
 
 def _ingest_config(**overrides: object) -> IngestConfig:
@@ -100,20 +124,22 @@ def _run(
     *,
     config: IngestConfig | None = None,
     safety: SafetyConfig | None = None,
+    template: object = None,
 ) -> tuple[IngestReport, RecordedTransport, sqlite3.Connection]:
+    coordinates = _coordinates(template)
     transport = RecordedTransport(responses)
     client = JobMedleyApiClient(
         transport,
-        auth_failure_codes=COORDINATES.string_list("api.auth_failure_codes"),
-        idempotency_header=COORDINATES.optional_string("api.idempotency_header"),
+        auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
+        idempotency_header=coordinates.optional_string("api.idempotency_header"),
     )
     clock = make_clock()
     connection = connect(Path(":memory:"))
     migrate(connection, clock)
     report = ingest(
         client,
-        build_endpoints(COORDINATES),
-        COORDINATES,
+        build_endpoints(coordinates),
+        coordinates,
         config or _ingest_config(),
         safety or _safety(),
         connection,
@@ -227,11 +253,58 @@ def test_the_saved_search_condition_reaches_the_request() -> None:
 
 
 def test_no_marker_survives_into_the_request() -> None:
-    """**目印がそのまま媒体へ飛ばない。**"""
+    """**目印がそのまま媒体へ飛ばない。** 2つの家族があり、旧実装は片方しか見ていなかった。
+
+    ``{{...}}`` は差し込むつもりだった箇所、``<...>`` は偵察が種別だけを記録した
+    箇所である。**どちらも「まだ値が決まっていない」という同じ事実** なのに、
+    ここは長く ``{{`` しか見ていなかった。だから ``"<bool>"`` が40キーぶん媒体へ
+    飛んで HTTP 500 を返した実測35回目を、試験は緑のまま通した。
+    """
     _report, transport, _connection = _run([_page(0)])
     sent = json.dumps(transport.requests[0].json_body, ensure_ascii=False)
     assert PAGE_SLOT not in sent
     assert "{{" not in sent
+    assert "<" not in sent
+
+
+def test_a_template_still_holding_a_recon_marker_refuses_to_call() -> None:
+    """**呼ぶ前に止める。** 呼んでしまえば、失敗は「0件」として現れる (原則2)。
+
+    実測35回目そのものである。送信路には最初からこの門があり
+    (:func:`api.payloads.assert_fully_filled`)、読み取り路には無かった。
+    その非対称に理由は無かった。
+    """
+    broken = json.dumps({**STAND_IN_TEMPLATE, "favorite": "<bool>"}, ensure_ascii=False)
+    with pytest.raises(ConfigError) as caught:
+        _run([_page(0)], template=broken)
+    message = str(caught.value)
+    assert "favorite" in message
+    assert "api.candidate_list.payload_template" in message
+    assert "observe-search" in message
+
+
+def test_the_refusal_happens_before_any_request_reaches_the_platform() -> None:
+    """止めるのは組み立ての時点であって、応答を見てからではない。"""
+    transport = RecordedTransport([_page(0)])
+    coordinates = _coordinates(json.dumps({**STAND_IN_TEMPLATE, "favorite": "<bool>"}))
+    clock = make_clock()
+    connection = connect(Path(":memory:"))
+    migrate(connection, clock)
+    with pytest.raises(ConfigError):
+        ingest(
+            JobMedleyApiClient(
+                transport,
+                auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
+                idempotency_header=coordinates.optional_string("api.idempotency_header"),
+            ),
+            build_endpoints(coordinates),
+            coordinates,
+            _ingest_config(),
+            _safety(),
+            connection,
+            clock,
+        )
+    assert transport.requests == [], "止めたと言いながら媒体へ呼びに行っています"
 
 
 # ---------------------------------------------------------------------------

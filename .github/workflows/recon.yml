@@ -27,6 +27,7 @@ on:
           - introspect
           - read-bundle
           - observe-job-offers
+          - observe-search
           - preview
           - preflight
           - coordinates
@@ -186,6 +187,16 @@ jobs:
       - name: Observe job offers (no clicks)
         if: inputs.command == 'observe-job-offers'
         run: scout recon observe-job-offers
+
+      # **押さない。送信しない。** 一覧を開くと媒体自身が飛ばす検索の POST を
+      # 聴いて、その **要求本文** を貼れる雛形にして出すだけである。
+      # このコマンドも値を出すが、出るのは **運用者自身の保存済み検索条件**
+      # (年齢の範囲・希望エリア・職種・絞り込みフラグ) であって、候補者の個人
+      # データではない。候補者は返ってくる **応答** の側にあり、応答は読まない。
+      # 唯一 member_id だけは埋まっていれば候補者を名指しするので伏せる。
+      - name: Observe the search request body (no clicks)
+        if: inputs.command == 'observe-search'
+        run: scout recon observe-search
 
       # **送信は1件も行わない。** 候補者を1名取ってきて文面を1つ書くだけで、
       # 送信APIは呼ばない (そもそも preview は送信エンドポイントを受け取らない)。

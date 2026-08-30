@@ -33,7 +33,7 @@ from jobmedley_scout.api.candidates import (
 )
 from jobmedley_scout.api.client import ApiOutcome, JobMedleyApiClient
 from jobmedley_scout.api.endpoints import CANDIDATE_LIST, RESUME, Endpoint
-from jobmedley_scout.api.payloads import parse_payload_template
+from jobmedley_scout.api.payloads import assert_fully_filled, parse_payload_template
 from jobmedley_scout.clock import Clock
 from jobmedley_scout.config.placeholders import require
 from jobmedley_scout.config.schema import IngestConfig, SafetyConfig
@@ -318,6 +318,14 @@ def _fill(template: Mapping[str, Any], *, page: int, config: IngestConfig) -> di
 
     文字列で入れると媒体が「1」と 1 を違うものとして扱いうる。座標の雛形は
     値を伏せてあるので、型はこちらで決める必要がある。
+
+    差し込んだあと、**残った ``<...>`` で止める** (実測35回目)。あのときの雛形は
+    40キーのうち37キーが偵察の印 (``"<bool>"`` / ``"<number>"`` -- どちらも
+    **文字列**) のままで、媒体は HTTP 500 を返した。報告は正しく「取りに行けて
+    いません」と言ったが、**なぜ** かは言えなかった。門はここに要る。
+
+    送信路には最初からこの門があった (:func:`api.payloads.assert_fully_filled`)。
+    読み取り路に無かったのは非対称で、その非対称に理由は無い。
     """
     filled = _substitute(
         template,
@@ -329,6 +337,15 @@ def _fill(template: Mapping[str, Any], *, page: int, config: IngestConfig) -> di
     )
     if not isinstance(filled, dict):  # pragma: no cover - 雛形は必ずオブジェクト
         raise TypeError("一覧の要求本文がオブジェクトになりませんでした")
+    assert_fully_filled(
+        filled,
+        used_by="runtime.commands.ingest",
+        coordinate="api.candidate_list.payload_template",
+        consequence=(
+            "**このまま呼ぶと媒体はエラーを返し、それが「0件」として現れます。**"
+            " 実際の値は `scout recon observe-search` で観測できます。"
+        ),
+    )
     return filled
 
 
