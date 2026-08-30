@@ -174,6 +174,34 @@ def ingest(
     clock: Clock,
 ) -> IngestReport:
     """Fetch candidates page by page, enrich with resumes, and store them."""
+    report, collected = collect_candidates(client, endpoints, coordinates, config, safety)
+    for candidate in collected:
+        candidate_repo.upsert_candidate(connection, candidate, source=SOURCE, clock=clock)
+    report.stored = len(collected)
+    return report
+
+
+def collect_candidates(
+    client: JobMedleyApiClient,
+    endpoints: Mapping[str, Endpoint],
+    coordinates: SiteCoordinates,
+    config: IngestConfig,
+    safety: SafetyConfig,
+    *,
+    cap: int | None = None,
+) -> tuple[IngestReport, list[Candidate]]:
+    """Fetch and enrich, **without storing**. Returns the report and the rows.
+
+    :func:`ingest` は取り込んで保存する。文面の下見 (``scout preview``) は
+    保存せずに候補者そのものを要るので、取ってくる部分だけを切り出してある。
+
+    **保存しないことが下見の要点である。** 下見で保存すると、送っていないのに
+    「取り込み済み」になり、後から見たときに送信対象だったのかどうかが
+    分からなくなる。
+
+    ``cap`` は ``safety.ingest_cap`` より **小さい側だけ** を採る。下見で1件だけ
+    欲しいときに使う -- 大きい側を採れる形にすると、上限の意味が消える (9.7)。
+    """
     report = IngestReport(unresolved_fields=unresolved_resume_fields(coordinates))
     list_endpoint = endpoints[CANDIDATE_LIST]
     list_url = _url_of(list_endpoint, used_by="runtime.commands.ingest")
@@ -200,8 +228,14 @@ def ingest(
         if report.search_uuid is None:
             report.search_uuid = search_uuid_in(payload)
         for row in rows:
-            if len(collected) >= safety.ingest_cap:
-                report.capped_by = f"safety.ingest_cap ({safety.ingest_cap} 件)"
+            # **小さい側だけを採る。** 大きい側を採れる形にすると上限の意味が消える。
+            limit = safety.ingest_cap if cap is None else min(cap, safety.ingest_cap)
+            if len(collected) >= limit:
+                report.capped_by = (
+                    f"safety.ingest_cap ({safety.ingest_cap} 件)"
+                    if limit == safety.ingest_cap
+                    else f"下見の上限 ({limit} 件)"
+                )
                 break
             if (candidate := candidate_from_row(row)) is not None:
                 collected.append(candidate)
@@ -214,10 +248,7 @@ def ingest(
     if config.fetch_resumes and collected:
         collected = _with_resumes(client, endpoints, coordinates, collected, report)
 
-    for candidate in collected:
-        candidate_repo.upsert_candidate(connection, candidate, source=SOURCE, clock=clock)
-    report.stored = len(collected)
-    return report
+    return report, collected
 
 
 def _with_resumes(

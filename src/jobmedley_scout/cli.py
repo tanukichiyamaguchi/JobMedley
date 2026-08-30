@@ -54,6 +54,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sync-replies", help="返信を検知する")
     sub.add_parser("analytics", help="週次・月次の分析を出力する")
 
+    sub.add_parser("preview", help="1通目の文面を下見する (送信なし・本文はログに出さない)")
+
     dryrun = sub.add_parser("dryrun", help="送信直前まで通す (段階5)")
     dryrun.add_argument("--limit", type=int, default=5)
 
@@ -189,6 +191,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         assert_ready_for(coordinates, "ingest")
         return _dispatch_ingest(config, coordinates)
 
+    if args.command == "preview":
+        # **送信の座標は要求しない。** 一通も送らないコマンドが送信の応答を
+        # 解釈するための座標を要求すると、梯子が閉じる (coordinates.py の注記)。
+        assert_ready_for(coordinates, "ingest")
+        return _dispatch_preview(config, coordinates)
+
     if command_key is not None:
         assert_ready_for(coordinates, command_key)
         raise NotImplementedError(
@@ -202,6 +210,60 @@ def _dispatch(args: argparse.Namespace) -> int:
     parser_error = f"未実装のコマンド: {args.command}"
     print(parser_error, file=sys.stderr)
     return int(ExitCode.USAGE)
+
+
+def _dispatch_preview(config: Config, coordinates: SiteCoordinates) -> int:
+    """1通目の文面を下見する。**送信もDBへの保存も行わない。**
+
+    本文はログに出さず、成果物へ書く。ログに出るのは数と種別だけである --
+    本文には会員番号での宛名と居住地の市区町村が最初から入っており、それは
+    13.2 が Actions のログに残すことを禁じているものそのものだからである。
+    """
+    from anthropic import Anthropic
+
+    from jobmedley_scout.api.client import JobMedleyApiClient
+    from jobmedley_scout.api.endpoints import build_endpoints
+    from jobmedley_scout.browser import session_store
+    from jobmedley_scout.browser.context import browser_context
+    from jobmedley_scout.browser.transport import PlaywrightTransport
+    from jobmedley_scout.config.secrets import load_secrets
+    from jobmedley_scout.generation.clinic import load_clinic_facts
+    from jobmedley_scout.runtime.commands.preview import preview
+
+    secrets = load_secrets()
+    api_key = secrets.require_anthropic_key()
+
+    _restore_session_from_secrets(config)
+    session = session_store.session_path(config.paths.credentials_dir)
+    if not session.exists():
+        print("保存セッションがありません。段階1からやり直してください。", file=sys.stderr)
+        return int(ExitCode.AUTH_EXPIRED)
+
+    clinic = load_clinic_facts(Path("config/clinic.yaml"))
+    prompt_template = Path("config/prompts/scout_dental_hygienist.md").read_text(encoding="utf-8")
+    destination = config.paths.recon_dump_dir / "preview" / "scout-preview.md"
+
+    with browser_context(config.browser, storage_state=session) as (context, _page):
+        report = preview(
+            JobMedleyApiClient(
+                PlaywrightTransport(context),
+                auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
+                idempotency_header=coordinates.optional_string("api.idempotency_header"),
+            ),
+            build_endpoints(coordinates),
+            coordinates,
+            config.ingest,
+            config.safety,
+            llm=Anthropic(api_key=api_key),
+            llm_config=config.llm,
+            prompt_template=prompt_template,
+            clinic=clinic,
+            clinic_address=clinic["CLINIC_ADDRESS"],
+            max_requests=config.safety.max_llm_requests_per_message,
+            destination=destination,
+        )
+    print(report.render())
+    return int(ExitCode.OK)
 
 
 def _dispatch_ingest(config: Config, coordinates: SiteCoordinates) -> int:
