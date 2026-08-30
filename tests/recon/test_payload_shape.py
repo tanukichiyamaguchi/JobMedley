@@ -11,6 +11,7 @@ import json
 
 from jobmedley_scout.recon.payload_shape import (
     BODY_MARKER,
+    REVEALED_KEYS,
     idempotency_candidates,
     shape_of,
 )
@@ -38,18 +39,61 @@ REAL_SHAPE = json.dumps(
 )
 
 
-def test_no_value_from_the_captured_body_ever_reaches_the_template() -> None:
-    """**値は1つも出さない。**
+def test_no_candidate_value_from_the_captured_body_ever_reaches_the_template() -> None:
+    """**候補者に属する値は1つも出さない。**
 
-    出してよいのは形だけである。会員IDも、求人IDも、件名の文言も、記録した本文に
-    載っていたというだけで偵察の成果ではない -- 成果は「どのキーに何を入れるか」
-    である。
+    会員IDも、件名の文言も、本文も、記録した本文に載っていたというだけで偵察の
+    成果ではない -- 成果は「どのキーに何を入れるか」である。
+
+    **2026-08-30 に例外を1つ入れた。** 運用者自身の求人のID
+    (:data:`REVEALED_KEYS`) だけは値を残す。伏せると、どの求人へ送るのかを
+    座標に書けず、送信が永久に組み立たない。下の試験がその境界を固定している。
     """
     shape = shape_of(REAL_SHAPE, {}, SENTINEL)
     assert shape is not None
-    for leaked in ("00000000", "11111111", "件名です", "ダミー本文"):
+    for leaked in ("00000000", "件名です", "ダミー本文"):
         assert leaked not in shape.template, f"{leaked} が雛形に漏れている"
         assert leaked not in shape.render(), f"{leaked} が報告に漏れている"
+
+
+def test_the_revealed_keys_are_the_operators_own_job_ids_and_nothing_else() -> None:
+    """**「IDだから安全」ではなく「誰のIDか」で分けている。**
+
+    ``jobOfferId`` / ``jobOfferSalaryId`` は運用者自身が媒体へ公開している
+    求人票を指す。``memberId`` は候補者そのもの、``searchUuid`` はどの検索から
+    辿り着いたかを指す。後者2つは伏せたままでなければならない。
+
+    ここが緩むと、13.2 が守ろうとしているもの (候補者の個人データ) が Actions の
+    ログへ出る。**例外を足すときは、この一覧を明示的に変えること。**
+    """
+    assert REVEALED_KEYS == frozenset({"jobOfferId", "jobOfferSalaryId"})
+
+    captured = json.dumps(
+        {
+            "operationName": "SendSingleScout",
+            "variables": {
+                "input": {
+                    "memberId": "00000000",
+                    "jobOfferId": 811220,
+                    "jobOfferSalaryId": 3381377,
+                    "searchUuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    "scoutMessage": SENTINEL,
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+    shape = shape_of(captured, {}, SENTINEL)
+    assert shape is not None
+    template = json.loads(shape.template)["variables"]["input"]
+    # 運用者自身の求人ID -- **そのまま出る**。
+    assert template["jobOfferId"] == 811220
+    assert template["jobOfferSalaryId"] == 3381377
+    # 候補者と検索を指すもの -- **伏せたまま**。
+    assert template["memberId"] == "<string>"
+    assert template["searchUuid"] == "<string>"
+    assert "00000000" not in shape.template
+    assert "aaaaaaaa" not in shape.template
 
 
 def test_the_sentinel_names_where_the_message_body_goes() -> None:
@@ -136,7 +180,10 @@ def test_the_report_names_every_slot_the_operator_still_has_to_fill() -> None:
     assert shape is not None
     unfilled = shape.unfilled_keys()
     assert "variables.input.memberId" in unfilled
-    assert "variables.input.jobOfferId" in unfilled
+    # **jobOfferId は数えない。** 値がそのまま残るので、埋める宿題ではない
+    # (REVEALED_KEYS)。ここを宿題に数えると、埋まっているものを「未確定」と
+    # 報告することになり、次に読む人間を誤らせる。
+    assert "variables.input.jobOfferId" not in unfilled
     assert "variables.input.scoutMessage" not in unfilled, "本文はコードが差し込む"
     assert "**まだ値が決まっていない欄**" in shape.render()
 

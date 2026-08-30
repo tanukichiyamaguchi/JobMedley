@@ -587,10 +587,13 @@ def test_the_shape_of_the_send_payload_is_reported_without_its_values(monkeypatc
     assert outcome.payload is not None, "送信路は掴んだのに形が残っていない"
     assert outcome.payload.operation == "SendSingleScout"
     assert outcome.payload.body_key == "variables.input.body"
-    # **値は1つも出さない** (13.2)。会員IDも求人IDも、形ではない。
+    # **候補者の値は1つも出さない** (13.2)。会員IDは形ではない。
     assert "00000000" not in outcome.payload.template
-    assert "11111111" not in outcome.payload.template
     assert sentinel not in outcome.payload.template
+    # 求人IDは例外で、値がそのまま残る (payload_shape.REVEALED_KEYS)。
+    # 運用者自身の求人を指すものであり、伏せるとどの求人へ送るのかを座標に
+    # 書けない。境界そのものは tests/recon/test_payload_shape.py が固定している。
+    assert "11111111" in outcome.payload.template
 
     walk = SendWalk(
         requested_url=URL,
