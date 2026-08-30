@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Final
 
 from jobmedley_scout.config.placeholders import is_resolved
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
@@ -102,6 +103,11 @@ def search_uuid_in(list_response: Mapping[str, object]) -> str | None:
     return found if isinstance(found, str) and found else None
 
 
+#: 一覧の行が居住地を持っているキー。**実測したキー名そのもの**
+#: (2026-08-22 observe-api 4回目: ``members[].short_address``)。
+RESIDENCE_KEY: Final[str] = "short_address"
+
+
 def candidate_from_row(row: Mapping[str, object]) -> Candidate | None:
     """One list row -> a candidate. ``None`` if it carries no usable id.
 
@@ -117,10 +123,14 @@ def candidate_from_row(row: Mapping[str, object]) -> Candidate | None:
         return None
     # **会員番号は別に持つ。** 画面に出る番号で、宛名に使う (プロンプト STEP3 (2))。
     code = row.get("code")
+    # 居住地。プロンプトの STEP1 が通勤時間の見積もりに使う唯一の材料である。
+    # **粒度は観測していない** (models.candidate.Candidate.residence の注記)。
+    address = row.get(RESIDENCE_KEY)
     return Candidate(
         candidate_id=observed,
         raw_id_observed=observed,
         member_code=str(code) if isinstance(code, str | int) and str(code).strip() else None,
+        residence=address.strip() if isinstance(address, str) and address.strip() else None,
     )
 
 
