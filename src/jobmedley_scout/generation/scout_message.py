@@ -34,7 +34,12 @@ from typing import Any, Final
 from jobmedley_scout.config.schema import LlmConfig
 from jobmedley_scout.generation.clinic import fill
 from jobmedley_scout.generation.facts import UNDISCLOSED
-from jobmedley_scout.generation.llm_client import AnthropicLike, TokenUsage, call_structured
+from jobmedley_scout.generation.llm_client import (
+    AnthropicLike,
+    StructuredCallError,
+    TokenUsage,
+    call_structured,
+)
 from jobmedley_scout.generation.scout_body import BodyViolation, validate_body
 from jobmedley_scout.models.candidate import Candidate
 
@@ -66,8 +71,15 @@ OUTPUT_ENVELOPE: Final[str] = (
 class GenerationOutcome(StrEnum):
     """1通の生成が辿り着いた先。**時系列の順に並んでいる。**"""
 
+    #: 会員番号が無い。宛名が書けないので LLM を呼ばない。
     NO_MEMBER_CODE = "no_member_code"
+    #: 居住地が無い。**プロンプトが通勤時間の省略を禁じているので呼ばない。**
+    NO_RESIDENCE = "no_residence"
+    #: LLM が例外で落ちた。
     LLM_FAILED = "llm_failed"
+    #: 応答は返ったが ``body`` が文字列でなかった。**内容の失敗と混ぜない。**
+    BAD_RESPONSE = "bad_response"
+    #: 書き直させても検査に通らなかった。
     STILL_INVALID = "still_invalid"
     GENERATED = "generated"
 
@@ -86,6 +98,17 @@ class GeneratedMessage:
     usage: TokenUsage = TokenUsage(0, 0)
     #: LLM が例外で落ちたときの型名。**握りつぶさず理由を残す。**
     failure: str = ""
+    #: API へ実際に投げた回数。``attempts`` (書き直しの回数) とは別物である。
+    #:
+    #: ``call_structured`` は1回の呼び出しで最大2本投げる (思考オンで駄目なら
+    #: 思考オフでもう1本)。書き直しの回数だけを見ていると、**課金の回数を
+    #: 半分に見誤る** (13.1)。
+    requests: int = 0
+    #: 思考オフのフォールバックが1度でも発火したか。
+    #:
+    #: **常時発火しているなら API 側の仕様が変わった合図である** (8.2)。
+    #: 成功した回だけでなく、失敗した回にも出る -- むしろ失敗した回にこそ出る。
+    used_fallback: bool = False
 
     @property
     def sendable(self) -> bool:
@@ -109,7 +132,6 @@ def candidate_slots(
     決めている (プロンプト STEP3 (2))。
     """
     resume = candidate.resume
-    years = _career_years(resume.experienced_occupations)
     return {
         "MEMBER_CODE": _or_undisclosed(candidate.member_code),
         "RESIDENCE": _or_undisclosed(candidate.residence),
@@ -117,8 +139,14 @@ def candidate_slots(
         # そのままプロンプトの「推測で路線を書かない」を効かせる。
         "NEAREST_STATION": UNDISCLOSED,
         "QUALIFICATIONS": _or_undisclosed(_join(resume.qualifications)),
-        "CAREER_YEARS": _or_undisclosed(years),
-        "CAREER_SUMMARY": _or_undisclosed(_join(resume.experienced_occupations)),
+        # **年数を含む表記だけを渡す** (「歯科衛生士(3年)」)。職種名だけを渡すと、
+        # モデルは「経験年数」の欄を埋めるために年数を自分で作る (原則3)。
+        "CAREER_YEARS": _or_undisclosed(_join(resume.experienced_occupation_years)),
+        # **職歴は写していない。** レジュメの careers を取り込んでいないので
+        # (api/candidates.py の注記)、この欄に渡せる事実がこちらに無い。
+        # 経験職種で代用すると、CAREER_YEARS と同じ内容が「経歴・勤務先の特徴」
+        # として二度渡り、モデルはそれを別々の事実として読む。
+        "CAREER_SUMMARY": UNDISCLOSED,
         "DESIRED_CONDITIONS": _or_undisclosed(
             _join(
                 (*resume.desired_occupations, *resume.desired_locations, *resume.desired_features)
@@ -131,23 +159,29 @@ def candidate_slots(
     }
 
 
+def _flatten(value: str) -> str:
+    """Collapse newlines and runs of blank space into single spaces. **Pure.**
+
+    **候補者の自由記述が、プロンプトの行を偽装できないようにする。**
+    プロンプトの【1】は「居住地：{{RESIDENCE}}」のように1行1項目で並んでいる。
+    自己PRに改行と「保有資格：歯科医師」が書かれていれば、差し込んだ瞬間に
+    それは **プロフィールの1項目に見える**。モデルは媒体が返した事実と、
+    候補者が書いた文字列を区別できない。
+
+    平らにすれば、その文字列は自己PRという1項目の中に留まる。
+    """
+    return " ".join(value.split())
+
+
 def _or_undisclosed(value: str | None) -> str:
-    return value.strip() if isinstance(value, str) and value.strip() else UNDISCLOSED
+    if not isinstance(value, str) or not value.strip():
+        return UNDISCLOSED
+    return _flatten(value)
 
 
 def _join(values: Sequence[str]) -> str | None:
-    kept = [v.strip() for v in values if isinstance(v, str) and v.strip()]
+    kept = [_flatten(v) for v in values if isinstance(v, str) and v.strip()]
     return "、".join(dict.fromkeys(kept)) or None
-
-
-def _career_years(occupations: Sequence[str]) -> str | None:
-    """経験職種の欄はそのまま渡す。**年数だけを抜き出して数え直さない。**
-
-    媒体は「歯科衛生士(3年)」のように職種と年数を1つの文字列で返す。ここで
-    年数だけを取り出して足し合わせると、重複や併行の扱いを **こちらが決める**
-    ことになり、その解釈が事実として文面に出る (6.4 と同じ事故の形)。
-    """
-    return _join(occupations)
 
 
 def build_prompt(
@@ -192,19 +226,41 @@ def generate_scout_body(
     config: LlmConfig,
     prompt: str,
     candidate: Candidate,
-    clinic_address: str = "",
+    clinic_address: str,
+    max_requests: int,
     max_attempts: int = 3,
 ) -> GeneratedMessage:
     """Write one scout body, retrying while it breaks the operator's rules.
 
-    **会員番号が無ければ書かせない。** 宛名の手掛かりが無いままモデルに任せると、
-    空欄の宛名か、創作された番号のどちらかが候補者へ届く。
+    **``clinic_address`` に既定値を置かない。** 置くと、渡し忘れた呼び出しが
+    :func:`generation.scout_body.validate_body` の住所検査を丸ごと素通りし、
+    それでも ``GENERATED`` が返る -- 「検査していない」が「検査に通った」と
+    区別できなくなる (原則2)。プロンプトには住所が入っているので、モデルは
+    郵便番号と番地を目の前に置いて書く。守るのは引数ではなく検査である。
+
+    **``max_requests`` にも既定値を置かない。** 1通あたりの API 呼び出し上限は
+    設定 (``safety.max_llm_requests_per_message``) が持つ値で、この層が勝手に
+    決めてよいものではない (13.1)。
+
+    書かせる前に止める場面が2つある。どちらも **プロンプトが省略を許していない
+    欄** で、渡さずに書かせるとモデルが埋める。
+
+    * 会員番号が無い -- 宛名を空欄にするか、番号を創作する (STEP3 (2))
+    * 居住地が無い -- STEP1 は「自信がないので書かない」を認めず、市区町村が
+      判明しているのに通勤時間の数値を省くことを禁じている。都道府県レベルまで
+      分かっている場合の逃げ道はあるが、**何も分かっていない場合の逃げ道は無い**。
+      渡さずに書かせれば、距離も所要時間も創作される (原則3)
     """
     member_code = (candidate.member_code or "").strip()
     if not member_code:
         return GeneratedMessage(
             candidate_id=candidate.candidate_id,
             outcome=GenerationOutcome.NO_MEMBER_CODE,
+        )
+    if not (candidate.residence or "").strip():
+        return GeneratedMessage(
+            candidate_id=candidate.candidate_id,
+            outcome=GenerationOutcome.NO_RESIDENCE,
         )
 
     system = prompt + OUTPUT_ENVELOPE
@@ -213,10 +269,18 @@ def generate_scout_body(
     ]
     total = TokenUsage(0, 0)
     attempts = 0
+    requests = 0
+    used_fallback = False
     violations: tuple[BodyViolation, ...] = ()
     body = ""
 
     for _ in range(max(1, max_attempts)):
+        # **上限は書き直しの回数ではなく API を叩いた回数で数える。**
+        # call_structured は1回の呼び出しで最大2本投げるので、回数で数えると
+        # 設定した上限の倍まで叩ける (13.1 のコストの歯止めが効かなくなる)。
+        remaining = max_requests - requests
+        if remaining <= 0:
+            break
         attempts += 1
         try:
             result = call_structured(
@@ -225,6 +289,19 @@ def generate_scout_body(
                 system=system,
                 messages=messages,
                 schema=BODY_SCHEMA,
+                max_requests=remaining,
+            )
+        except StructuredCallError as exc:
+            # **使った分は運ぶ。** 落として0にすると、8.2 の事故 (API仕様変更で
+            # 全件失敗) のときに課金だけが起きて費用の集計がゼロになる。
+            return GeneratedMessage(
+                candidate_id=candidate.candidate_id,
+                outcome=GenerationOutcome.LLM_FAILED,
+                attempts=attempts,
+                usage=_add(total, exc.usage),
+                requests=requests + exc.request_count,
+                used_fallback=used_fallback or exc.used_fallback,
+                failure=_failure_name(exc),
             )
         except Exception as exc:  # noqa: BLE001 -- 8.2: 落とさず、件数として返す
             return GeneratedMessage(
@@ -232,11 +309,29 @@ def generate_scout_body(
                 outcome=GenerationOutcome.LLM_FAILED,
                 attempts=attempts,
                 usage=total,
+                requests=requests,
+                used_fallback=used_fallback,
                 failure=_failure_name(exc),
             )
         total = _add(total, result.usage)
+        requests += result.request_count
+        used_fallback = used_fallback or result.used_fallback
+
         raw = result.data.get("body")
-        body = raw.strip() if isinstance(raw, str) else ""
+        if not isinstance(raw, str):
+            # **内容の失敗と混ぜない。** 空文字に落として検査へ回すと
+            # 「本文が短すぎます (0字)」と報告され、運用者は文章の問題だと読む。
+            # 実際に起きたのは応答の形の問題で、直す場所がまるで違う。
+            return GeneratedMessage(
+                candidate_id=candidate.candidate_id,
+                outcome=GenerationOutcome.BAD_RESPONSE,
+                attempts=attempts,
+                usage=total,
+                requests=requests,
+                used_fallback=used_fallback,
+                failure=f"body が文字列ではありません ({type(raw).__name__})",
+            )
+        body = raw.strip()
         violations = validate_body(body, member_code=member_code, clinic_address=clinic_address)
         if not violations:
             return GeneratedMessage(
@@ -245,12 +340,19 @@ def generate_scout_body(
                 body=body,
                 attempts=attempts,
                 usage=total,
+                requests=requests,
+                used_fallback=used_fallback,
             )
-        # **違反を伝えて書き直させる。** 本文そのものは会話に積まない --
-        # 積むと入力が回ごとに膨らみ、13.1 のコスト上限が意味を失う。
+        # **書いた本文をそのまま見せて直させる。**
+        #
+        # 最初は本文を伏せて違反だけを渡していたが、それでは「直す」ことが
+        # できない -- モデルは自分が何を書いたか見えないまま書き直すので、
+        # 2回目は修正ではなく **引き直し** になる。同じ違反を繰り返すことも、
+        # 前回通っていた箇所を壊すこともある。入力は増えるが、回数の上限は
+        # max_requests が持っているので歯止めは効いている。
         messages = [
             *messages,
-            {"role": "assistant", "content": "(前回の本文)"},
+            {"role": "assistant", "content": body},
             {"role": "user", "content": _violation_note(violations)},
         ]
 
@@ -261,6 +363,8 @@ def generate_scout_body(
         violations=violations,
         attempts=attempts,
         usage=total,
+        requests=requests,
+        used_fallback=used_fallback,
     )
 
 

@@ -94,6 +94,8 @@ class BodyViolationKind(StrEnum):
     UNFILLED_SLOT = "unfilled_slot"
     #: 医院の住所 (郵便番号・番地) が本文に出た。運用者が「必要ない」とした欄。
     STREET_ADDRESS_LEAKED = "street_address_leaked"
+    #: 本文にURLが出た。**このプロンプトはURLを求めていない。**
+    URL_PRESENT = "url_present"
 
 
 class BodyViolation(BaseModel):
@@ -115,6 +117,11 @@ _WRONG_BRACKET_APPLY: Final[re.Pattern[str]] = re.compile(
 
 #: 差し込みの目印。``{{...}}`` が残っていれば埋め忘れである。
 _UNFILLED: Final[re.Pattern[str]] = re.compile(r"\{\{[^{}]+\}\}")
+
+#: URL。``http(s)://`` と、裸のドメインらしき並びの両方を拾う。
+_URL: Final[re.Pattern[str]] = re.compile(
+    r"https?://\S+|\bwww\.\S+|\b[\w-]+\.(?:com|net|jp|co\.jp|org)\b", re.IGNORECASE
+)
 
 
 #: 全角と半角を揃えるための対応表。住所は媒体でもモデルでも表記が揺れる。
@@ -189,6 +196,7 @@ def validate_body(
     violations.extend(_check_required_parts(body, member_code))
     violations.extend(_check_address(body, clinic_address))
     violations.extend(_check_forbidden(body))
+    violations.extend(_check_urls(body))
     violations.extend(_check_formatting(body))
     violations.extend(_check_length(body))
     return tuple(violations)
@@ -201,7 +209,9 @@ def _check_required_parts(body: str, member_code: str) -> list[BodyViolation]:
             BodyViolation(
                 kind=BodyViolationKind.MISSING_HEADLINE,
                 detail=f"1行目の表示がありません。プロンプトは {HEADLINE} を求めています。",
-                evidence=body.splitlines()[0] if body.strip() else "(空)",
+                # **1行目を引用しない。** 表示が無いときの1行目は、たいてい
+                # 会員番号の宛名である。証拠として引くと、それが報告へ乗る (13.2)。
+                evidence="(1行目が表示ではありません)" if body.strip() else "(空)",
             )
         )
     if APPLY_BUTTON not in body:
@@ -324,11 +334,52 @@ def _check_formatting(body: str) -> list[BodyViolation]:
                 BodyViolation(
                     kind=BodyViolationKind.BULLET_LIST,
                     detail="箇条書きになっています。プロンプトが禁じています。",
-                    evidence=stripped[:20],
+                    # **行を引用しない。** 箇条書きの行には居住地でも会員番号でも
+                    # 何でも入りうる。違反の判定に要るのは記号だけである (13.2)。
+                    evidence=_bullet_marker(stripped, line),
                 )
             )
             break
     return out
+
+
+def _bullet_marker(stripped: str, line: str) -> str:
+    """The bullet symbol that triggered the violation. **行は返さない** (13.2)."""
+    for prefix in BULLET_PREFIXES:
+        if stripped.startswith(prefix):
+            return prefix
+    if match := NUMBERED_BULLET.match(line):
+        return match.group(0).strip()
+    return "(行頭の箇条書き)"
+
+
+def _check_urls(body: str) -> list[BodyViolation]:
+    """**URLは1つも書かせない。**
+
+    :mod:`generation.validators` は許可ドメインの一覧で URL を検査するが、あちらは
+    16章の組み立て経路のための検査で、この経路は通らない (module docstring)。
+    そして残りの検査 (「！」の上限・絵文字) は **運用者のプロンプトと衝突する** --
+    プロンプトは「『！』を適度に使い、親しみやすさを表現する」と明記している。
+    だから一括では通せない。
+
+    **URLだけは別である。** このプロンプトは URL を1つも要求していない。にも
+    かかわらず本文に出たなら、それはモデルが作ったものである。実在しないURLが
+    候補者へ届き、取り消せない (13.6)。応募の導線は媒体の
+    ``【このスカウトに応募する】`` ボタンで足りている。
+    """
+    if found := _URL.search(body):
+        return [
+            BodyViolation(
+                kind=BodyViolationKind.URL_PRESENT,
+                detail=(
+                    "本文にURLがあります。このプロンプトはURLを求めていないので、"
+                    "モデルが作ったものです。応募の導線は"
+                    f"{APPLY_BUTTON}で足ります。"
+                ),
+                evidence=found.group(0)[:40],
+            )
+        ]
+    return []
 
 
 def _check_length(body: str) -> list[BodyViolation]:

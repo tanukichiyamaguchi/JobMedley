@@ -125,12 +125,17 @@ def candidate_from_row(row: Mapping[str, object]) -> Candidate | None:
     code = row.get("code")
     # 居住地。プロンプトの STEP1 が通勤時間の見積もりに使う唯一の材料である。
     # **粒度は観測していない** (models.candidate.Candidate.residence の注記)。
+    #
+    # **伏せ字を通す。** 媒体は非公開の欄に「（未応募のため非表示）」を入れて
+    # 返すことがある (recon.masked)。素通しすると、その文字列が居住地として
+    # プロンプトへ渡り、モデルはそれを地名として扱う。
     address = row.get(RESIDENCE_KEY)
+    residence = unmask(address) if isinstance(address, str) else None
     return Candidate(
         candidate_id=observed,
         raw_id_observed=observed,
         member_code=str(code) if isinstance(code, str | int) and str(code).strip() else None,
-        residence=address.strip() if isinstance(address, str) and address.strip() else None,
+        residence=residence.strip() if residence and residence.strip() else None,
     )
 
 
@@ -146,6 +151,9 @@ def resume_from_response(
     return ResumeFacts(
         age=_age(response, keypaths.get("age")),
         experienced_occupations=_labels(response, keypaths.get("experienced_occupations")),
+        experienced_occupation_years=_occupation_years(
+            response, keypaths.get("experienced_occupations")
+        ),
         desired_occupations=_desired_occupations(response, keypaths.get("desired_occupations")),
         desired_locations=_joined_places(
             value_at(response, _root_of(keypaths.get("desired_occupations"), "workplaces"))
@@ -199,6 +207,34 @@ def _labels(response: Mapping[str, object], path: str | None) -> tuple[str, ...]
     if not path:
         return ()
     return _texts(value_at(response, path), "label")
+
+
+def _occupation_years(response: Mapping[str, object], path: str | None) -> tuple[str, ...]:
+    """``careerJobCategories[]`` -> 「歯科衛生士(3年)」。**画面と同じ形にする。**
+
+    ``label`` だけを写して「経験年数」の欄へ渡すと、**モデルは年数を自分で埋める** --
+    観測できている事実 (``careerYear``) を捨てて推測させることになる (原則3)。
+
+    **年数が読めない要素は落とす。** 年数なしで並べると、職種名が経験年数の欄に
+    現れて年数のように読まれる。落とせば「非公開」として渡り、モデルは言及できない。
+    """
+    if not path:
+        return ()
+    rows = value_at(response, path)
+    if not isinstance(rows, Sequence) or isinstance(rows, str | bytes):
+        return ()
+    out: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        label = row.get("label")
+        years = row.get("careerYear")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        if isinstance(years, bool) or not isinstance(years, int | float):
+            continue
+        out.append(f"{label.strip()}({years:g}年)")
+    return tuple(dict.fromkeys(out))
 
 
 def _desired_occupations(response: Mapping[str, object], path: str | None) -> tuple[str, ...]:

@@ -61,6 +61,20 @@ class ResumeFacts(BaseModel):
     # --- 経験 (実際にしてきたこと) -------------------------------------
     experienced_industries: tuple[str, ...] = ()
     experienced_occupations: tuple[str, ...] = ()
+    #: 経験職種と **年数** を1つにした表記 (「歯科衛生士(3年)」)。画面と同じ形。
+    #:
+    #: **``experienced_occupations`` と分けてある。** あちらは職種の名前だけで、
+    #: 年数を含まない。プロンプトは「経験年数」という別の欄を持っており
+    #: (STEP2 が「その経験年数の衛生士が現場でどんな力を身につけている時期か」を
+    #: 語らせる)、そこへ職種名だけを渡すと **モデルは年数を自分で埋める**。
+    #:
+    #: 媒体は ``careerJobCategories[] = {jobCategoryId, label, careerYear}`` を
+    #: 返しており、``careerYear`` が年数である (座標 resume.fields の注記)。
+    #: ここを写さないと、観測できている事実を捨てて推測させることになる (原則3)。
+    #:
+    #: ``careerYear`` が読めない要素は **年数なしのまま入れない** -- 入れると
+    #: 「歯科衛生士」が経験年数の欄に並び、年数のように読まれる。
+    experienced_occupation_years: tuple[str, ...] = ()
     employments: tuple[Employment, ...] = ()
     educations: tuple[Education, ...] = ()
     specialty: str | None = None
