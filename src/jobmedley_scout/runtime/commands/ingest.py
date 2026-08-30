@@ -26,6 +26,7 @@ from typing import Any
 
 from jobmedley_scout.api.candidates import (
     candidate_from_row,
+    describe_row_shapes,
     resume_from_response,
     resume_keypaths,
     rows_in,
@@ -106,6 +107,13 @@ class IngestReport:
     capped_by: str = ""
     #: 未確定のままだったレジュメの軸。空でないなら、その項目は永久に「非公開」。
     unresolved_fields: tuple[str, ...] = ()
+    #: 一覧の行の、材料になる欄がどんな形だったか。**キー名と件数だけ** (13.2)。
+    #:
+    #: 実測40回目、レジュメが読めずモデルへ渡った人物の事実は2つだけだったが、
+    #: 一覧の行には年齢も資格も載っていた -- 読んでいなかっただけである。読む
+    #: ようにしたが、**値の形は観測していない**。外したら黙って「非公開」に
+    #: なるので、形を報告して次の実行で分かるようにする (原則2/原則3)。
+    row_shapes: tuple[str, ...] = ()
     #: レジュメが読めなかった理由と件数。**理由だけで、本文は持たない** (13.2)。
     #:
     #: 実測38回目、報告は「レジュメ: 0 / 1 件 読めました」としか言えなかった。
@@ -163,6 +171,9 @@ class IngestReport:
 
         lines.append("")
         lines.append(f"  見えた候補者: {self.rows_seen()} 件 / 保存した: {self.stored} 件")
+        if self.row_shapes:
+            lines.append("  一覧の行から読めた材料 (1件目の形):")
+            lines.extend(f"    {note}" for note in self.row_shapes)
         lines.append(
             f"  検索識別子: {'取れました' if self.search_uuid else '**取れませんでした**'}"
             f" (送信payloadの searchUuid に載る)"
@@ -256,6 +267,9 @@ def collect_candidates(
         if report.search_uuid is None:
             report.search_uuid = search_uuid_in(payload)
         for row in rows:
+            if not report.row_shapes:
+                # **1件目だけ形を出す。** 全件出すと報告が読めなくなる。
+                report.row_shapes = describe_row_shapes(row)
             # **小さい側だけを採る。** 大きい側を採れる形にすると上限の意味が消える。
             limit = safety.ingest_cap if cap is None else min(cap, safety.ingest_cap)
             if len(collected) >= limit:

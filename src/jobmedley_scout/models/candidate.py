@@ -210,4 +210,35 @@ class Candidate(BaseModel):
     #: STEP1 は「都道府県レベルまでしか分からない場合」の書き方に落ちる。
     #: 空欄を勝手に埋めない。
     residence: str | None = None
+    #: レジュメAPI由来の事実。読めなければ空のまま。
     resume: ResumeFacts = Field(default_factory=ResumeFacts)
+    #: **一覧の行由来の事実。** レジュメが読めなくても必ずこちらは在る。
+    #:
+    #: 2026-08-30、1通目の下見で分かった。レジュメが読めず、モデルへ渡った
+    #: 人物の事実は **会員番号と市名の2つだけ** だった。材料ゼロで「共感を書け」
+    #: と言われれば創作しか残らず、実際に創作された (実測40回目)。
+    #:
+    #: ところが一覧の行には材料が載っていた。年齢・資格・経験職種・希望勤務地。
+    #: **座標ファイルには「使える手掛かり」として書いてあったのに、実装が
+    #: 読んでいなかった。** 設計として書かれていて、実装されていなかった。
+    #:
+    #: **``resume`` と混ぜない。** 出所が違うものを同じ欄に入れると、レジュメが
+    #: 読めているのかいないのかが後から分からなくなる。重ねるのは
+    #: :meth:`facts` で、そこでは **レジュメが勝つ** (厚いほうを採る)。
+    list_facts: ResumeFacts = Field(default_factory=ResumeFacts)
+
+    def facts(self) -> ResumeFacts:
+        """The two sources laid over each other. **レジュメが勝つ。**
+
+        一覧は薄い代わりに必ずある。レジュメは厚い代わりに読めないことがある。
+        欄ごとに、レジュメに値があればそれを、無ければ一覧のものを採る。
+
+        **「どちらが埋めたか」は残さない。** 文面にとっては同じ事実であり、
+        出所は :attr:`resume` と :attr:`list_facts` を直接見れば分かる。
+        """
+        merged: dict[str, object] = {}
+        for name in ResumeFacts.model_fields:
+            mine = getattr(self.resume, name)
+            theirs = getattr(self.list_facts, name)
+            merged[name] = mine if mine else theirs
+        return ResumeFacts(**merged)

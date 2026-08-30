@@ -108,6 +108,144 @@ def search_uuid_in(list_response: Mapping[str, object]) -> str | None:
 RESIDENCE_KEY: Final[str] = "short_address"
 
 
+#: 一覧の行に載っている、文面の材料になる欄。**キー名は実測済み** (observe-api 4回目)。
+#:
+#: **値の形は観測していない。** 値を出さない方針で観測したので、分かっているのは
+#: キーの名前と「文字列らしい」程度である。唯一 ``qualifications[].name`` だけは
+#: 座標ファイルに形が書いてある。
+#:
+#: だから :func:`_row_texts` は **文字列の配列とオブジェクトの配列の両方を受ける**。
+#: そして :func:`describe_row_shapes` が「どちらだったか」を報告する。推測で
+#: 決め打ちすると、外したときに黙って0件になる (原則2/原則3)。
+ROW_AGE_KEY: Final[str] = "age"
+ROW_QUALIFICATION_KEY: Final[str] = "qualifications"
+ROW_DESIRED_CITIES_KEY: Final[str] = "desired_cities"
+ROW_DESIRED_JOBS_KEY: Final[str] = "member_desired_job_categories"
+ROW_CAREER_JOBS_KEY: Final[str] = "member_career_job_categories"
+
+#: オブジェクトの配列だったときに、名前が入っていそうな欄。上から順に試す。
+ROW_NAME_KEYS: Final[tuple[str, ...]] = ("name", "label", "title", "job_category_name")
+
+#: 経験年数が入っていそうな欄。**無ければ年数を書かない** -- 書けばそれは創作である。
+ROW_YEAR_KEYS: Final[tuple[str, ...]] = ("career_year", "careerYear", "years", "year")
+
+
+def _row_texts(node: object) -> tuple[str, ...]:
+    """Names out of a list-row array, accepting **either shape**.
+
+    文字列の配列でも、``{"name": ...}`` の配列でも読む。形を観測していないので
+    決め打ちしない (原則3)。読めた分だけ返し、読めなかったことは
+    :func:`describe_row_shapes` が別に報告する。
+    """
+    if not isinstance(node, Sequence) or isinstance(node, str | bytes):
+        return ()
+    found: list[str] = []
+    for item in node:
+        if isinstance(item, str) and item.strip():
+            found.append(item.strip())
+        elif isinstance(item, Mapping):
+            for key in ROW_NAME_KEYS:
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    found.append(value.strip())
+                    break
+    return unmask_all(tuple(found))
+
+
+def _row_occupation_years(node: object) -> tuple[str, ...]:
+    """``職種: N年`` out of the career array. **年数が無ければ職種名も返さない。**
+
+    年数だけを渡す欄 (``CAREER_YEARS``) に職種名だけを入れると、モデルは欄を
+    埋めるために年数を自分で作る。レジュメ側で一度直したのと同じ穴である
+    (:func:`_occupation_years` の注記)。
+    """
+    if not isinstance(node, Sequence) or isinstance(node, str | bytes):
+        return ()
+    found: list[str] = []
+    for item in node:
+        if not isinstance(item, Mapping):
+            continue
+        name = next(
+            (
+                str(item[key]).strip()
+                for key in ROW_NAME_KEYS
+                if isinstance(item.get(key), str) and str(item[key]).strip()
+            ),
+            "",
+        )
+        years = next(
+            (item[key] for key in ROW_YEAR_KEYS if isinstance(item.get(key), int | str)),
+            None,
+        )
+        if name and years is not None and str(years).strip():
+            found.append(f"{name}: {years}年")
+    return unmask_all(tuple(found))
+
+
+def _row_age(row: Mapping[str, object]) -> int | None:
+    value = row.get(ROW_AGE_KEY)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def list_facts_from_row(row: Mapping[str, object]) -> ResumeFacts:
+    """Facts the **list row** already carries. **レジュメが読めなくても在る。**
+
+    実測40回目、レジュメが読めずモデルへ渡った人物の事実は会員番号と市名だけ
+    だった。だが一覧の行には年齢も資格も希望勤務地も載っていた -- 読んでいな
+    かっただけである。座標ファイルには「使える手掛かり」として書いてあった。
+    """
+    return ResumeFacts(
+        age=_row_age(row),
+        qualifications=_row_texts(row.get(ROW_QUALIFICATION_KEY)),
+        desired_locations=_row_texts(row.get(ROW_DESIRED_CITIES_KEY)),
+        desired_occupations=_row_texts(row.get(ROW_DESIRED_JOBS_KEY)),
+        experienced_occupations=_row_texts(row.get(ROW_CAREER_JOBS_KEY)),
+        experienced_occupation_years=_row_occupation_years(row.get(ROW_CAREER_JOBS_KEY)),
+    )
+
+
+def describe_row_shapes(row: Mapping[str, object]) -> tuple[str, ...]:
+    """What shape each material key actually had. **値は1つも出さない** (13.2)。
+
+    形を観測していない欄を読みに行っているので、**外したことが分かる仕掛けが要る**。
+    これが無いと、読めなかった欄は黙って「非公開」になり、原因が一覧の形なのか
+    候補者が本当に未記入なのかが区別できない (原則2)。
+    """
+    out: list[str] = []
+    for key in (
+        ROW_QUALIFICATION_KEY,
+        ROW_DESIRED_CITIES_KEY,
+        ROW_DESIRED_JOBS_KEY,
+        ROW_CAREER_JOBS_KEY,
+    ):
+        out.append(f"{key}: {_shape_note(row.get(key), key in row)}")
+    age_note = "読めました" if _row_age(row) is not None else _missing(row, ROW_AGE_KEY)
+    out.append(f"{ROW_AGE_KEY}: {age_note}")
+    return tuple(out)
+
+
+def _missing(row: Mapping[str, object], key: str) -> str:
+    return "キーがありません" if key not in row else "読めない形です"
+
+
+def _shape_note(node: object, present: bool) -> str:
+    if not present:
+        return "キーがありません"
+    if not isinstance(node, Sequence) or isinstance(node, str | bytes):
+        return "配列ではありません"
+    if not node:
+        return "空の配列 (この候補者に記載が無い)"
+    read = len(_row_texts(node))
+    kinds = sorted({"文字列" if isinstance(i, str) else type(i).__name__ for i in node})
+    return f"{len(node)} 件中 {read} 件読めました ({'/'.join(kinds)} の配列)"
+
+
 def candidate_from_row(row: Mapping[str, object]) -> Candidate | None:
     """One list row -> a candidate. ``None`` if it carries no usable id.
 
@@ -136,6 +274,9 @@ def candidate_from_row(row: Mapping[str, object]) -> Candidate | None:
         raw_id_observed=observed,
         member_code=str(code) if isinstance(code, str | int) and str(code).strip() else None,
         residence=residence.strip() if residence and residence.strip() else None,
+        # **一覧の行が持っている材料を捨てない。** レジュメが読めなくても、
+        # 年齢・資格・経験職種・希望勤務地はここに載っている (実測40回目)。
+        list_facts=list_facts_from_row(row),
     )
 
 
@@ -355,6 +496,8 @@ def unresolved_resume_fields(coordinates: SiteCoordinates) -> tuple[str, ...]:
 
 
 __all__ = [
+    "describe_row_shapes",
+    "list_facts_from_row",
     "MEMBERS_KEY",
     "NEXT_CURSOR_KEY",
     "SEARCH_UUID_KEY",
