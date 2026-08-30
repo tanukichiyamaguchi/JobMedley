@@ -170,56 +170,135 @@ api.base_url: "https://customers.job-medley.com"
 # **GET ではなく POST である。** api/endpoints.py の method もそれに合わせた。
 api.candidate_list.url_pattern: "https://customers.job-medley.com/api/customers/members/search/"
 
-# 候補者一覧の **要求本文** の雛形。**まだ値が決まっていない。**
+# 候補者一覧の **要求本文**。2026-08-30 の `observe-search` 2回目で実測した。
 #
-# 2026-08-22 observe-api 4回目で、一覧が飛ばした POST の本文を「値抜きで」
-# 読んだ (40キー)。キーの名前と値の種別は分かったが、**中身は1つも見ていない**。
+# 一覧を開いたときに媒体自身が飛ばす POST の本文そのものである (HTTP 200, 1028字)。
+# **推測で組み立てていない。** nav.candidate_list_url の問い合わせ文字列に同じ条件が
+# 別の綴りで載ってはいるが (da[0][pid] / df[0] / gdr[0] …)、da が desired_areas だと
+# いうのは推測であり、当たったことを確かめる手段が無い (原則3)。
 #
-# **その「値抜き」の判断が間違っていた** (2026-08-30 に判明)。
+# **中身は運用者自身が保存した検索条件である。** 年齢の範囲・希望エリア・職種・
+# 各種の絞り込みフラグ。候補者は返ってくる *応答* の側にあり、この本文には無い。
+# 13.2 が守るのは候補者の氏名・会員番号・年齢・居住地であって、これではない。
+# 一度この取り違えで HTTP 500 を出している (実測35回目 / docs/incidents.md)。
 #
-# 当時ここには「実際の値は運用者が保存した検索条件そのものなので、ここには
-# 入れない (13.2)」と書いてあった。13.2 が守るのは **候補者** の氏名・会員番号・
-# 年齢・居住地である。この本文はそれではない -- 年齢の範囲も希望エリアも職種も、
-# **運用者自身が保存した検索条件** であり、候補者は返ってくる *応答* の側にある。
-# 「個人データに見える言葉が並んでいる」ことと「個人データである」ことを取り
-# 違えていた。誰のものかで分ければ、伏せる理由があるのは ``member_id`` だけである
-# (埋まっていれば候補者を名指しするため)。
+# member_id は絞り込み条件で、実測では空だった。**埋まっていれば候補者を名指しする**
+# ので、observe-search はそのときだけ `<withheld>` に伏せる。伏せた印は `<...>` の
+# 形なので、そのまま貼って実行すれば呼ぶ前に止まる。
+# **注意: 送信payloadの memberId とは同名の別物である** (6.4 の取り違えと同じ形)。
 #
-# 実害:
-#   実測35回目 (scout preview 1回目) で HTTP 500。40キーのうち差し込んでいたのは
-#   3つで、残る37キーは ``"<bool>"`` や ``"<number>"`` という **文字列** のまま
-#   媒体へ飛んでいた。報告は正しく「0件ではなく取りに行けていません」と言ったが、
-#   **なぜ** かは言えなかった。送信路には値の埋め忘れを止める門があるのに
-#   (api/payloads.py の assert_fully_filled)、読み取り路には無かった。
-#   門はいま両方にある。
+# 差し込み記法 `{{名前:型}}` の **型は観測した型である**。
 #
-# **だから UNRESOLVED に戻す。** 形だけ観測して値が未確定なものを、確定した値の
-# ふりをして置いておくことがこの事故の原因だった。埋め方::
+#   customer_search_condition_id : string  ← 実測 (config.yaml の ingest から入る)
+#   pagination.limit             : number  ← 実測
+#   pagination.page              : number  ← 実測
 #
-#   Actions → Recon (manual) → command: observe-search
+# **型をこちらで決めない。** この媒体は型が一貫しておらず、同じ職種IDが
+# desired_job_category_ids では "10" (文字列)、career_job_categories[].job_category_id
+# では 10 (数値) である。市区町村IDは数値、こだわり条件IDは文字列、年齢は文字列。
+# 規則は見つからない (実測36回目)。
 #
-# 一覧を開いて媒体自身が飛ばす POST を聴き、その本文を貼れる JSON にして出す。
-# 出力をこの欄に1行の文字列として貼る。差し替わるのは3箇所だけである::
+# 型違いを媒体が無視した場合、いちばん危ないのは pagination.page である --
+# 毎回1ページ目が返り、**報告だけがページを進む**。エラーは出ない (原則2)。
 #
-#   {{SEARCH_CONDITION_ID}}   保存した検索条件のID (画面の「実践会＿衛生士」)
-#   {{PAGE}} / {{PAGE_SIZE}}  ページ繰り
-#
-# **注意: 本文の ``member_id`` は絞り込み条件であって、送信payloadの memberId
-# ではない。** 同名の別物である (6.4 の業界/職種の取り違えと同じ形)。
-#
-# 観測できていた40キーは記録として残す (どんな形が返るかの見当が付く)。
-# **これは貼る値ではない。**
-#
-#   age.from/to, desired_areas[].{prefecture_id,city_ids,city_id,cities},
-#   addresses[].{prefecture_id,city_ids,cities}, desired_features[],
-#   desired_job_category_ids[], employment_statuses[], employment_types[],
-#   favorite, careers, career_job_categories[].job_category_id,
-#   career_job_contents[], self_pr, scout, read_profile, genders[],
-#   last_education_ids[], last_login, member_id[], member_qualification_ids[],
-#   qualifications_match_all, include_qualifications_acquisition_scheduled,
-#   desired_join_times[], recommend, customer_search_condition_id,
-#   recently_registered, pagination.{limit,page}, sort, nav_type
-api.candidate_list.payload_template: UNRESOLVED
+# 取り直し: Actions → Recon (manual) → command: observe-search
+api.candidate_list.payload_template: |
+  {
+    "addresses": [
+      {
+        "cities": [],
+        "city_ids": [],
+        "prefecture_id": ""
+      }
+    ],
+    "age": {
+      "from": "0",
+      "to": "40"
+    },
+    "career_job_categories": [
+      {
+        "job_category_id": 10
+      }
+    ],
+    "career_job_contents": [],
+    "careers": false,
+    "customer_search_condition_id": "{{SEARCH_CONDITION_ID:string}}",
+    "desired_areas": [
+      {
+        "cities": [],
+        "city_id": "",
+        "city_ids": [
+          14131,
+          14132,
+          14133,
+          14134,
+          14135,
+          14136,
+          14137,
+          14152,
+          14102,
+          14109,
+          14118
+        ],
+        "prefecture_id": "14"
+      },
+      {
+        "cities": [],
+        "city_id": "",
+        "city_ids": [
+          13104,
+          13113,
+          13209,
+          13206,
+          13208,
+          13225,
+          13224
+        ],
+        "prefecture_id": "13"
+      }
+    ],
+    "desired_features": [
+      "236",
+      "255",
+      "524",
+      "715",
+      "254",
+      "521",
+      "13",
+      "260",
+      "574",
+      "144"
+    ],
+    "desired_job_category_ids": [
+      "10"
+    ],
+    "desired_join_times": [],
+    "employment_statuses": [],
+    "employment_types": [
+      "1"
+    ],
+    "favorite": false,
+    "genders": [
+      "1"
+    ],
+    "include_qualifications_acquisition_scheduled": false,
+    "last_education_ids": [],
+    "last_login": "0",
+    "member_id": [],
+    "member_qualification_ids": [],
+    "nav_type": 0,
+    "pagination": {
+      "limit": "{{PAGE_SIZE:number}}",
+      "page": "{{PAGE:number}}"
+    },
+    "qualifications_match_all": false,
+    "read_profile": 0,
+    "recently_registered": false,
+    "recommend": false,
+    "scout": 0,
+    "self_pr": false,
+    "sort": "latest_logged_in_at"
+  }
 
 # ------------------------------------------------------------------------
 # **候補者一覧に氏名は無い。**
