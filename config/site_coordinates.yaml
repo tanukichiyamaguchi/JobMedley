@@ -642,15 +642,39 @@ api.send.paid.success_statuses: UNRESOLVED
 # 医院名・職種・雇用形態を揃えた文字列で行う
 # (recon.observe_job_offers.WANTED_OFFER)。
 #
-# **jobOfferSalaryId は未確定のままである。** この求人には4つ在る::
+# **jobOfferSalaryId も埋まった** (2026-08-30 follow-send 5回目・実測34回目)。
+#
+# この求人には給与条件が4つ在った::
 #
 #     3381377, 3381378, 3381379, 3381380
 #
-# どれを使うかは応答からは決まらない。**推測しない** (原則3)。
-# 次の follow-send が、媒体自身のクライアントが選んだ値を記録する
-# (payload_shape.REVEALED_KEYS が求人IDの2欄だけ値を残すようにしてある。
-# memberId と searchUuid は伏せたままである -- 「IDだから安全」ではなく
-# 「**誰の** IDか」で分けている)。
+# どれを使うかは求人一覧の応答からは決まらないので、推測しなかった (原則3)。
+# かわりに **媒体自身のクライアントが選んだ値を記録した** -- 教わった導線を
+# そのまま辿り (求人を選ぶ → 本文に目印 → 確認して送る)、遮断した送信リクエストの
+# 中身を読んだ::
+#
+#     "jobOfferId": 811220,
+#     "jobOfferSalaryId": 3381377,
+#
+# **jobOfferId が独立に一致したことが、この観測の裏取りになっている。** 811220 は
+# 前日に求人一覧から名前で突き合わせて決めた値で、こちらは送信フォームの
+# 求人検索が選んだ値である。**別々の経路が同じ値を指した。**
+#
+# ------------------------------------------------------------------------
+# **残る2つは実行時に決まる。** 記法に置き換えてある::
+#
+#     memberId    {{CANDIDATE_ID}}   一覧の応答の members[].id
+#     searchUuid  {{SEARCH_UUID}}    同じ応答の search_uuid
+#
+# **memberId の型に注意。** 媒体自身のクライアントは **数値** で送っていた
+# (観測した種別は number)。こちらは文字列を差し込む。GraphQL の ``ID`` 入力は
+# 仕様上どちらも受け付けるが、**この媒体が実際にどう扱うかは観測していない**。
+# 1通目の応答で確かめること (原則3 -- 「仕様上そうだから大丈夫」は観測ではない)。
+#
+# 記法のままでは送れない。api.payloads.assert_fully_filled が ``{{...}}`` を
+# 見つけて止める。差し込みは api.payloads.build_send_payload が行い、
+# searchUuid は ``extra`` で渡す。
+# ------------------------------------------------------------------------
 # ------------------------------------------------------------------------
 #
 # 埋め忘れたまま送ろうとしても、api.payloads.assert_fully_filled が送信の前に
@@ -711,10 +735,10 @@ api.send.paid.payload_template: |
     "variables": {
       "input": {
         "jobOfferId": 811220,
-        "jobOfferSalaryId": "<number>",
-        "memberId": "<number>",
+        "jobOfferSalaryId": 3381377,
+        "memberId": "{{CANDIDATE_ID}}",
         "scoutMessage": "{{BODY}}",
-        "searchUuid": "<string>"
+        "searchUuid": "{{SEARCH_UUID}}"
       }
     }
   }
