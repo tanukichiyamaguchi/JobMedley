@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import Any
 
 from jobmedley_scout.api.transport import HttpResponse
@@ -64,10 +65,16 @@ class PlaywrightTransport:
             headers=dict(headers),
             data=None if json is None else dict(json),
         )
+        # **実際に応答を返したURLを控える。** Playwright は既定で転送を辿るので、
+        # 頼んだ先とは別のページの中身が HTTP 200 で返りうる (実測44〜45回目)。
+        final_url = ""
+        with suppress(Exception):
+            final_url = str(response.url)
         return HttpResponse(
             status=response.status,
             body_text=_bounded(response.text()),
             headers=_plain(response.headers),
+            final_url=final_url,
         )
 
 

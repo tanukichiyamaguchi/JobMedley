@@ -43,6 +43,7 @@ from jobmedley_scout.config.schema import IngestConfig, SafetyConfig
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
 from jobmedley_scout.errors import ConfigError
 from jobmedley_scout.models.candidate import Candidate
+from jobmedley_scout.recon.open_structure import redact_url
 from jobmedley_scout.state import candidate_repo
 
 #: 一覧の要求本文で差し替える欄の名前。**座標側と揃っていること**
@@ -321,7 +322,7 @@ def _with_resumes(
         outcome = client.call(endpoint, url=url, json_body=body)
         payload = _resume_payload(outcome)
         if payload is None:
-            reason = _resume_failure_reason(endpoint, outcome)
+            reason = _resume_failure_reason(endpoint, outcome, url)
             report.resume_failures[reason] = report.resume_failures.get(reason, 0) + 1
             enriched.append(candidate)
             continue
@@ -350,7 +351,24 @@ def _url_of(endpoint: Endpoint, *, used_by: str) -> str:
     return url
 
 
-def _resume_failure_reason(endpoint: Endpoint, outcome: ApiOutcome) -> str:
+def _redirect_note(outcome: ApiOutcome, requested_url: str) -> str:
+    """Whether the answer came from somewhere else. **3値を潰さない。**
+
+    実測44〜45回目、レジュメAPIが3回とも1バイト違わない5万字のHTMLを返した。
+    ヘッダを足しても長さが動かないのは、要求がハンドラに届いていない形である。
+    転送されていれば ``HTTP 200 + HTML`` はそのまま説明が付く。
+
+    **URLは伏せて出す** -- 会員IDが載りうる (13.2)。
+    """
+    redirected = outcome.response.was_redirected(requested_url)
+    if redirected is None:
+        return "転送されたかは分かりません (記録がありません)"
+    if not redirected:
+        return "転送はされていません (頼んだ先が答えました)"
+    return f"**転送されました** -> {redact_url(outcome.response.final_url)}"
+
+
+def _resume_failure_reason(endpoint: Endpoint, outcome: ApiOutcome, requested_url: str) -> str:
     """Why one resume could not be read. **値は1つも含めない** (13.2)。
 
     ステータス・GraphQL の errors コード・エラー欄のキーパスだけを出す。媒体の
@@ -370,6 +388,7 @@ def _resume_failure_reason(endpoint: Endpoint, outcome: ApiOutcome) -> str:
     sent = ", ".join(outcome.request_headers) or "(記録がありません)"
     return (
         f"HTTP {outcome.status} / 応答本文がオブジェクトではありません ({shape})"
+        f" / {_redirect_note(outcome, requested_url)}"
         f" / こちらが送ったヘッダ: {sent}"
     )
 
