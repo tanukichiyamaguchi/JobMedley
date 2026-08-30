@@ -44,6 +44,63 @@ APPLY_BUTTON: Final[str] = "【このスカウトに応募する】"
 #: 「パートの募集かもしれない」と読まれる。
 FORBIDDEN_TERMS: Final[tuple[str, ...]] = ("パート", "アルバイト", "時給")
 
+#: 媒体への登録・利用に礼を述べる表現。**当院は媒体の運営者ではない。**
+#:
+#: 実測40回目、1通目の下見にこう書かれていた::
+#:
+#:     ご登録いただき、ご自身のキャリアと向き合っていらっしゃること自体に
+#:     敬意を持ってご連絡しています。
+#:
+#: 求職者が登録したのはジョブメドレーであって当院ではない。当院は他の求人企業と
+#: 同じ一利用者であり、**礼を述べる立場が無い**。丁寧に見えるが事実として誤りで、
+#: 読み手には「この医院はこの媒体を自分のものだと思っている」と映る。
+#:
+#: **礼の構文だけを拾う。** 「ご登録の際に」のような中立な言及まで落とさない。
+PLATFORM_THANKS: Final[tuple[str, ...]] = (
+    "ご登録いただ",
+    "ご登録くださ",
+    "ご登録ありがと",
+    "登録してくださ",
+    "ご利用いただ",
+    "ご利用ありがと",
+)
+
+#: こちらから見えている情報の範囲への言及。**否定形だけを拾う。**
+#:
+#: 「詳しいご経歴までは拝見できておりません」は読み手に何の意味も持たない。
+#: こちらの都合であって相手の関心事ではない。
+#:
+#: **「プロフィールを拝見しました」は落とさない。** 肯定形は正常な文である。
+#: **「一緒に確認させていただきます」も落とさない。** これはプロンプトが要求する
+#: 表現で、通勤の相談を持ちかけるものである (STEP1)。
+_SYSTEM_META: Final[re.Pattern[str]] = re.compile(
+    r"(拝見|把握)(でき|して)(て)?(おり|い)?(ませ|ず|ない)"
+)
+
+#: 記載が無いのに相手の内心・姿勢・日々の行動を述べる言い回し。
+#:
+#: **一つ一つが実測40回目の本文から取ってある。** 一般化した正規表現にすると
+#: 正常な文まで落ちて書き直しが空回りするので、実際に出た形だけを持つ。
+#:
+#: 「〜かと思います」は落とさない -- 通勤時間の断定を避ける表現で、プロンプトが
+#: 要求している (STEP1-4)。
+_UNGROUNDED: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"キャリア(と|に)向き合"),
+    re.compile(r"想像(し|いたし)(て|ます|ており)"),
+    re.compile(r"日々[^。]{0,24}(積み重ね|重ねられ|努力|研鑽)"),
+    re.compile(r"(され|されて|してこられ)ている(方|お方)だからこそ"),
+    re.compile(r"慎重に(なられ|なって)"),
+    re.compile(r"のではないでしょうか"),
+)
+
+#: 職種一般への賛辞。**「歯科衛生士は〜な仕事です」という定義文だけを拾う。**
+#:
+#: 誰にでも当てはまる文は、その人宛ではない。プロンプトの「ガヤ (一般論の水増し)」
+#: がまさにこれで、禁止と書いてあったのに実際に出た。
+_GENERIC_PRAISE: Final[re.Pattern[str]] = re.compile(
+    r"歯科衛生士(は|とは)[^。]{0,60}(仕事|お仕事)です"
+)
+
 #: 箇条書きの記号。行頭に現れたら違反 (絶対禁止事項)。
 #:
 #: **行頭に限る。** 「・」は文中の並列にも使われるので、どこでも禁止にすると
@@ -94,6 +151,14 @@ class BodyViolationKind(StrEnum):
     UNFILLED_SLOT = "unfilled_slot"
     #: 医院の住所 (郵便番号・番地) が本文に出た。運用者が「必要ない」とした欄。
     STREET_ADDRESS_LEAKED = "street_address_leaked"
+    #: 媒体への登録・利用に礼を述べた。**当院は媒体の運営者ではない** (実測40回目)。
+    PLATFORM_THANKS = "platform_thanks"
+    #: こちらから見えている情報の範囲に触れた。読み手には関係が無く、蛇足である。
+    SYSTEM_META = "system_meta"
+    #: 記載が無いのに相手の内心・姿勢・日々の行動を述べた。**創作である。**
+    UNGROUNDED_CLAIM = "ungrounded_claim"
+    #: 職種一般への賛辞で字数を埋めた。誰にでも当てはまる文はその人宛ではない。
+    GENERIC_PRAISE = "generic_praise"
     #: 本文にURLが出た。**このプロンプトはURLを求めていない。**
     URL_PRESENT = "url_present"
 
@@ -196,6 +261,7 @@ def validate_body(
     violations.extend(_check_required_parts(body, member_code))
     violations.extend(_check_address(body, clinic_address))
     violations.extend(_check_forbidden(body))
+    violations.extend(_check_grounding(body))
     violations.extend(_check_urls(body))
     violations.extend(_check_formatting(body))
     violations.extend(_check_length(body))
@@ -299,6 +365,81 @@ def _check_forbidden(body: str) -> list[BodyViolation]:
         for term in FORBIDDEN_TERMS
         if term in body
     ]
+
+
+def _check_grounding(body: str) -> list[BodyViolation]:
+    """Claims the sender has no standing or no facts to make. **実測40回目。**
+
+    1通目の下見にこの段落が出た::
+
+        ご登録いただき、ご自身のキャリアと向き合っていらっしゃること自体に
+        敬意を持ってご連絡しています。歯科衛生士は、患者様の小さな変化に気づき、
+        長い時間をかけて信頼を積み上げる仕事です。日々そうした積み重ねを
+        されている方だからこそ、次の環境選びも慎重になられているのではと
+        想像しています。詳しいご経歴までは拝見できておりませんが、……
+
+    4種類の誤りが1段落に同居していた。礼を述べる立場の誤り、相手の内心の創作、
+    職種一般の賛辞、こちらの都合の開示である。
+
+    **原因は禁止の不足ではなかった。** プロンプトの絶対禁止事項には既に
+    「プロフィールに記載のない事柄の推測や創作」と「ガヤ (一般論の水増し)」が
+    書いてあった。それでも出たのは、同じプロンプトの実行手順が
+    「具体的に想像し」「共感を示す」と **書けと命じていた** からである。
+    レジュメが読めず材料がゼロの状態で書けと言われれば、創作しか残らない。
+
+    だから直したのは手順のほうで (材料が無ければ段落ごと省く)、ここはその裏取りである。
+    **検査だけでは直らないし、プロンプトだけでは確かめられない。**
+    """
+    out: list[BodyViolation] = []
+    for phrase in PLATFORM_THANKS:
+        if phrase in body:
+            out.append(
+                BodyViolation(
+                    kind=BodyViolationKind.PLATFORM_THANKS,
+                    detail=(
+                        "媒体への登録・利用に礼を述べています。"
+                        "**当院はこの媒体の運営者ではありません。** 求職者が登録したのは"
+                        "媒体であって当院ではなく、礼を述べる立場がありません。"
+                    ),
+                    evidence=phrase,
+                )
+            )
+    if match := _SYSTEM_META.search(body):
+        out.append(
+            BodyViolation(
+                kind=BodyViolationKind.SYSTEM_META,
+                detail=(
+                    "こちらから見えている情報の範囲に触れています。"
+                    "読み手には関係が無く、蛇足です。書かなければ済みます。"
+                ),
+                evidence=match.group(0),
+            )
+        )
+    for pattern in _UNGROUNDED:
+        if match := pattern.search(body):
+            out.append(
+                BodyViolation(
+                    kind=BodyViolationKind.UNGROUNDED_CLAIM,
+                    detail=(
+                        "プロフィールに記載が無いのに、相手の内心・姿勢・日々の行動を"
+                        "述べています。**分からないことは書けません。**"
+                        "材料が無いなら、その段落ごと省いてください。"
+                    ),
+                    evidence=match.group(0),
+                )
+            )
+    if match := _GENERIC_PRAISE.search(body):
+        out.append(
+            BodyViolation(
+                kind=BodyViolationKind.GENERIC_PRAISE,
+                detail=(
+                    "職種一般への賛辞で字数を埋めています。"
+                    "誰にでも当てはまる文は、その人宛ではありません。"
+                ),
+                evidence=match.group(0),
+            )
+        )
+    return out
 
 
 def _check_formatting(body: str) -> list[BodyViolation]:
@@ -430,6 +571,7 @@ __all__ = [
     "BOLD_MARKERS",
     "BULLET_PREFIXES",
     "FORBIDDEN_TERMS",
+    "PLATFORM_THANKS",
     "HEADLINE",
     "MAX_CHARS",
     "MIN_CHARS",
