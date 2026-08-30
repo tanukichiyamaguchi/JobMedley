@@ -28,6 +28,7 @@ on:
           - read-bundle
           - observe-job-offers
           - observe-search
+          - observe-headers
           - preview
           - preflight
           - coordinates
@@ -187,6 +188,14 @@ jobs:
       - name: Observe job offers (no clicks)
         if: inputs.command == 'observe-job-offers'
         run: scout recon observe-job-offers
+
+      # **押さない。送信しない。値も読まない。** ページを開いて meta / storage /
+      # window の **名前だけ** を集める。x-csrf-token は それだけで POST を通せる鍵で、
+      # x-customer-user-email は運用者のメールアドレスである (12.7/13.2)。
+      # 集めるJSに値を返す枝が1つも無いことで、構文として塞いである。
+      - name: Observe request-header sources (names only)
+        if: inputs.command == 'observe-headers'
+        run: scout recon observe-headers
 
       # **押さない。送信しない。** 一覧を開くと媒体自身が飛ばす検索の POST を
       # 聴いて、その **要求本文** を貼れる雛形にして出すだけである。

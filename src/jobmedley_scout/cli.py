@@ -103,6 +103,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "observe-search",
         help="一覧の要求本文 (api.candidate_list.payload_template) を観測 (押下なし・送信なし)",
     )
+    recon_sub.add_parser(
+        "observe-headers",
+        help="ブラウザが付ける要求ヘッダの出所を名前だけで探す (押下なし・値は出さない)",
+    )
     recon_sub.add_parser("resume-keys", help="レジュメのキーパスを出力 (値は出さない)")
     recon_sub.add_parser("inbox", help="受信箱の構造を観測")
 
@@ -350,6 +354,8 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "observe-job-offers": "recon-capture-send",
     # 一覧を開いて要求本文を拾うだけ。聴く経路を座標から取るので専用の集合を使う。
     "observe-search": "recon-observe-search",
+    # ページを開いて名前だけを読む。押下も送信も無い。
+    "observe-headers": "recon-observe-headers",
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
 }
@@ -490,6 +496,19 @@ def _dispatch_recon(
             coordinates.url("nav.candidate_list_url"),
         )
         print(offers_observed.render())
+        return int(ExitCode.OK)
+
+    if args.recon_command == "observe-headers":
+        from jobmedley_scout.recon.observe_headers import observe_headers
+
+        # 認証済みの観測にはセッションが要る。12.7 のとおり毎回シークレットから復元する。
+        _restore_session_from_secrets(config)
+        headers_observed = observe_headers(
+            config.browser,
+            config.paths.credentials_dir,
+            coordinates.url("nav.candidate_list_url"),
+        )
+        print(headers_observed.render())
         return int(ExitCode.OK)
 
     if args.recon_command == "observe-search":

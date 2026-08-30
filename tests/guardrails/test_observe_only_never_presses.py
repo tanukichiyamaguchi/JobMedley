@@ -76,9 +76,18 @@ def test_the_relaxation_is_used_by_exactly_the_commands_that_never_press() -> No
     # 「**媒体自身が飛ばす通信を素通しさせないと本文が観測できないから**」である
     # -- 遮ってしまうと POST が成立せず、聴けるのは失敗した要求だけになる。
     # 押す呼び出しは1つも無い (goto と待機だけ)。
+    # observe_headers.py    ページを開いて meta / storage / window の名前だけを読む
+    #
+    # 2026-08-30 に足した。**押す呼び出しは無い** (goto と待機と page.evaluate だけ)。
+    #
+    # ``page.evaluate`` は原理的には押せる。だからこのモジュールについては
+    # **JS の中身そのもの** を別の検査で固定してある --
+    # tests/recon/test_header_sources.py が、集めるJSに値を読む枝が1つも無いことと、
+    # 名前しか返さないことを確かめている。押す枝も同様に存在しない。
     assert users == {
         "gate.py",
         "observe_api.py",
+        "observe_headers.py",
         "observe_job_offers.py",
         "observe_search.py",
     }, (

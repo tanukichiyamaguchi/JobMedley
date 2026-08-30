@@ -2979,3 +2979,85 @@ HTMLが返ると分かった時点で、原因の候補は3つ4つに絞れた�
 
 ヘッダを観測する仕掛けは30行で、実行1回で答えが出る。当てずっぽうの1回と
 同じ手間である。
+
+---
+
+## 実測42回目 — 引き算で答えが出た (2026-08-30)
+
+`observe-resume`。前回入れた要求ヘッダの観測が、そのまま答えを出した。
+
+ブラウザが送っているもの:
+
+```
+accept: application/json, text/plain, */*
+accept-language: ja-JP,ja;q=0.9,en;q=0.8
+content-type: application/json;charset=UTF-8
+cookie: (値は伏せています)
+origin: https://customers.job-medley.com
+referer: (値は伏せています)
+sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform: (値は伏せています)
+user-agent: (値は伏せています)
+x-csrf-token: (値は伏せています)
+x-customer-user-email: (値は伏せています)
+x-customer-user-id: (値は伏せています)
+x-experiment-data: (値は伏せています)
+```
+
+こちらが送っているもの:
+
+```
+content-type: application/json
+```
+
+**`x-csrf-token` が無い。** CSRF トークンの無い POST を弾いてログイン画面へ
+転送するのは、この種のフレームワークの標準の挙動である。実測41回目にレジュメAPIが
+返した **5万字のHTML** の正体がこれである。
+
+一覧API (`members/search/`) が同じ条件で通っているのは事実として観測できている。
+**なぜ片方だけ通るのかは分かっていない** -- 分かる必要も、いまは無い。
+
+### 当てにいかない
+
+出所は分からない。meta タグかもしれない。埋め込みの JSON かもしれない。
+storage かもしれない。**どれも1行で試せる。だが当てても、当たったことを
+確かめる手段が無い** (原則3)。
+
+`scout recon observe-headers` を足した。ページを開いて、meta の name、
+`localStorage` / `sessionStorage` のキー、`window` 直下の名前を集め、
+4つのヘッダそれぞれについて **出所らしい名前** を並べる。
+
+**値は1文字も読まない。** 読まないようにしたのではなく、**読む書き方をしていない** --
+集めるJSに `getAttribute("content")` も `getItem` も無い。その「無いこと」自体を
+検査で固定した。`x-csrf-token` はそれだけで POST を通せる鍵であり、
+`x-customer-user-email` は運用者のメールアドレスである (12.7/13.2)。
+
+### 名前の当て方で一度外した
+
+最初の実装は部品のどれか1つでも当たれば候補にしていた。結果:
+
+```
+x-customer-user-id     -> customer-user-id, customer_user_email   ← 混ざった
+x-customer-user-email  -> customer-user-id, customer_user_email   ← 混ざった
+```
+
+`x-customer-user-id` と `x-customer-user-email` は `customer` と `user` を
+共有している。**最後の部品を必須にした** -- 名前の最後がそのものを指すからである。
+そのうえで前の部品も1つ以上要求する (`token` や `id` はどのページにも在る)。
+
+```
+x-csrf-token           -> csrf-token, csrfToken
+x-customer-user-id     -> customer-user-id
+x-customer-user-email  -> customer_user_email
+x-experiment-data      -> experiment-data
+```
+
+### この回の意味
+
+**観測は、引き算で効く。**
+
+前回入れたのは「ブラウザが送ったヘッダを控える」という30行の仕掛けで、
+それ自体は何も直していない。だが自分が送っているものは既に分かっていたので、
+**並べた瞬間に差が出た**。
+
+当てにいっていたら、4つのうちどれを足すかで何回か往復していた。そして当たっても、
+なぜ直ったかは分からないままだった。
