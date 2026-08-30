@@ -1,0 +1,92 @@
+name: First send (manual, ONE message)
+
+# **このワークフローだけが送信します。** 送ったものは取り消せず、相手の受信箱に
+# 残り、月次の送信枠を1通消費します (13.6)。だから他のどのワークフローからも
+# 呼べない形にしてあります -- 手で起動し、手で確認の言葉を打つ以外に道はありません。
+#
+# 上限は **1件** です。設定でも入力でも変えられません
+# (runtime/commands/send_first.py の FIRST_SEND_CAP)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '送信を承知したら SEND ONE と入力 (それ以外では送りません)'
+        type: string
+        required: true
+        default: ""
+
+concurrency:
+  group: scout-first-send
+  # 12.1: **絶対に true にしないこと。** 走行中にキャンセルすると、送信後・
+  # 状態保存前で落ちて送信記録が巻き戻る。参照実装はこれで56件失った。
+  cancel-in-progress: false
+
+jobs:
+  first-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      JOBMEDLEY_STORAGE_STATE_B64: ${{ secrets.JOBMEDLEY_STORAGE_STATE_B64 }}
+      JOBMEDLEY_SESSION_CURL: ${{ secrets.JOBMEDLEY_SESSION_CURL }}
+      JOBMEDLEY_EMAIL: ${{ secrets.JOBMEDLEY_EMAIL }}
+      JOBMEDLEY_PASSWORD: ${{ secrets.JOBMEDLEY_PASSWORD }}
+      # 13.6: **二重に明示的な操作。** 入力欄に SEND ONE と打たれたときだけ
+      # dry_run が外れる。打たれなければ 'true' のままで、コマンド側の門が止める。
+      #
+      # **文字列として比較する。** GitHub の式は型の違う比較を数値へ変換するので、
+      # 真偽値で書くと空入力が false と等しくなる -- scout.yml で一度踏んだ穴。
+      SCOUT_DRY_RUN: >-
+        ${{ inputs.confirm == 'SEND ONE' && 'false' || 'true' }}
+      SCOUT_STATE_LOSS_GUARD: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        timeout-minutes: 6
+        run: pip install -e '.'
+
+      - name: Install browser
+        timeout-minutes: 8
+        run: python -m playwright install chromium
+
+      # 12.7: **状態のみ。** 資格情報は別ディレクトリにあり、ここには含まれない。
+      # 送信記録がここに載る -- 次回の重複判定がこれを見る。
+      - name: Restore state (NOT credentials)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: scout-state-${{ github.run_id }}
+          restore-keys: scout-state-
+
+      # 入力が合っていなければ SCOUT_DRY_RUN は 'true' のままで、コマンドは
+      # 「送っていません」と報告して終わる。**ここで弾かずに走らせるのは、
+      # 弾いた理由を報告の形で残すためである。**
+      - name: Send exactly one message
+        run: scout send-first --i-understand-sends-are-irreversible
+
+      # 13.2: 送った本文には会員番号での宛名と居住地が入る。保持日数は偵察ダンプと
+      # 同じ短さにする。**ログには出していない。**
+      - name: Upload the message that was sent
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-first-send
+          path: artifacts/recon/send-first/
+          retention-days: 3
+          if-no-files-found: warn
+
+      # 送信記録を持ち帰る。**次回の重複判定がこれを見る** ので、失われると
+      # 同じ候補者へ二度送りうる (9.3)。
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: scout-state-${{ github.run_id }}

@@ -51,6 +51,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ingest", help="候補者を取り込む")
     sub.add_parser("generate", help="文面を生成する")
     sub.add_parser("send", help="送信する")
+    first = sub.add_parser(
+        "send-first",
+        help="**1通だけ**送る (段階4-3)。dry_run 解除と取り消し不可の承知が要る",
+    )
+    # 13.6: **二重の明示操作。** dry_run の解除だけでは送らない。
+    first.add_argument(
+        "--i-understand-sends-are-irreversible",
+        dest="acknowledged",
+        action="store_true",
+        help="送信は取り消せず、相手の受信箱に残り、月次の枠を1通消費することを承知する",
+    )
     sub.add_parser("followup", help="追客を実行する")
     sub.add_parser("sync-replies", help="返信を検知する")
     sub.add_parser("analytics", help="週次・月次の分析を出力する")
@@ -200,6 +211,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         assert_ready_for(coordinates, "ingest")
         return _dispatch_ingest(config, coordinates)
 
+    if args.command == "send-first":
+        assert_ready_for(coordinates, "send-first")
+        return _dispatch_send_first(args, config, coordinates)
+
     if args.command == "preview":
         # **送信の座標は要求しない。** 一通も送らないコマンドが送信の応答を
         # 解釈するための座標を要求すると、梯子が閉じる (coordinates.py の注記)。
@@ -277,6 +292,74 @@ def _dispatch_preview(config: Config, coordinates: SiteCoordinates) -> int:
         )
     print(report.render())
     return int(ExitCode.OK)
+
+
+def _dispatch_send_first(
+    args: argparse.Namespace, config: Config, coordinates: SiteCoordinates
+) -> int:
+    """**1通だけ送る。** ここが取り返しのつかない唯一の場所である (13.6)。
+
+    門は3つ。``safety.dry_run`` が明示的に false であること、取り消せないことの
+    承知が渡されていること、そして上限が定数の1件であること。門は
+    :func:`runtime.commands.send_first.send_first` の側にもあり、**どちらか
+    片方だけでは送れない**。
+    """
+    from anthropic import Anthropic
+
+    from jobmedley_scout.api.endpoints import build_endpoints
+    from jobmedley_scout.browser import session_store
+    from jobmedley_scout.browser.context import browser_context
+    from jobmedley_scout.browser.navigation import goto
+    from jobmedley_scout.clock import SystemClock
+    from jobmedley_scout.config.placeholders import require
+    from jobmedley_scout.config.secrets import load_secrets
+    from jobmedley_scout.generation.clinic import load_clinic_facts
+    from jobmedley_scout.runtime.commands.send_first import FirstSendStage, send_first
+    from jobmedley_scout.state.db import open_state_db
+
+    secrets = load_secrets()
+    api_key = secrets.require_anthropic_key()
+
+    _restore_session_from_secrets(config)
+    session = session_store.session_path(config.paths.credentials_dir)
+    if not session.exists():
+        print("保存セッションがありません。段階1からやり直してください。", file=sys.stderr)
+        return int(ExitCode.AUTH_EXPIRED)
+
+    clinic = load_clinic_facts(Path("config/clinic.yaml"))
+    prompt_template = Path("config/prompts/scout_dental_hygienist.md").read_text(encoding="utf-8")
+    clock = SystemClock()
+    connection = open_state_db(config.paths.state_dir / "state.sqlite3", clock)
+    destination = config.paths.recon_dump_dir / "send-first" / "sent-message.md"
+
+    with browser_context(config.browser, storage_state=session) as (context, page):
+        list_url = require(coordinates.url("nav.candidate_list_url"), used_by="cli.send_first")
+        goto(page, list_url, config.browser)
+        client, csrf_note = _api_client_with_csrf(
+            context, page, coordinates, used_by="cli.send_first"
+        )
+        print(f"CSRFトークン: {csrf_note}")
+        report = send_first(
+            client,
+            build_endpoints(coordinates),
+            coordinates,
+            config.ingest,
+            config.safety,
+            connection,
+            clock,
+            llm=Anthropic(api_key=api_key),
+            llm_config=config.llm,
+            prompt_template=prompt_template,
+            clinic=clinic,
+            clinic_address=clinic["CLINIC_ADDRESS"],
+            max_requests=config.safety.max_llm_requests_per_message,
+            acknowledged=bool(getattr(args, "acknowledged", False)),
+            run_id=f"send-first-{clock.now().isoformat()}",
+            destination=destination,
+        )
+    print(report.render())
+    # **送れなかったことを成功で終えない** (原則2)。
+    return int(ExitCode.OK if report.reached() is FirstSendStage.SENT else ExitCode.UNKNOWN)
 
 
 def _dispatch_ingest(config: Config, coordinates: SiteCoordinates) -> int:

@@ -494,6 +494,25 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
     ),
     # 生成は媒体座標をほとんど要求しない -- 純粋ロジックとLLMだけで完結する。
     "generate": frozenset(),
+    # **1通目だけの集合。** 送信路の座標のうち、``success_statuses`` と
+    # ``auth_failure_codes`` は「1通送らないと分からない」ものである
+    # (docs/ladder.md 4-3)。送る前に要求すると梯子が閉じるので、1通目だけは
+    # 外す。暫定で 2xx を使うことは報告に明記され、判定の本体は本文の
+    # ``errors`` と ``errorMessage`` のほうである (api/success.py の3本立て)。
+    "send-first": frozenset(
+        {
+            "auth.success_marker_selector",
+            "nav.candidate_list_url",
+            "nav.list_ready_selector",
+            "api.base_url",
+            "api.candidate_list.url_pattern",
+            "api.candidate_list.payload_template",
+            "api.resume.url_pattern",
+            "api.resume.payload_template",
+            "api.send.paid.url_pattern",
+            "api.send.paid.payload_template",
+        }
+    ),
     "send": frozenset(
         {
             "auth.success_marker_selector",

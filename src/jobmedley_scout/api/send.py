@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from jobmedley_scout.api.client import JobMedleyApiClient
 from jobmedley_scout.api.endpoints import Endpoint
 from jobmedley_scout.api.payloads import build_send_payload
@@ -45,6 +47,7 @@ def send_message(
     payload_template: object,
     platform_candidate_id: str | None = None,
     followup_days: int | None = None,
+    extra: Mapping[str, object] | None = None,
 ) -> SendResult:
     """Send one message. Never retries. Always reports slot and endpoint.
 
@@ -69,6 +72,13 @@ def send_message(
         body=message.body,
         followup_days=followup_days,
         used_by=f"api.send.send_message({endpoint.id})",
+        # **実行時にしか分からない値を運ぶ。** 実測20回目に観測した送信payloadには
+        # ``searchUuid`` が載っていた -- 送信は「どの検索から辿り着いた候補者か」に
+        # 紐づいている。値は一覧の応答から持ち出すので、呼び出し側が渡す。
+        #
+        # 渡し忘れは :func:`api.payloads.assert_fully_filled` が止める。記法が
+        # そのまま媒体へ渡ることは無い (13.6)。
+        extra=extra,
     )
 
     # 例外はあえて捕まえない。
