@@ -447,6 +447,11 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
     # ときに黙って一致しなくなる (原則2)。埋めようとしている
     # api.candidate_list.payload_template のほうは、**このコマンドの出力なので
     # 要求しない** -- 要求すると1歩目が自分の成果物待ちになる (recon-login と同じ)。
+    # ヘッダの出所を名前だけで探すコマンド。押下も送信も無い。
+    #
+    # **これ自体が発見の工程なので、埋めようとしている座標は要求しない**
+    # (recon-login と同じ理屈)。要る入力は遷移先だけである。
+    "recon-observe-headers": frozenset({"auth.success_marker_selector", "nav.candidate_list_url"}),
     "recon-observe-search": frozenset(
         {
             "auth.success_marker_selector",
