@@ -15,7 +15,15 @@ readme = "README.md"
 # happens. Keep CI and local on the same versions.
 dependencies = [
     "playwright>=1.49,<1.50",
-    "anthropic>=0.40,<0.50",
+    # **上限を 0.50 で切っていたのが実測38回目の原因** (docs/incidents.md)。
+    # 生成は output_config (構造化出力 + effort) と thinking={"type":"adaptive"} を
+    # 使う。どちらも 0.x には無く、SDK が kwargs を弾いて TypeError になっていた --
+    # トークン0で、媒体にもモデルにも届く前に落ちていた。
+    #
+    # **8.2 が想定していたのは「APIの仕様変更」だったが、実際に起きたのは
+    # 「SDKがAPIに追いついていない」だった。** 向きが逆なだけで結果は同じ (全件失敗)。
+    # 検査は tests/guardrails/test_llm_call_shape.py が固定している。
+    "anthropic>=1.0,<2",
     "pydantic>=2.9,<3.0",
     "PyYAML>=6.0,<7.0",
     "httpx>=0.27,<0.29",
