@@ -35,7 +35,7 @@ from jobmedley_scout.api.candidates import (
 from jobmedley_scout.api.client import ApiOutcome, JobMedleyApiClient
 from jobmedley_scout.api.endpoints import CANDIDATE_LIST, RESUME, Endpoint
 from jobmedley_scout.api.payloads import assert_fully_filled, parse_payload_template
-from jobmedley_scout.api.success import describe_failure
+from jobmedley_scout.api.success import describe_body_shape, describe_failure
 from jobmedley_scout.clock import Clock
 from jobmedley_scout.config.placeholders import require
 from jobmedley_scout.config.schema import IngestConfig, SafetyConfig
@@ -349,7 +349,9 @@ def _resume_failure_reason(endpoint: Endpoint, outcome: ApiOutcome) -> str:
     if (described := describe_failure(endpoint, outcome.status, mapping)) is not None:
         return described
     # 成功しているのに読めなかった = 本文がオブジェクトでなかった。
-    return f"HTTP {outcome.status} / 応答本文がオブジェクトではありません"
+    # **そこで止めない。** 何であるかまで言わないと次の手が決まらない (実測39回目)。
+    shape = describe_body_shape(outcome.response.body_text, outcome.response.headers)
+    return f"HTTP {outcome.status} / 応答本文がオブジェクトではありません ({shape})"
 
 
 def _resume_payload(outcome: ApiOutcome) -> Mapping[str, object] | None:

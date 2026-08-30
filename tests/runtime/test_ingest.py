@@ -434,3 +434,24 @@ def test_reading_every_resume_leaves_no_failure_lines() -> None:
     assert report.resumes_read == 1
     assert report.resume_failures == {}
     assert "読めなかった" not in report.render()
+
+
+def test_a_login_page_returned_as_200_is_named_as_html() -> None:
+    """**「オブジェクトではない」で止めない** (実測39回目)。
+
+    HTML が返っていればセッションか経路の問題だと即座に決まる。本文は読まない。
+    """
+    report, _transport, _connection = _run(
+        [
+            _page(1),
+            HttpResponse(
+                status=200,
+                body_text="<!DOCTYPE html><html>ログイン</html>",
+                headers={"content-type": "text/html"},
+            ),
+        ],
+        config=_ingest_config(fetch_resumes=True, max_pages=1),
+    )
+    text = report.render()
+    assert "HTMLらしい" in text
+    assert "ログイン</html>" not in text, "媒体の本文がログに出ています (13.2)"

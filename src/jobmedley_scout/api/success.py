@@ -42,6 +42,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Final
 
@@ -211,6 +212,55 @@ def describe_status(
         details.append(f"エラー欄に文言あり: {', '.join(paths)}")
     detail = f" ({' / '.join(details)})" if details else ""
     return f"{endpoint.id}: HTTP {status} -> {verdict}{detail}"
+
+
+#: 本文の種別を言うときに読む見出し。**値は読まない。**
+CONTENT_TYPE_HEADER = "content-type"
+
+#: 本文の頭を見て「HTMLらしい」と言うための印。**中身は読まない。**
+HTML_PREFIXES: Final[tuple[str, ...]] = ("<!doctype", "<html", "<?xml")
+
+
+def describe_body_shape(body_text: str, headers: Mapping[str, str] | None = None) -> str:
+    """What kind of thing the body is, **without quoting any of it** (13.2).
+
+    実測39回目、レジュメが読めない理由が「HTTP 200 / 応答本文がオブジェクトでは
+    ありません」までは絞れたが、**そこで止まった**。オブジェクトでないことは
+    分かっても、HTMLなのか、空なのか、JSONの配列なのかが分からない。次の手が
+    決まらない報告は、原則2 の言う「静かなゼロ」の一段浅い版である。
+
+    ここが返すのは種別と長さと ``content-type`` だけで、本文は1文字も出さない。
+    ログイン画面のHTMLが返っていれば「HTMLらしい」と分かり、それだけで
+    セッションの問題だと決まる -- 中身を読む必要は無い。
+    """
+    parts: list[str] = []
+    kind = (headers or {}).get(CONTENT_TYPE_HEADER) or (headers or {}).get("Content-Type") or ""
+    if kind:
+        parts.append(f"content-type: {kind.split(';', 1)[0].strip()}")
+    parts.append(f"長さ {len(body_text)} 字")
+
+    stripped = body_text.strip()
+    if not stripped:
+        parts.append("本文が空です")
+        return " / ".join(parts)
+    lowered = stripped[:16].lower()
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        if lowered.startswith(HTML_PREFIXES):
+            # **これが分かれば十分。** 画面が返っているならセッションか経路の問題。
+            parts.append("JSONではなくHTMLらしい (ログイン画面等の可能性)")
+        else:
+            parts.append("JSONとして読めません")
+        return " / ".join(parts)
+
+    if isinstance(parsed, list):
+        parts.append(f"JSONの配列 ({len(parsed)} 要素)")
+    elif parsed is None:
+        parts.append("JSONの null")
+    else:
+        parts.append(f"JSONだがオブジェクトではない ({type(parsed).__name__})")
+    return " / ".join(parts)
 
 
 def describe_failure(
