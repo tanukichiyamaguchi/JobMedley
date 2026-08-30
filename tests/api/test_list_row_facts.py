@@ -178,6 +178,23 @@ def test_a_shape_we_really_got_wrong_still_says_so_with_the_type() -> None:
     assert "27" not in notes
 
 
+def test_an_empty_string_age_is_the_candidate_s_choice_not_our_mistake() -> None:
+    """**文字列でも中身で意味が違う** (実測45回目)。
+
+    空なら未記入であり、こちらの形の外しではない。同じ言葉にすると、直せない
+    ものを直そうとすることになる。
+    """
+    notes = "\n".join(describe_row_shapes({**ROW, "age": "   "}))
+    assert "age: 空の文字列 (この候補者が公開していません)" in notes
+
+
+def test_a_non_numeric_age_string_says_the_spelling_differs() -> None:
+    """「20代」のような綴りなら、こちらが読み方を決め直す番である。**値は出さない。**"""
+    notes = "\n".join(describe_row_shapes({**ROW, "age": "20代"}))
+    assert "age: 数字ではない文字列です (綴りが想定と違います)" in notes
+    assert "20代" not in notes
+
+
 def test_a_missing_age_key_is_its_own_answer() -> None:
     """キーごと無いのは媒体が変わった合図であり、未記入とは違う。"""
     row = {k: v for k, v in ROW.items() if k != "age"}

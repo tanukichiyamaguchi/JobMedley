@@ -245,6 +245,12 @@ def _missing(row: Mapping[str, object], key: str) -> str:
     value = row.get(key)
     if value is None:
         return "null (この候補者が公開していません)"
+    if isinstance(value, str):
+        # **文字列でも中身で意味が違う。** 空なら未記入、数字でないなら別の綴り
+        # (「20代」等)。同じ言葉にすると、直せないものを直そうとする (実測45回目)。
+        if not value.strip():
+            return "空の文字列 (この候補者が公開していません)"
+        return "数字ではない文字列です (綴りが想定と違います)"
     return f"読めない形です ({type(value).__name__})"
 
 

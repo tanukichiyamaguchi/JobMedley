@@ -24,6 +24,26 @@ class HttpResponse:
     status: int
     body_text: str
     headers: Mapping[str, str] = field(default_factory=dict)
+    #: **実際に応答を返したURL。** 頼んだ先と違うなら、転送されている。
+    #:
+    #: 実測44〜45回目、レジュメAPIが3回とも **1バイト違わない** 5万字のHTMLを
+    #: 返した。ヘッダを足しても長さが動かないのは、要求がハンドラに届いていない
+    #: 形である。転送されていれば ``HTTP 200 + HTML`` はそのまま説明が付くが、
+    #: **測っていなかったので分からなかった**。
+    #:
+    #: 空なら「転送されたかどうかが分からない」であって「転送されていない」では
+    #: ない。区別は :meth:`was_redirected` が持つ。
+    final_url: str = ""
+
+    def was_redirected(self, requested_url: str) -> bool | None:
+        """Whether the response came from somewhere else. ``None`` if unknown.
+
+        **3値である。** 「転送された」「されていない」「分からない」を同じ言葉に
+        すると、測れていないことが「問題なし」として現れる (原則2)。
+        """
+        if not self.final_url:
+            return None
+        return self.final_url.split("?", 1)[0] != requested_url.split("?", 1)[0]
 
     def json_body(self) -> Mapping[str, object] | None:
         """Parse the body as a JSON object, or ``None``.
