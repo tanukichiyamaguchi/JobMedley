@@ -86,7 +86,21 @@ def build_endpoints(coordinates: SiteCoordinates) -> dict[str, Endpoint]:
         ),
         RESUME: Endpoint(
             id=RESUME,
-            method="GET",
+            # **GET ではない。** 隣の CANDIDATE_LIST と同じ間違いが、こちらには
+            # 残っていた。あちらは 2026-08-21 に直し、注記に予言まで書いてある --
+            # 「GET のまま呼べば当たらない。しかも 404/405 は『0件』と区別が
+            # 付かない形で上流に伝わりうる」。**そのとおりになった。**
+            #
+            # 2026-08-22 observe-resume 2回目で実測している::
+            #
+            #     POST /api/customers/graphql/MemberOnScoutProfileModalOfDesktop
+            #       -> data.memberGet.member.* (101キー)
+            #
+            # GET で呼んでいたのでルートに当たらず、媒体は 404 ページへ転送して
+            # いた。返るのは HTTP 200 の HTML で、長さは毎回同じ 51976 字。
+            # ヘッダを5回足しても1バイト動かなかったのはこのためである
+            # (実測41〜46回目 / docs/incidents.md)。
+            method="POST",
             url_pattern=coordinates.url("api.resume.url_pattern"),
             success_statuses=frozenset(range(200, 300)),
             slot=SendSlot.UNKNOWN,
