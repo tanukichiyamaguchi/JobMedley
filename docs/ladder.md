@@ -716,8 +716,33 @@ Facebook / DoubleClick 他）で、媒体のオリジンではない。
 型が読めない欄には**記法を置かない**。置けば型をこちらで決めたことになる。
 記法が無ければ差し替えも起きず、`missing_slots` に出て「使えない雛形」と分かる。
 
-**この回で座標は埋まっていない。** 型を運ぶ記法を入れたので、`observe-search` を
-もう一度実行して、型付きの雛形を取り直す必要がある。
+#### 実測37回目 — 型付きで取り直し、座標が埋まった
+
+`observe-search` の2回目。出力は1回目と同一で、記法だけが型を持った。
+
+```
+customer_search_condition_id : string
+pagination.limit             : number
+pagination.page              : number
+```
+
+**結果として、以前 `_fill` が入れていた型と同じだった。** 当たっていた。
+だがそれは今回はじめて分かったことで、前回までは確かめる手段が無かった。
+「当たっていたから確かめなくてよかった」ではない —— 当たっていたことを
+知る方法が、確かめること以外に無い。
+
+座標 `api.candidate_list.payload_template` はこれで埋まった (28キー)。
+UNRESOLVED のあいだ飛ばしていた5件の検査も復活し、全部通っている。
+
+組み立ての確認 (媒体へは行かない):
+
+```
+1ページ目: {"customer_search_condition_id": "739599", "pagination": {"limit": 25, "page": 1}}
+2ページ目: {"customer_search_condition_id": "739599", "pagination": {"limit": 25, "page": 2}}
+残った目印: 0 件
+```
+
+条件番号は文字列、ページと件数は数値。ページは進む。
 
 ### 段階3-4: レジュメAPI (`recon observe-resume`)
 
