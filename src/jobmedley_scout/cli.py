@@ -26,6 +26,7 @@ from jobmedley_scout.errors import ConfigError, KillSwitchEngaged, ScoutError
 from jobmedley_scout.runtime.exit_codes import ExitCode, exit_code_for
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from jobmedley_scout.api.client import JobMedleyApiClient
     from jobmedley_scout.config.schema import Config
     from jobmedley_scout.config.site_coordinates import SiteCoordinates
 
@@ -229,11 +230,11 @@ def _dispatch_preview(config: Config, coordinates: SiteCoordinates) -> int:
     """
     from anthropic import Anthropic
 
-    from jobmedley_scout.api.client import JobMedleyApiClient
     from jobmedley_scout.api.endpoints import build_endpoints
     from jobmedley_scout.browser import session_store
     from jobmedley_scout.browser.context import browser_context
-    from jobmedley_scout.browser.transport import PlaywrightTransport
+    from jobmedley_scout.browser.navigation import goto
+    from jobmedley_scout.config.placeholders import require
     from jobmedley_scout.config.secrets import load_secrets
     from jobmedley_scout.generation.clinic import load_clinic_facts
     from jobmedley_scout.runtime.commands.preview import preview
@@ -251,13 +252,17 @@ def _dispatch_preview(config: Config, coordinates: SiteCoordinates) -> int:
     prompt_template = Path("config/prompts/scout_dental_hygienist.md").read_text(encoding="utf-8")
     destination = config.paths.recon_dump_dir / "preview" / "scout-preview.md"
 
-    with browser_context(config.browser, storage_state=session) as (context, _page):
+    with browser_context(config.browser, storage_state=session) as (context, page):
+        # **先に遷移する。** meta タグはページの一部なので、開く前は読めない。
+        goto(
+            page,
+            require(coordinates.url("nav.candidate_list_url"), used_by="cli.preview"),
+            config.browser,
+        )
+        client, csrf_note = _api_client_with_csrf(context, page, coordinates, used_by="cli.preview")
+        print(f"CSRFトークン: {csrf_note}")
         report = preview(
-            JobMedleyApiClient(
-                PlaywrightTransport(context),
-                auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
-                idempotency_header=coordinates.optional_string("api.idempotency_header"),
-            ),
+            client,
             build_endpoints(coordinates),
             coordinates,
             config.ingest,
@@ -280,12 +285,12 @@ def _dispatch_ingest(config: Config, coordinates: SiteCoordinates) -> int:
     ブラウザを開くのは Cookie を載せるためだけで、DOM は1つも触らない。
     ボタンも押さないので、送信は起こす操作そのものが存在しない。
     """
-    from jobmedley_scout.api.client import JobMedleyApiClient
     from jobmedley_scout.api.endpoints import build_endpoints
     from jobmedley_scout.browser import session_store
     from jobmedley_scout.browser.context import browser_context
-    from jobmedley_scout.browser.transport import PlaywrightTransport
+    from jobmedley_scout.browser.navigation import goto
     from jobmedley_scout.clock import SystemClock
+    from jobmedley_scout.config.placeholders import require
     from jobmedley_scout.runtime.commands.ingest import ingest
     from jobmedley_scout.state.db import open_state_db
 
@@ -302,13 +307,17 @@ def _dispatch_ingest(config: Config, coordinates: SiteCoordinates) -> int:
 
     clock = SystemClock()
     connection = open_state_db(config.paths.state_dir / "state.sqlite3", clock)
-    with browser_context(config.browser, storage_state=session) as (context, _page):
+    with browser_context(config.browser, storage_state=session) as (context, page):
+        # **先に遷移する。** meta タグはページの一部なので、開く前は読めない。
+        goto(
+            page,
+            require(coordinates.url("nav.candidate_list_url"), used_by="cli.ingest"),
+            config.browser,
+        )
+        client, csrf_note = _api_client_with_csrf(context, page, coordinates, used_by="cli.ingest")
+        print(f"CSRFトークン: {csrf_note}")
         report = ingest(
-            JobMedleyApiClient(
-                PlaywrightTransport(context),
-                auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
-                idempotency_header=coordinates.optional_string("api.idempotency_header"),
-            ),
+            client,
             build_endpoints(coordinates),
             coordinates,
             config.ingest,
@@ -359,6 +368,39 @@ _RECON_COORDINATE_KEYS: dict[str, str] = {
     "resume-keys": "recon-resume-keys",
     "inbox": "recon-capture-send",
 }
+
+
+def _api_client_with_csrf(
+    context: object, page: object, coordinates: SiteCoordinates, *, used_by: str
+) -> tuple[JobMedleyApiClient, str]:
+    """The API client, with the CSRF header the browser sends. **値は返さない。**
+
+    実測41〜42回目。ブラウザは ``x-csrf-token`` を付けており、こちらは
+    ``Content-Type`` しか付けていなかった。トークンの無い POST は弾かれ、
+    ログイン画面へ転送される -- レジュメAPIが返していた5万字のHTMLの正体である。
+
+    **トークンを読むにはページが開いていなければならない。** meta タグは
+    ページの一部なので、遷移する前に読むと空になる。呼び出し側が先に遷移する。
+
+    返す2つ目は **有無だけの報告文** で、トークンそのものは入らない (12.7)。
+    """
+    from jobmedley_scout.api.client import JobMedleyApiClient
+    from jobmedley_scout.browser.csrf import csrf_headers
+    from jobmedley_scout.browser.transport import PlaywrightTransport
+
+    headers, note = csrf_headers(
+        page,
+        coordinates.optional_string("api.csrf_header_name"),
+        coordinates.optional_string("api.csrf_meta_name"),
+        used_by=used_by,
+    )
+    client = JobMedleyApiClient(
+        PlaywrightTransport(context),
+        auth_failure_codes=coordinates.string_list("api.auth_failure_codes"),
+        idempotency_header=coordinates.optional_string("api.idempotency_header"),
+        extra_headers=headers,
+    )
+    return client, note
 
 
 def _dispatch_recon(

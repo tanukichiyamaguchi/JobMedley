@@ -170,6 +170,23 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
         "**形だけ観測して値を伏せたものを入れないこと** -- 偵察の印 (`<bool>` 等) は"
         "文字列として媒体へ飛び、返るエラーが「0件」として現れる (実測35回目)。",
     ),
+    CoordinateSpec(
+        "api.csrf_header_name",
+        _S3,
+        CoordKind.STRING,
+        "CSRFトークンを載せる要求ヘッダの名前。`scout recon observe-resume` が出す"
+        "「ブラウザが送った要求ヘッダ」から取る。**この媒体が要求しないなら null**。",
+        nullable=True,
+    ),
+    CoordinateSpec(
+        "api.csrf_meta_name",
+        _S3,
+        CoordKind.STRING,
+        "CSRFトークンの値が入っている meta タグの name。"
+        "`scout recon observe-headers` が名前だけを出すので、そこから選ぶ。"
+        "**値は座標に書かない** -- 実行時にページから読む (12.7)。ヘッダが要らないなら null。",
+        nullable=True,
+    ),
     CoordinateSpec("api.resume.url_pattern", _S3, CoordKind.URL, "候補者レジュメ取得APIのURL。"),
     CoordinateSpec(
         "api.resume.payload_template",
