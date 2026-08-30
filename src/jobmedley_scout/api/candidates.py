@@ -231,7 +231,21 @@ def describe_row_shapes(row: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def _missing(row: Mapping[str, object], key: str) -> str:
-    return "キーがありません" if key not in row else "読めない形です"
+    """Why a scalar key produced nothing. **3つを分ける。**
+
+    実測41回目、``age: 読めない形です`` と報告した。だが ``null`` は「読めない
+    形」ではない -- **この候補者が年齢を公開していない** という観測である。
+    同じ言葉にすると、こちらの形の外しと候補者の未記入が区別できず、直せない
+    ものを直そうとする (原則2)。
+
+    **値そのものは出さない。** 出すのは型の名前だけである (13.2)。
+    """
+    if key not in row:
+        return "キーがありません"
+    value = row.get(key)
+    if value is None:
+        return "null (この候補者が公開していません)"
+    return f"読めない形です ({type(value).__name__})"
 
 
 def _shape_note(node: object, present: bool) -> str:

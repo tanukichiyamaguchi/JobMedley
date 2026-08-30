@@ -16,6 +16,7 @@ from typing import Any
 
 from jobmedley_scout.recon.api_shape import (
     ObservedCall,
+    describe_request_headers,
     describe_response,
     operation_name,
     scan_text,
@@ -83,9 +84,23 @@ class ResponseShapeListener:
 
         request_body: str | None = None
         method = "GET"
+        request_headers: tuple[str, ...] = ()
+        redirects = 0
         with suppress(Exception):
             request_body = response.request.post_data
             method = str(response.request.method)
+        # **要求ヘッダを控える。** こちらが送るのは Content-Type だけなのに、
+        # 同じURLでブラウザは JSON を受け取り、こちらは HTML を受け取っている
+        # (実測41回目)。差は観測しなければ決まらない。値は安全なものだけ (12.7)。
+        with suppress(Exception):
+            request_headers = describe_request_headers(dict(response.request.headers))
+        # **転送の数。** 0 でないなら、届いた先は頼んだ先ではない。ログイン画面へ
+        # 飛ばされて HTTP 200 の HTML が返る形は、これでしか見分けが付かない。
+        with suppress(Exception):
+            hop = response.request.redirected_from
+            while hop is not None:
+                redirects += 1
+                hop = hop.redirected_from
 
         # **要求の形を、応答より先に取る。** 呼ぶために要るのはこちらである。
         # 値は出さない -- 応答と同じ ``describe_response`` を通す (13.2)。
@@ -157,6 +172,8 @@ class ResponseShapeListener:
                 request_unread_reason=request_reason,
                 request_dropped_keys=request_dropped,
                 request_template=request_template,
+                request_headers=request_headers,
+                redirects=redirects,
             )
         )
 
