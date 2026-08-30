@@ -41,19 +41,40 @@ from typing import Any, Final
 #: 埋まっていたら値を伏せる欄。**候補者を名指ししうる唯一の絞り込み。**
 WITHHELD_KEYS: Final[frozenset[str]] = frozenset({"member_id"})
 
-#: 実行時に差し替える欄と、その差し込み記法。**キーパスで指定する。**
+#: 実行時に差し替える欄と、その差し込み名。**キーパスで指定する。**
 #:
 #: 値の一致で探さない -- ``pagination.limit`` が 25 のとき、別の欄の 25 まで
 #: 巻き込む。位置で決めれば、たまたま同じ値の欄を壊さない。
 #:
-#: 記法は :mod:`runtime.commands.ingest` の3つの定数と揃っていること。揃って
-#: いないと、貼った雛形のページ番号が差し替わらないまま何度も1ページ目を引き、
-#: 報告だけが「2ページ目」と言う (原則2)。
+#: 名前は :mod:`runtime.commands.ingest` の3つと揃っていること。揃っていないと、
+#: 貼った雛形のページ番号が差し替わらないまま何度も1ページ目を引き、報告だけが
+#: 「2ページ目」と言う (原則2)。
 RUNTIME_SLOTS: Final[dict[str, str]] = {
-    "customer_search_condition_id": "{{SEARCH_CONDITION_ID}}",
-    "pagination.limit": "{{PAGE_SIZE}}",
-    "pagination.page": "{{PAGE}}",
+    "customer_search_condition_id": "SEARCH_CONDITION_ID",
+    "pagination.limit": "PAGE_SIZE",
+    "pagination.page": "PAGE",
 }
+
+#: 差し込み記法。**観測した型を名前と一緒に持つ。**
+#:
+#: 2026-08-30 の実測36回目で分かったことがある。**この媒体は型が一貫していない。**
+#: 同じ職種IDが ``desired_job_category_ids: ["10"]`` では文字列、
+#: ``career_job_categories[].job_category_id: 10`` では数値である。市区町村IDは
+#: 数値、こだわり条件IDは文字列、年齢は文字列、``nav_type`` は数値。
+#:
+#: つまり **型は推測できない**。ところが差し替える3欄は、記法に置き換えた瞬間に
+#: 観測した型が消えていた。消えた型を実行時にこちらで決めていたことになる (原則3)。
+#:
+#: いちばん危ないのは ``pagination.page`` である。型違いで媒体が無視した場合、
+#: 毎回1ページ目が返り、**報告だけがページを進む**。エラーは出ない。静かな重複で
+#: あり、静かなゼロ件と同じ病気である (原則2)。
+#:
+#: だから記法が型を運ぶ。``{{PAGE:number}}`` なら数値として、``{{PAGE:string}}``
+#: なら文字列として入れる。**決めるのは観測であって実装ではない。**
+SLOT_MARKER: Final[str] = "{{{{{name}:{kind}}}}}"
+
+#: 観測した値の種別。**この2つ以外が来たら記法を作らない** (推測になるため)。
+SLOT_KINDS: Final[tuple[str, ...]] = ("string", "number")
 
 #: 伏せた欄に置く印。**``<...>`` の形にしてあるので、貼ったまま呼べば門が止める**
 #: (:func:`api.payloads.assert_fully_filled`)。伏せたことを運用者に決めさせる。
@@ -99,6 +120,22 @@ OBSERVED_FILTER_KEYS: Final[tuple[str, ...]] = (
     "self_pr",
     "sort",
 )
+
+
+def slot_kind(value: object) -> str:
+    """The observed JSON kind of a runtime field, or ``""`` if it is neither.
+
+    **``bool`` を数値として数えない。** Python では ``bool`` が ``int`` の
+    部分型なので、素朴に書くと ``False`` が ``number`` になる。差し込む3欄が
+    真偽値であることは無いが、そう書けることと、そう書いてよいことは違う。
+    """
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int | float):
+        return "number"
+    return ""
 
 
 def is_empty(value: object) -> bool:
@@ -154,9 +191,13 @@ def _walk(node: Any, path: str, found: dict[str, list[str]]) -> Any:
             if name in WITHHELD_KEYS and not is_empty(value):
                 found["withheld"].append(child)
                 out[name] = WITHHELD_MARKER
-            elif child in RUNTIME_SLOTS:
+            elif child in RUNTIME_SLOTS and (kind := slot_kind(value)):
                 found["slotted"].append(child)
-                out[name] = RUNTIME_SLOTS[child]
+                out[name] = SLOT_MARKER.format(name=RUNTIME_SLOTS[child], kind=kind)
+            elif child in RUNTIME_SLOTS:
+                # **型が読めない欄には記法を置かない。** 置けば、型をこちらで
+                # 決めたことになる。読めなかったことは missing_slots に出る。
+                out[name] = _walk(value, child, found)
             else:
                 out[name] = _walk(value, child, found)
         return out
@@ -206,6 +247,8 @@ def _condition_id(parsed: Mapping[str, Any]) -> str:
 
 __all__ = [
     "CONDITION_KEY",
+    "SLOT_KINDS",
+    "SLOT_MARKER",
     "OBSERVED_FILTER_KEYS",
     "RUNTIME_SLOTS",
     "WITHHELD_KEYS",
@@ -213,4 +256,5 @@ __all__ = [
     "SearchTemplate",
     "as_template",
     "is_empty",
+    "slot_kind",
 ]

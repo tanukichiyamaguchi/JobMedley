@@ -135,12 +135,18 @@ def test_the_template_is_either_unresolved_or_actually_callable() -> None:
     要求する -- 偵察の印が1つでも残っていたら落ちる。
     """
     from jobmedley_scout.api.payloads import assert_fully_filled
+    from jobmedley_scout.runtime.commands.ingest import (
+        PAGE_SIZE_SLOT,
+        PAGE_SLOT,
+        SEARCH_CONDITION_SLOT,
+        _substitute_slots,
+    )
 
-    body = json.loads(_template())
+    body = _substitute_slots(
+        json.loads(_template()),
+        {SEARCH_CONDITION_SLOT: "739599", PAGE_SLOT: 1, PAGE_SIZE_SLOT: 25},
+    )
     assert isinstance(body, dict)
-    # 実行時に入る3つだけを埋める。残りは座標に確定した値が入っているはずである。
-    body["customer_search_condition_id"] = "739599"
-    body["pagination"] = {"limit": 25, "page": 1}
     assert_fully_filled(
         body,
         used_by="tests.guardrails.test_observed_read_coordinates",
@@ -156,9 +162,19 @@ def test_a_filled_template_carries_the_three_runtime_slots() -> None:
     引きながら報告だけがページを進み、``{{SEARCH_CONDITION_ID}}`` が無ければ
     別の保存条件の母集団を引く (原則2)。
     """
+    from jobmedley_scout.runtime.commands.ingest import LIST_SLOT_PATTERN
+
     body = json.loads(_template())
-    assert body["customer_search_condition_id"] == "{{SEARCH_CONDITION_ID}}"
-    assert body["pagination"] == {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"}
+    slots = [
+        body["customer_search_condition_id"],
+        body["pagination"]["limit"],
+        body["pagination"]["page"],
+    ]
+    for slot in slots:
+        assert isinstance(slot, str) and LIST_SLOT_PATTERN.match(slot), (
+            f"差し込み欄が記法になっていません: {slot!r}。"
+            f"`scout recon observe-search` の出力をそのまま貼ってください。"
+        )
 
 
 def test_a_filled_template_keeps_the_filter_keys_that_were_observed() -> None:

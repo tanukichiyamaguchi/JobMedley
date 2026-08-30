@@ -245,7 +245,10 @@ class SearchObservation:
             out.append("  毎回1ページ目を引きながら報告だけがページを進みます。")
         out.append("")
         out.append("config/site_coordinates.yaml の api.candidate_list.payload_template に、")
-        out.append("下の JSON を1行の文字列として貼ってください:")
+        out.append("下の JSON をそのまま貼ってください (ブロックスカラー `|` の下へ):")
+        out.append("")
+        out.append("  差し込み記法は `{{名前:型}}` で、**型は観測した型である**。")
+        out.append("  この媒体は型が一貫していないので、実行時にこちらで決めない (原則3)。")
         out.append("")
         out.extend(f"  {line}" for line in captured.template.splitlines())
         return out

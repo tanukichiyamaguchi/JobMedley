@@ -122,7 +122,7 @@ def test_a_successful_run_prints_the_template_and_the_condition_number() -> None
     rendered = _found().render()
     assert _found().reached() is SearchStage.FOUND
     assert "739599" in rendered
-    assert "{{PAGE}}" in rendered
+    assert "{{PAGE:number}}" in rendered
     assert "送信も1件もしていません" in rendered
 
 
