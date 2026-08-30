@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Final
+from urllib.parse import urlsplit
 
 from jobmedley_scout.api.endpoints import Endpoint
 from jobmedley_scout.api.success import graphql_errors, is_success
@@ -39,6 +41,26 @@ FALLBACK_AUTH_CODE_HINTS: frozenset[str] = frozenset(
 )
 
 
+#: ブラウザが送っていた要求ヘッダのうち、**値まで観測できて写せるもの**。
+#:
+#: 実測42回目に ``observe-resume`` が並べた。写していないのは値が分からない3つ
+#: (``x-customer-user-id`` / ``x-customer-user-email`` / ``x-experiment-data``) と、
+#: 環境が決めるもの (``cookie`` / ``user-agent`` / ``sec-ch-ua*``) である。
+#:
+#: **観測した値を写すことは推測ではない** (原則3)。
+OBSERVED_BROWSER_HEADERS: Final[dict[str, str]] = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+    "Content-Type": "application/json;charset=UTF-8",
+}
+
+
+def _origin_of(url: str) -> str:
+    """The scheme://host of a URL. **ブラウザが同一オリジンの要求に付けるもの。**"""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+
+
 @dataclass(frozen=True)
 class ApiOutcome:
     """The result of one API call that did *not* raise."""
@@ -47,6 +69,11 @@ class ApiOutcome:
     status: int
     succeeded: bool
     response: HttpResponse
+    #: この要求で送ったヘッダの **名前だけ**。値は持たない (12.7)。
+    #:
+    #: 診断のもう片方である。ブラウザ側だけを観測しても、こちらが何を送って
+    #: いるか分からなければ差は出ない (実測44回目)。
+    request_headers: tuple[str, ...] = ()
 
     def json_body(self) -> Mapping[str, object] | None:
         return self.response.json_body()
@@ -121,8 +148,32 @@ class JobMedleyApiClient:
             # 403＋独自コードは取り逃す可能性があるので、段階3で実測すること。
             self._auth_codes = FALLBACK_AUTH_CODE_HINTS
 
-    def _headers(self, idempotency_key: str | None) -> dict[str, str]:
-        headers = {"Content-Type": "application/json", **self._extra_headers}
+    def _headers(self, idempotency_key: str | None, url: str) -> dict[str, str]:
+        """The headers to send. **ブラウザから観測した形に揃えてある。**
+
+        長く ``Content-Type`` だけを送っていた。ブラウザが同じURLへ送るものとの
+        差は、実測42回目に並べて初めて見えた::
+
+            accept: application/json, text/plain, */*      こちらは送っていなかった
+            accept-language: ja-JP,ja;q=0.9,en;q=0.8       こちらは送っていなかった
+            content-type: application/json;charset=UTF-8   charset が無かった
+            origin: https://customers.job-medley.com       こちらは送っていなかった
+
+        **どれも観測した値である。** 観測した値を写すことは推測ではない (原則3)。
+        値が分からないもの (``x-customer-user-id`` 等) は写していない。
+
+        ``accept`` が無いと、内容交渉するサーバは同じURLでもHTMLを返す。実測41〜44回目に
+        レジュメAPIが返していた5万字のHTMLは、この形をしている。**ただしこれが原因だと
+        断定はしていない** -- 断定できるのは次の実行の結果だけである。
+
+        ``Origin`` は要求先から作る。ブラウザが同一オリジンの要求に付けるものと同じで、
+        座標に書き起こす必要が無い -- 書き起こせば、URLを変えたときに黙って食い違う。
+        """
+        headers = {
+            **OBSERVED_BROWSER_HEADERS,
+            "Origin": _origin_of(url),
+            **self._extra_headers,
+        }
         if idempotency_key is not None and is_resolved(self._idempotency_header):
             header_name = require(self._idempotency_header, used_by="api.client._headers")
             if header_name:
@@ -138,9 +189,8 @@ class JobMedleyApiClient:
         idempotency_key: str | None = None,
     ) -> ApiOutcome:
         """Issue one request. Raises :class:`PermanentAuthError` on a dead session."""
-        response = self._transport.request(
-            endpoint.method, url, headers=self._headers(idempotency_key), json=json_body
-        )
+        sent = self._headers(idempotency_key, url)
+        response = self._transport.request(endpoint.method, url, headers=sent, json=json_body)
         auth_code = classify_auth_failure(response.status, response.json_body(), self._auth_codes)
         if auth_code is not None:
             # **返さずに送出する。** 空の値を返して警告ログを出すのが 6.6 の事故。
@@ -155,4 +205,9 @@ class JobMedleyApiClient:
             status=response.status,
             succeeded=is_success(endpoint, response.status, response.json_body()),
             response=response,
+            # **送ったヘッダを持ち回る。** 実測44回目、CSRFを足しても直らなかった
+            # ときに「ではこちらは何を送っているのか」が報告から分からなかった。
+            # ブラウザ側だけを観測しても、引き算のもう片方が無ければ差は出ない。
+            # 値は :func:`recon.api_shape.describe_request_headers` が伏せる。
+            request_headers=tuple(sorted(sent)),
         )
