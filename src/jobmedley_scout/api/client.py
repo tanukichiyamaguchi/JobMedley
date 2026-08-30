@@ -29,7 +29,7 @@ from jobmedley_scout.api.endpoints import Endpoint
 from jobmedley_scout.api.success import graphql_errors, is_success
 from jobmedley_scout.api.transport import HttpResponse, HttpTransport
 from jobmedley_scout.config.placeholders import Coord, is_resolved, require
-from jobmedley_scout.errors import PermanentAuthError
+from jobmedley_scout.errors import ConfigError, PermanentAuthError
 
 HTTP_UNAUTHORIZED = 401
 HTTP_FORBIDDEN = 403
@@ -53,6 +53,10 @@ OBSERVED_BROWSER_HEADERS: Final[dict[str, str]] = {
     "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
     "Content-Type": "application/json;charset=UTF-8",
 }
+
+
+#: 本文を持てないメソッド。**ここへ本文を渡すのは宣言の誤りである。**
+BODYLESS_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 
 
 def _origin_of(url: str) -> str:
@@ -189,6 +193,23 @@ class JobMedleyApiClient:
         idempotency_key: str | None = None,
     ) -> ApiOutcome:
         """Issue one request. Raises :class:`PermanentAuthError` on a dead session."""
+        # **本文を持つ要求を GET で送らない。**
+        #
+        # 実測46回目、レジュメの経路が ``method="GET"`` のまま GraphQL の POST を
+        # 呼んでいた。ルートに当たらず媒体は 404 ページへ転送し、返ったのは
+        # HTTP 200 の HTML である。**失敗が「レジュメが読めない」として現れ、
+        # 原因に辿り着くまでに5回の実測を要した** (原則2)。
+        #
+        # 同じ間違いは隣の CANDIDATE_LIST で 2026-08-21 に直してあり、注記には
+        # 「GET のまま呼べば当たらない」と予言まで書いてあった。**書いてあっても、
+        # 隣は直らなかった。** だから注記ではなく構造で止める。
+        if json_body is not None and endpoint.method.upper() in BODYLESS_METHODS:
+            raise ConfigError(
+                f"エンドポイント '{endpoint.id}' は {endpoint.method} と宣言されて"
+                f"いますが、本文を持つ要求です。**本文を持つ要求は GET では送れません。**"
+                f" api/endpoints.py の method を実測した値に直してください"
+                f" (偵察の報告に POST と出ているはずです)。"
+            )
         sent = self._headers(idempotency_key, url)
         response = self._transport.request(endpoint.method, url, headers=sent, json=json_body)
         auth_code = classify_auth_failure(response.status, response.json_body(), self._auth_codes)
