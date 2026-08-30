@@ -165,7 +165,10 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
         _S3,
         CoordKind.JSON_PATH,
         "候補者一覧の **要求本文** の雛形。この媒体の一覧取得は POST なので、"
-        "URLだけでは呼べない。偵察が記録した実リクエストボディをそのまま雛形にする。",
+        "URLだけでは呼べない。`scout recon observe-search` が、一覧を開いたときに"
+        "媒体自身が飛ばす POST の本文を貼れる JSON にして出すので、それを貼る。"
+        "**形だけ観測して値を伏せたものを入れないこと** -- 偵察の印 (`<bool>` 等) は"
+        "文字列として媒体へ飛び、返るエラーが「0件」として現れる (実測35回目)。",
     ),
     CoordinateSpec("api.resume.url_pattern", _S3, CoordKind.URL, "候補者レジュメ取得APIのURL。"),
     CoordinateSpec(
@@ -436,6 +439,21 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
     ),
     "recon-resume-keys": frozenset(
         {"auth.success_marker_selector", "nav.candidate_list_url", "nav.list_ready_selector"}
+    ),
+    # 一覧を開いて、媒体自身が送る **要求本文** を拾うコマンド。押下も送信も無い。
+    #
+    # **他の偵察と違って api.candidate_list.url_pattern を要求する。** どの経路の
+    # POST を聴くかをここから取るからである。書き起こしてしまうと、座標が変わった
+    # ときに黙って一致しなくなる (原則2)。埋めようとしている
+    # api.candidate_list.payload_template のほうは、**このコマンドの出力なので
+    # 要求しない** -- 要求すると1歩目が自分の成果物待ちになる (recon-login と同じ)。
+    "recon-observe-search": frozenset(
+        {
+            "auth.success_marker_selector",
+            "nav.candidate_list_url",
+            "nav.list_ready_selector",
+            "api.candidate_list.url_pattern",
+        }
     ),
     "ingest": frozenset(
         {

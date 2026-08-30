@@ -43,6 +43,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Final
 
 from jobmedley_scout.api.endpoints import Endpoint
 from jobmedley_scout.config.placeholders import require
@@ -140,6 +141,28 @@ def payload_error_paths(body: Mapping[str, object] | None) -> tuple[str, ...]:
     found: list[str] = []
     _walk_payload(body.get("data"), "data", found, MAX_PAYLOAD_DEPTH)
     return tuple(found)
+
+
+#: 「媒体が受け付けた」とだけ言える範囲。**エンドポイント固有の成功判定ではない。**
+ACCEPTED_STATUSES: Final[frozenset[int]] = frozenset(range(200, 300))
+
+
+def was_accepted(status: int) -> bool:
+    """Whether the platform accepted the request at all. **送信の可否には使わない。**
+
+    6.2 の規律は「成功ステータスはエンドポイントごとに違うので判定を1箇所に
+    集める」ことである。集める先がここなので、**エンドポイントの手が届かない
+    ところで 2xx を数値で書かない** ために、この名前を置いてある。
+
+    使ってよいのは偵察だけである。偵察には ``Endpoint`` が無い -- 画面自身が
+    飛ばした通信を横から聴いているだけで、座標の成功集合を持っていない。そこで
+    知りたいのも「この本文は通る本文か」であって「送信は成功したか」ではない。
+
+    **送信の判定に使ってはならない。** 送信は3本立て (ステータス・``errors``・
+    ``errorMessage``) で見る必要があり、ここはその1本目しか見ていない。
+    送信路は必ず :func:`is_success` を通すこと。
+    """
+    return status in ACCEPTED_STATUSES
 
 
 def is_success(endpoint: Endpoint, status: int, body: Mapping[str, object] | None = None) -> bool:

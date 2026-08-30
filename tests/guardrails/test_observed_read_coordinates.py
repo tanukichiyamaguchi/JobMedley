@@ -90,46 +90,113 @@ def test_the_candidate_list_endpoint_is_a_post() -> None:
     assert endpoints[CANDIDATE_LIST].side_effectful is False
 
 
-def test_the_candidate_list_payload_template_is_recorded_and_parses() -> None:
-    """**URLだけでは呼べない。** 一覧は POST なので、要求本文が要る。
+# ---------------------------------------------------------------------------
+# 要求本文の雛形
+#
+# **ここに在った3つの試験が、欠陥を固定していた** (2026-08-30)。
+#
+# 旧 test_the_template_does_not_ship_real_search_values は、雛形の ``age`` が
+# ``{"from": "<string>", "to": "<string>"}`` **であること** を要求していた。
+# 理由として 13.2 (個人データをログや設定に残さない) を挙げていたが、これは
+# 取り違えである -- 13.2 が守るのは **候補者** の氏名・会員番号・年齢・居住地で
+# あり、この本文は **運用者自身が保存した検索条件** である。候補者は返ってくる
+# *応答* の側にある。
+#
+# 結果、実測35回目 (scout preview 1回目) で ``"<bool>"`` や ``"<number>"`` と
+# いう文字列が40キーぶん媒体へ飛び、HTTP 500 が返った。報告は正しく「0件では
+# なく取りに行けていません」と言ったが、**試験は最後まで緑だった**。
+#
+# 教訓は「絞り込みの値を伏せるな」ではない。**伏せた値を、確定した値のふりを
+# して置くな** である。形しか観測していないものは UNRESOLVED である。
+# ---------------------------------------------------------------------------
 
-    2026-08-22 observe-api 4回目で実測した (40キー)。前回まで「``label.search_form``
-    に似ている」と書いていたが、**別物だった** -- 包みが無く、``version`` /
-    ``ignore`` / ``customer`` / ``name`` / ``mail`` も無い。貼っていたら通らない
-    本文になっていた (原則3)。
+
+def _template() -> str:
+    """The coordinate, or a **visible skip** while it is still UNRESOLVED.
+
+    黙って通さない。``pytest.skip`` は報告に残るので、「未確定なので見ていない」
+    ことが数として見える -- 旧実装のように「緑だから正しい」とは読めなくなる。
     """
-    template = _coordinates()["api.candidate_list.payload_template"]
-    assert isinstance(template, str) and template.strip()
-    body = json.loads(template)
+    value = _coordinates()["api.candidate_list.payload_template"]
+    if not isinstance(value, str) or value.strip() == "UNRESOLVED":
+        pytest.skip(
+            "api.candidate_list.payload_template は UNRESOLVED。"
+            "`scout recon observe-search` で観測して記入するまで検査できません。"
+        )
+    return value
+
+
+def test_the_template_is_either_unresolved_or_actually_callable() -> None:
+    """**中間の状態を許さない。** 形だけ観測したものを確定扱いしない。
+
+    ここが旧実装の欠陥そのものである。旧実装は ``age`` が ``"<string>"``
+    **であること** を要求していた。つまり「呼べない本文」を正しい状態として
+    固定していた。いまは逆で、**差し込みを済ませたら呼べる本文になる** ことを
+    要求する -- 偵察の印が1つでも残っていたら落ちる。
+    """
+    from jobmedley_scout.api.payloads import assert_fully_filled
+
+    body = json.loads(_template())
     assert isinstance(body, dict)
-    # 実測した骨格。**この媒体の一覧は「保存した検索条件 + ページ」で引く。**
+    # 実行時に入る3つだけを埋める。残りは座標に確定した値が入っているはずである。
+    body["customer_search_condition_id"] = "739599"
+    body["pagination"] = {"limit": 25, "page": 1}
+    assert_fully_filled(
+        body,
+        used_by="tests.guardrails.test_observed_read_coordinates",
+        coordinate="api.candidate_list.payload_template",
+        consequence="**このまま呼ぶと媒体はエラーを返し、それが「0件」として現れます。**",
+    )
+
+
+def test_a_filled_template_carries_the_three_runtime_slots() -> None:
+    """**この媒体の一覧は「保存した検索条件 + ページ」で引く。**
+
+    3つのうち1つでも欠けると静かに間違う。``{{PAGE}}`` が無ければ毎回1ページ目を
+    引きながら報告だけがページを進み、``{{SEARCH_CONDITION_ID}}`` が無ければ
+    別の保存条件の母集団を引く (原則2)。
+    """
+    body = json.loads(_template())
     assert body["customer_search_condition_id"] == "{{SEARCH_CONDITION_ID}}"
     assert body["pagination"] == {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"}
 
 
-@pytest.mark.parametrize(
-    "key",
-    ["age", "desired_areas", "desired_job_category_ids", "genders", "employment_types", "scout"],
-)
-def test_the_template_keeps_the_filter_keys_that_were_observed(key: str) -> None:
-    """絞り込みの欄を落とすと、**別の母集団を引いたまま気付かない** (原則2)。"""
-    body = json.loads(str(_coordinates()["api.candidate_list.payload_template"]))
-    assert key in body, f"実測した要求本文の {key} が雛形から消えています"
+def test_a_filled_template_keeps_the_filter_keys_that_were_observed() -> None:
+    """絞り込みの欄を落とすと、**別の母集団を引いたまま気付かない** (原則2)。
 
-
-def test_the_template_does_not_ship_real_search_values() -> None:
-    """**値は座標ファイルに置かない** (13.2)。
-
-    要求本文の値は運用者が保存した検索条件そのもので、都道府県・市区町村・
-    年齢・資格が並ぶ。そこから個人が絞り込まれうる。置いてよいのは
-    「この種別の値が入る」という観測と、差し替える目印だけである。
+    観測した欄の一覧は :data:`recon.search_payload.OBSERVED_FILTER_KEYS` に在り、
+    ``observe-search`` は観測のたびに差分を報告する。ここではその一覧が座標と
+    食い違っていないことだけを固定する。
     """
-    template = str(_coordinates()["api.candidate_list.payload_template"])
-    body = json.loads(template)
-    # 保存条件のIDは目印であり、実値ではない。
-    assert "739599" not in template, "保存条件の実IDが雛形に埋め込まれています"
-    assert body["desired_areas"][0]["prefecture_id"] == "<string>"
-    assert body["age"] == {"from": "<string>", "to": "<string>"}
+    from jobmedley_scout.recon.search_payload import OBSERVED_FILTER_KEYS
+
+    body = json.loads(_template())
+    missing = [key for key in OBSERVED_FILTER_KEYS if key not in body]
+    assert not missing, f"実測した要求本文の {missing} が雛形から消えています"
+
+
+def test_the_saved_condition_id_is_a_slot_rather_than_a_literal() -> None:
+    """**保存条件のIDは実行時に config.yaml から入る。**
+
+    座標に直書きすると、config.yaml の ingest.search_condition_id を変えても
+    引く母集団が変わらない -- 設定が効かないことに誰も気付かない (原則2)。
+    """
+    assert "739599" not in _template(), "保存条件の実IDが雛形に直書きされています"
+
+
+def test_a_filled_template_never_names_a_candidate() -> None:
+    """**唯一伏せる欄。** ``member_id`` が埋まっていれば候補者を名指しする。
+
+    :data:`recon.search_payload.WITHHELD_KEYS` がここを伏せ、伏せた印は
+    ``<withheld>`` なので、貼ったまま呼べば門が止める。
+    """
+    from jobmedley_scout.recon.search_payload import WITHHELD_MARKER
+
+    member_id = json.loads(_template())["member_id"]
+    assert member_id in ([], WITHHELD_MARKER), (
+        f"絞り込みの member_id に候補者が入っています: {type(member_id).__name__}。"
+        f"これは13.2 が守る対象そのものです。"
+    )
 
 
 def test_the_member_id_filter_is_not_mistaken_for_the_send_payload_field() -> None:
@@ -139,8 +206,6 @@ def test_the_member_id_filter_is_not_mistaken_for_the_send_payload_field() -> No
     ``memberId`` (単数) とは別物。6.4 の「業界/職種の取り違え」と同じ形なので、
     座標ファイルに注記が在ることを固定する。
     """
-    body = json.loads(str(_coordinates()["api.candidate_list.payload_template"]))
-    assert body["member_id"] == [], "絞り込みの member_id に値が入っています"
     text = COORDINATES.read_text(encoding="utf-8")
     assert (
         "送信payloadの memberId" in text

@@ -170,67 +170,56 @@ api.base_url: "https://customers.job-medley.com"
 # **GET ではなく POST である。** api/endpoints.py の method もそれに合わせた。
 api.candidate_list.url_pattern: "https://customers.job-medley.com/api/customers/members/search/"
 
-# 候補者一覧の **要求本文** の雛形。
+# 候補者一覧の **要求本文** の雛形。**まだ値が決まっていない。**
 #
-# 2026-08-22 observe-api 4回目で **観測した**。一覧が飛ばした POST の本文を、
-# 値抜きでキーの形だけ読んだ (40キー)。
+# 2026-08-22 observe-api 4回目で、一覧が飛ばした POST の本文を「値抜きで」
+# 読んだ (40キー)。キーの名前と値の種別は分かったが、**中身は1つも見ていない**。
 #
-# **``label.search_form`` とは別物だった。** 前回「似ている」と書いたが、実際は
-# 包み (``search_form``) が無く、``version`` / ``ignore`` / ``customer`` /
-# ``name`` / ``mail`` / ``created_at`` / ``updated_at`` も無い。逆に
-# ``desired_areas[].city_id`` と ``desired_areas[].cities`` はこちらにしかない。
-# **名前が似ていることは同じものである証明ではない** (原則3) -- 貼っていたら
-# 通らない本文になっていた。
+# **その「値抜き」の判断が間違っていた** (2026-08-30 に判明)。
 #
-# 実際の値は **運用者が保存した検索条件そのもの** なので、ここには入れない
-# (13.2)。``<...>`` は「この種別の値がここに入る」という観測であって、
-# 送る値ではない。実行時に差し替えるのは下の2つの目印だけである::
+# 当時ここには「実際の値は運用者が保存した検索条件そのものなので、ここには
+# 入れない (13.2)」と書いてあった。13.2 が守るのは **候補者** の氏名・会員番号・
+# 年齢・居住地である。この本文はそれではない -- 年齢の範囲も希望エリアも職種も、
+# **運用者自身が保存した検索条件** であり、候補者は返ってくる *応答* の側にある。
+# 「個人データに見える言葉が並んでいる」ことと「個人データである」ことを取り
+# 違えていた。誰のものかで分ければ、伏せる理由があるのは ``member_id`` だけである
+# (埋まっていれば候補者を名指しするため)。
+#
+# 実害:
+#   実測35回目 (scout preview 1回目) で HTTP 500。40キーのうち差し込んでいたのは
+#   3つで、残る37キーは ``"<bool>"`` や ``"<number>"`` という **文字列** のまま
+#   媒体へ飛んでいた。報告は正しく「0件ではなく取りに行けていません」と言ったが、
+#   **なぜ** かは言えなかった。送信路には値の埋め忘れを止める門があるのに
+#   (api/payloads.py の assert_fully_filled)、読み取り路には無かった。
+#   門はいま両方にある。
+#
+# **だから UNRESOLVED に戻す。** 形だけ観測して値が未確定なものを、確定した値の
+# ふりをして置いておくことがこの事故の原因だった。埋め方::
+#
+#   Actions → Recon (manual) → command: observe-search
+#
+# 一覧を開いて媒体自身が飛ばす POST を聴き、その本文を貼れる JSON にして出す。
+# 出力をこの欄に1行の文字列として貼る。差し替わるのは3箇所だけである::
 #
 #   {{SEARCH_CONDITION_ID}}   保存した検索条件のID (画面の「実践会＿衛生士」)
 #   {{PAGE}} / {{PAGE_SIZE}}  ページ繰り
 #
 # **注意: 本文の ``member_id`` は絞り込み条件であって、送信payloadの memberId
 # ではない。** 同名の別物である (6.4 の業界/職種の取り違えと同じ形)。
-api.candidate_list.payload_template: |
-  {
-    "age": {"from": "<string>", "to": "<string>"},
-    "desired_areas": [
-      {
-        "prefecture_id": "<string>",
-        "city_ids": ["<string>"],
-        "city_id": "<string>",
-        "cities": []
-      }
-    ],
-    "addresses": [
-      {"prefecture_id": "<string>", "city_ids": [], "cities": []}
-    ],
-    "desired_features": ["<number>"],
-    "desired_job_category_ids": ["<number>"],
-    "employment_statuses": [],
-    "employment_types": ["<number>"],
-    "favorite": "<bool>",
-    "careers": "<bool>",
-    "career_job_categories": [{"job_category_id": "<number>"}],
-    "career_job_contents": [],
-    "self_pr": "<bool>",
-    "scout": "<number>",
-    "read_profile": "<number>",
-    "genders": ["<number>"],
-    "last_education_ids": [],
-    "last_login": "<string>",
-    "member_id": [],
-    "member_qualification_ids": [],
-    "qualifications_match_all": "<bool>",
-    "include_qualifications_acquisition_scheduled": "<bool>",
-    "desired_join_times": [],
-    "recommend": "<bool>",
-    "customer_search_condition_id": "{{SEARCH_CONDITION_ID}}",
-    "recently_registered": "<bool>",
-    "pagination": {"limit": "{{PAGE_SIZE}}", "page": "{{PAGE}}"},
-    "sort": "<string>",
-    "nav_type": "<number>"
-  }
+#
+# 観測できていた40キーは記録として残す (どんな形が返るかの見当が付く)。
+# **これは貼る値ではない。**
+#
+#   age.from/to, desired_areas[].{prefecture_id,city_ids,city_id,cities},
+#   addresses[].{prefecture_id,city_ids,cities}, desired_features[],
+#   desired_job_category_ids[], employment_statuses[], employment_types[],
+#   favorite, careers, career_job_categories[].job_category_id,
+#   career_job_contents[], self_pr, scout, read_profile, genders[],
+#   last_education_ids[], last_login, member_id[], member_qualification_ids[],
+#   qualifications_match_all, include_qualifications_acquisition_scheduled,
+#   desired_join_times[], recommend, customer_search_condition_id,
+#   recently_registered, pagination.{limit,page}, sort, nav_type
+api.candidate_list.payload_template: UNRESOLVED
 
 # ------------------------------------------------------------------------
 # **候補者一覧に氏名は無い。**
