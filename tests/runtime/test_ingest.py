@@ -371,3 +371,66 @@ def test_the_member_number_survives_into_the_database() -> None:
     assert candidate_repo.member_code_of(connection, "3323741") == "01613058"
     # **氏名の欄は空のまま。**
     assert candidate_repo.display_name_of(connection, "3323741") == ""
+
+
+# ---------------------------------------------------------------------------
+# レジュメが読めなかった理由 (実測38回目)
+# ---------------------------------------------------------------------------
+
+
+def test_a_resume_that_could_not_be_read_says_why() -> None:
+    """**「0 / 1 件」だけでは次の手が決まらない** (原則2)。
+
+    実測38回目、報告は「レジュメ: 0 / 1 件 読めました」としか言えなかった。
+    0件であることは分かるが、セッション切れなのか、要求本文が違うのか、
+    GraphQL がエラーを返したのかが分からない。一覧路で直したのと同じ病気が
+    レジュメ路に残っていた。
+    """
+    report, _transport, _connection = _run(
+        [_page(1), HttpResponse(status=400, body_text="{}")],
+        config=_ingest_config(fetch_resumes=True, max_pages=1),
+    )
+    assert report.resumes_read == 0
+    assert report.resume_failures
+    text = report.render()
+    assert "読めなかった" in text
+    assert "HTTP 400" in text
+
+
+def test_a_graphql_error_is_not_reported_as_http_200_success() -> None:
+    """**GraphQL の失敗はステータス 200 で来る。** 200 と書くだけでは嘘に近い。
+
+    エラーコードは出すが、**文言は出さない** -- 候補者名が混ざりうる (13.2)。
+    """
+    body = json.dumps({"errors": [{"extensions": {"code": "FORBIDDEN"}, "message": "秘密"}]})
+    report, _transport, _connection = _run(
+        [_page(1), HttpResponse(status=200, body_text=body)],
+        config=_ingest_config(fetch_resumes=True, max_pages=1),
+    )
+    text = report.render()
+    assert "FORBIDDEN" in text
+    assert "秘密" not in text, "媒体の文言がログに出ています (13.2)"
+
+
+def test_the_same_failure_twice_is_counted_rather_than_repeated() -> None:
+    """同じ理由が並ぶと本命が埋もれる。**理由ごとに数える。**"""
+    report, _transport, _connection = _run(
+        [
+            _page(2),
+            HttpResponse(status=400, body_text="{}"),
+            HttpResponse(status=400, body_text="{}"),
+        ],
+        config=_ingest_config(fetch_resumes=True, max_pages=1),
+    )
+    assert list(report.resume_failures.values()) == [2]
+    assert "(2 件)" in report.render()
+
+
+def test_reading_every_resume_leaves_no_failure_lines() -> None:
+    """**読めたときは黙る。** 0件でも書く欄と、書かない欄を混ぜない。"""
+    report, _transport, _connection = _run(
+        [_page(1), _resume()], config=_ingest_config(fetch_resumes=True, max_pages=1)
+    )
+    assert report.resumes_read == 1
+    assert report.resume_failures == {}
+    assert "読めなかった" not in report.render()

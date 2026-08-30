@@ -35,6 +35,7 @@ from jobmedley_scout.api.candidates import (
 from jobmedley_scout.api.client import ApiOutcome, JobMedleyApiClient
 from jobmedley_scout.api.endpoints import CANDIDATE_LIST, RESUME, Endpoint
 from jobmedley_scout.api.payloads import assert_fully_filled, parse_payload_template
+from jobmedley_scout.api.success import describe_failure
 from jobmedley_scout.clock import Clock
 from jobmedley_scout.config.placeholders import require
 from jobmedley_scout.config.schema import IngestConfig, SafetyConfig
@@ -105,6 +106,12 @@ class IngestReport:
     capped_by: str = ""
     #: 未確定のままだったレジュメの軸。空でないなら、その項目は永久に「非公開」。
     unresolved_fields: tuple[str, ...] = ()
+    #: レジュメが読めなかった理由と件数。**理由だけで、本文は持たない** (13.2)。
+    #:
+    #: 実測38回目、報告は「レジュメ: 0 / 1 件 読めました」としか言えなかった。
+    #: 0件であることは分かるが **なぜか** が分からない -- 一覧路で直したのと
+    #: 同じ病気が、レジュメ路に残っていた (原則2)。
+    resume_failures: dict[str, int] = field(default_factory=dict)
 
     def rows_seen(self) -> int:
         return sum(page.rows for page in self.pages)
@@ -164,6 +171,9 @@ class IngestReport:
             lines.append(
                 f"  レジュメ: {self.resumes_read} / {self.resumes_requested} 件 読めました"
             )
+            # **読めなかった理由を必ず言う。** 「0件」だけでは次の手が決まらない。
+            for reason, count in sorted(self.resume_failures.items()):
+                lines.append(f"    **読めなかった**: {reason} ({count} 件)")
         else:
             lines.append("  レジュメ: 取りに行っていません (ingest.fetch_resumes)")
         if self.capped_by:
@@ -297,6 +307,8 @@ def _with_resumes(
         outcome = client.call(endpoint, url=url, json_body=body)
         payload = _resume_payload(outcome)
         if payload is None:
+            reason = _resume_failure_reason(endpoint, outcome)
+            report.resume_failures[reason] = report.resume_failures.get(reason, 0) + 1
             enriched.append(candidate)
             continue
         report.resumes_read += 1
@@ -322,6 +334,22 @@ def _url_of(endpoint: Endpoint, *, used_by: str) -> str:
             f"取り込みにはこの経路が要ります。"
         )
     return url
+
+
+def _resume_failure_reason(endpoint: Endpoint, outcome: ApiOutcome) -> str:
+    """Why one resume could not be read. **値は1つも含めない** (13.2)。
+
+    ステータス・GraphQL の errors コード・エラー欄のキーパスだけを出す。媒体の
+    文言は出さない -- 候補者名が混ざりうる。理由の作り方は送信路と同じ関数に
+    寄せてある (:func:`api.success.describe_failure`) ので、3本立ての判定
+    (ステータス / errors / errorMessage) がそのまま効く。
+    """
+    body = outcome.json_body()
+    mapping = body if isinstance(body, Mapping) else None
+    if (described := describe_failure(endpoint, outcome.status, mapping)) is not None:
+        return described
+    # 成功しているのに読めなかった = 本文がオブジェクトでなかった。
+    return f"HTTP {outcome.status} / 応答本文がオブジェクトではありません"
 
 
 def _resume_payload(outcome: ApiOutcome) -> Mapping[str, object] | None:
