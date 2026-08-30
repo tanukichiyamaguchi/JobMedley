@@ -619,8 +619,39 @@ api.send.paid.success_statuses: UNRESOLVED
 # (座標の UNRESOLVED 検査は **キーごと欠けている穴を見ていない**。値が入っている
 # ので「埋まっている」と判定されていた)。
 #
-# **残る宿題は1つ。``<...>`` の欄が埋まっていないこと。** どれも観測はしたが、
-# こちらが用意する値である (どの求人へ送るか、どの検索から辿ったか)。
+# **残る宿題は ``<...>`` の欄である。** どれも観測はしたが、こちらが用意する値
+# である (どの求人へ送るか、どの検索から辿ったか)。
+#
+# ------------------------------------------------------------------------
+# **jobOfferId は埋まった** (2026-08-30 observe-job-offers 2回目・実測33回目)。
+#
+#   jobOfferId=811220
+#     suggest_name = 神奈川県 医療法人幸明会 ヤガサキ歯科医院 歯科衛生士 正職員
+#     job_category_name = 歯科衛生士
+#
+# 運用者が言葉で指定した求人 (ヤガサキ歯科医院 歯科衛生士 正職員) と、観測した
+# 求人一覧の突き合わせで **一意に決まった**。推測ではない。
+#
+# **1回目は取り逃していた。** 媒体は最初 limit=1 で引いており、返ったのは
+# コールセンターの求人1件だけだった。観測したURLの limit だけを 100 に差し替えて
+# 引き直したら 11 件増えて 12 件になった。「1件しか無い」のではなく
+# 「1件しか返っていない」だった -- 目盛りを見なければ区別が付かない形である。
+#
+# **同じ運用者の下に歯科衛生士の求人がもう1つある** (ダイヤモンド歯科医院・
+# jobOfferId=1344691)。職種名だけで照らすと2件に当たるので、照合は
+# 医院名・職種・雇用形態を揃えた文字列で行う
+# (recon.observe_job_offers.WANTED_OFFER)。
+#
+# **jobOfferSalaryId は未確定のままである。** この求人には4つ在る::
+#
+#     3381377, 3381378, 3381379, 3381380
+#
+# どれを使うかは応答からは決まらない。**推測しない** (原則3)。
+# 次の follow-send が、媒体自身のクライアントが選んだ値を記録する
+# (payload_shape.REVEALED_KEYS が求人IDの2欄だけ値を残すようにしてある。
+# memberId と searchUuid は伏せたままである -- 「IDだから安全」ではなく
+# 「**誰の** IDか」で分けている)。
+# ------------------------------------------------------------------------
 #
 # 埋め忘れたまま送ろうとしても、api.payloads.assert_fully_filled が送信の前に
 # 止める。``<string>`` という文字列がスカウトとして飛ぶことは無い (13.6)。
@@ -679,7 +710,7 @@ api.send.paid.payload_template: |
     "query": "mutation SendSingleScout($input: MessageScoutSendInput!) {\n  result: messageScoutSend(input: $input) {\n    scoutedMemberId\n    errorMessage\n    __typename\n  }\n}\n",
     "variables": {
       "input": {
-        "jobOfferId": "<number>",
+        "jobOfferId": 811220,
         "jobOfferSalaryId": "<number>",
         "memberId": "<number>",
         "scoutMessage": "{{BODY}}",

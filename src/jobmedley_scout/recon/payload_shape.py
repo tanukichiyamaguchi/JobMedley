@@ -11,8 +11,14 @@
 段階4はその形に自分の値を詰めて送る。
 
 だから ``{"memberId": "3323741"}`` ではなく ``{"memberId": "<string>"}`` を出す。
-唯一の例外は **自分で書いた目印** で、これは値ではなく「ここが本文の入り口だ」
-という観測そのものなので、その位置を名指しする。
+
+例外は2つだけある。
+
+1. **自分で書いた目印。** これは値ではなく「ここが本文の入り口だ」という観測
+   そのものなので、その位置を名指しする。
+2. **運用者自身の求人のID** (:data:`REVEALED_KEYS`)。伏せると、どの求人へ送るのかを
+   座標に書けず、送信が永久に組み立たない。``memberId`` と ``searchUuid`` は
+   この例外に入れない -- 「IDだから安全」ではなく「**誰の** IDか」で分けている。
 
 キーパスの走査は :mod:`recon.resume_keys` と同じ道具を使う。あちらはレジュメの
 キーを値抜きで出すために書かれた (6.4 の取り違え対策) が、**「値を出さずに形
@@ -137,15 +143,33 @@ def _kind_name(value: object) -> str:
     return "unknown"
 
 
-def _blank(value: object, sentinel: str) -> object:
-    """Replace every scalar with its kind. **目印だけは位置を名指しする。**"""
+#: 値をそのまま出してよい欄。**運用者自身の求人のIDだけ。**
+#:
+#: この2つは運用者が媒体へ公開している求人票を指すもので、13.2 が守ろうとして
+#: いる対象 (候補者の氏名・会員番号・年齢・居住地) ではない。伏せると、どの
+#: 求人へ送るのかを座標に書けず、**送信が永久に組み立たない**。
+#:
+#: **``memberId`` と ``searchUuid`` は入れない。** 前者は候補者そのものを指し、
+#: 後者はどの検索から辿り着いたかを指す。どちらも伏せたままにする。
+#: 「IDだから安全」ではなく、「**誰の** IDか」で分けている。
+REVEALED_KEYS: frozenset[str] = frozenset({"jobOfferId", "jobOfferSalaryId"})
+
+
+def _blank(value: object, sentinel: str, key: str = "") -> object:
+    """Replace every scalar with its kind. **目印だけは位置を名指しする。**
+
+    例外は :data:`REVEALED_KEYS` の2欄だけで、そこは値をそのまま残す
+    (運用者自身の求人のIDであり、候補者の情報ではない)。
+    """
     if isinstance(value, str) and sentinel and sentinel in value:
         return BODY_MARKER
     if isinstance(value, Mapping):
-        return {str(key): _blank(item, sentinel) for key, item in value.items()}
+        return {str(k): _blank(item, sentinel, str(k)) for k, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         # **要素は1つに畳む。** 何件送ったかは形ではなく、その回の都合である。
-        return [_blank(value[0], sentinel)] if value else []
+        return [_blank(value[0], sentinel, key)] if value else []
+    if key in REVEALED_KEYS and isinstance(value, str | int | float):
+        return value
     return UNKNOWN_VALUE.format(kind=_kind_name(value))
 
 

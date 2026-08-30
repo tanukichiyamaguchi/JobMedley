@@ -63,7 +63,11 @@ OBSERVE_JOB_OFFERS_KEYS: tuple[str, ...] = (
 JOB_OFFERS_PATH: Final[str] = "/job_offers/published"
 
 #: 運用者が指定した求人。一致は「絞れたかどうか」の報告にしか使わない。
-WANTED_OFFER: Final[str] = "歯科衛生士"
+#:
+#: **職種名だけでは足りない** (実測33回目)。「歯科衛生士」で照らすと
+#: ダイヤモンド歯科医院の歯科衛生士求人にも当たり、2件で絞れなかった。
+#: 医院名・職種・雇用形態を揃えた文字列で照らす -- 運用者の指定そのものである。
+WANTED_OFFER: Final[str] = "ヤガサキ歯科医院 歯科衛生士 正職員"
 
 
 @dataclass
