@@ -59,6 +59,34 @@ class TokenUsage:
         return self.input_tokens + self.cache_creation_input_tokens
 
 
+class StructuredCallError(GenerationError):
+    """A failed structured call that **still reports what it spent**.
+
+    13.1 は1送信あたりの実コストを観測できるようにすることを求めている。
+    素の例外だと、失敗した回のトークンが集計から丸ごと落ちる -- 8.2 の事故
+    (API仕様変更で全件失敗) が起きたとき、**課金は起きているのに費用の集計は
+    ゼロを表示する**。原則2 の静かなゼロそのものである。
+
+    ``used_fallback`` も運ぶ。常時フォールバックしているなら API 側の仕様が
+    変わった合図であり、それは失敗した回にこそ出る。
+    """
+
+    __slots__ = ("usage", "request_count", "used_fallback")
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: TokenUsage,
+        request_count: int,
+        used_fallback: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.request_count = request_count
+        self.used_fallback = used_fallback
+
+
 @dataclass(frozen=True)
 class StructuredResult:
     """A validated structured response, plus how it was obtained."""
@@ -140,6 +168,9 @@ def call_structured(
 
     request_count = 0
     last_usage = TokenUsage(0, 0)
+    # **経路をまたいで積む。** 失敗して例外を投げるときも、ここまでに使った
+    # 分は課金されている。運ばなければ費用の集計がゼロになる (13.1)。
+    spent = TokenUsage(0, 0)
 
     # --- 第1経路: 拡張思考あり + 構造化出力 -------------------------------
     # output_config.format は拡張思考と併用できるので、強制ツール選択は使わない。
@@ -172,24 +203,44 @@ def call_structured(
         except Exception as exc:
             # 最後の経路まで失敗したら生成失敗として集計する。途中なら次の経路へ。
             if index == len(attempts) - 1:
-                raise GenerationError(f"LLM呼び出しに失敗しました: {exc}") from exc
+                raise StructuredCallError(
+                    f"LLM呼び出しに失敗しました: {exc}",
+                    usage=spent,
+                    request_count=request_count,
+                    used_fallback=index > 0,
+                ) from exc
             continue
 
         last_usage = _extract_usage(response)
+        # **経路ごとに足す。** 「最後の1回」だけを持つと、フォールバックが
+        # 発火した回の1本目が集計から消える (13.1 のコスト観測が狂う)。
+        spent = TokenUsage(
+            input_tokens=spent.input_tokens + last_usage.input_tokens,
+            output_tokens=spent.output_tokens + last_usage.output_tokens,
+            cache_read_input_tokens=(
+                spent.cache_read_input_tokens + last_usage.cache_read_input_tokens
+            ),
+            cache_creation_input_tokens=(
+                spent.cache_creation_input_tokens + last_usage.cache_creation_input_tokens
+            ),
+        )
         stop_reason = getattr(response, "stop_reason", None)
 
         # 安全性による拒否。content を読む前に必ず確認する。
         if stop_reason == "refusal":
-            raise GenerationError(
+            raise StructuredCallError(
                 "モデルが安全性の理由で応答を拒否しました。候補者データに不適切な"
-                "内容が含まれていないか確認してください。"
+                "内容が含まれていないか確認してください。",
+                usage=spent,
+                request_count=request_count,
+                used_fallback=index > 0,
             )
 
         data = _first_json_object(response)
         if data is not None:
             return StructuredResult(
                 data=data,
-                usage=last_usage,
+                usage=spent,
                 model=str(getattr(response, "model", config.model)),
                 stop_reason=stop_reason,
                 used_fallback=index > 0,
@@ -197,10 +248,13 @@ def call_structured(
             )
         # 構造化出力が得られなかった -> 次の経路 (思考オフ) で1回だけ取り直す。
 
-    raise GenerationError(
+    raise StructuredCallError(
         f"構造化出力を取得できませんでした ({request_count}回試行、"
-        f"最終トークン: in={last_usage.input_tokens}/out={last_usage.output_tokens})。"
-        f"LLM APIの仕様変更の可能性があります -- 8.2: 本番が静かに全滅しうる経路です。"
+        f"トークン: in={spent.input_tokens}/out={spent.output_tokens})。"
+        f"LLM APIの仕様変更の可能性があります -- 8.2: 本番が静かに全滅しうる経路です。",
+        usage=spent,
+        request_count=request_count,
+        used_fallback=request_count > 1,
     )
 
 

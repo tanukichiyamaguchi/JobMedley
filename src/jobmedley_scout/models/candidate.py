@@ -61,6 +61,20 @@ class ResumeFacts(BaseModel):
     # --- 経験 (実際にしてきたこと) -------------------------------------
     experienced_industries: tuple[str, ...] = ()
     experienced_occupations: tuple[str, ...] = ()
+    #: 経験職種と **年数** を1つにした表記 (「歯科衛生士(3年)」)。画面と同じ形。
+    #:
+    #: **``experienced_occupations`` と分けてある。** あちらは職種の名前だけで、
+    #: 年数を含まない。プロンプトは「経験年数」という別の欄を持っており
+    #: (STEP2 が「その経験年数の衛生士が現場でどんな力を身につけている時期か」を
+    #: 語らせる)、そこへ職種名だけを渡すと **モデルは年数を自分で埋める**。
+    #:
+    #: 媒体は ``careerJobCategories[] = {jobCategoryId, label, careerYear}`` を
+    #: 返しており、``careerYear`` が年数である (座標 resume.fields の注記)。
+    #: ここを写さないと、観測できている事実を捨てて推測させることになる (原則3)。
+    #:
+    #: ``careerYear`` が読めない要素は **年数なしのまま入れない** -- 入れると
+    #: 「歯科衛生士」が経験年数の欄に並び、年数のように読まれる。
+    experienced_occupation_years: tuple[str, ...] = ()
     employments: tuple[Employment, ...] = ()
     educations: tuple[Education, ...] = ()
     specialty: str | None = None
@@ -180,4 +194,20 @@ class Candidate(BaseModel):
     #: 永久に空である** -- 「まだ知らない」ではなく、確定した答えとしての
     #: 「無い」である。埋める実装を後から足す必要は無い。
     display_name: str | None = None
+    #: 居住地。一覧の ``members[].short_address`` から取る。
+    #:
+    #: **``ResumeFacts`` ではなく ``Candidate`` に置いてある。** レジュメを
+    #: 取り込むとき ``model_copy(update={"resume": ...})`` で ``resume`` が丸ごと
+    #: 差し替わるので、あちらに置くと一覧から取った値が黙って消える。
+    #:
+    #: **粒度は観測していない。** 画面の「居住地」は「神奈川県川崎市多摩区」の
+    #: ように都道府県＋市区町村だが、``short_address`` が同じ粒度で返るかは
+    #: 確かめていない (値を出さない方針で観測したため、種別が文字列であることしか
+    #: 分かっていない)。運用者のプロンプトはここから通勤時間を見積もるので、
+    #: **1通目の文面でこの粒度を確認すること** (原則3)。
+    #:
+    #: 空なら :data:`generation.facts.UNDISCLOSED` として渡り、プロンプトの
+    #: STEP1 は「都道府県レベルまでしか分からない場合」の書き方に落ちる。
+    #: 空欄を勝手に埋めない。
+    residence: str | None = None
     resume: ResumeFacts = Field(default_factory=ResumeFacts)
