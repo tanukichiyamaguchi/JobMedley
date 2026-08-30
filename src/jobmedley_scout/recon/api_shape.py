@@ -25,6 +25,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Final
 from urllib.parse import urlsplit
 
 from jobmedley_scout.recon.resume_keys import KeyPath, discover_key_paths
@@ -152,6 +153,18 @@ class ObservedCall:
     request_unread_reason: str = ""
     #: 要求本文で個人データに見えたので落としたキーの数。
     request_dropped_keys: int = 0
+    #: **ブラウザが実際に送った要求ヘッダ。** 名前は全部、値は安全なものだけ。
+    #:
+    #: 実測42回目の宿題。こちらの ``client.call`` は ``Content-Type`` しか付けて
+    #: いないのに、同じURLへブラウザが送ると JSON が返り、こちらが送ると
+    #: **HTML が 51976 字返ってくる** (実測41回目)。要求の何が違うのかは、
+    #: ブラウザの側を見なければ決まらない -- 推測で足すのは原則3に反する。
+    request_headers: tuple[str, ...] = ()
+    #: この応答に至るまでに挟まった転送 (リダイレクト) の数。
+    #:
+    #: **0 でないなら、届いた先は頼んだ先ではない。** ログイン画面へ飛ばされて
+    #: HTTP 200 の HTML が返る形は、これで見分けが付く。
+    redirects: int = 0
     #: GraphQL の **封筒そのもの** (``variables`` の値だけ種別へ伏せたもの)。
     #:
     #: キーパスだけでは呼べない。GraphQL は ``query`` の無いリクエストを受け付け
@@ -202,6 +215,12 @@ class ObservedCall:
         lines.append(f"    {self.method} {self.redacted_url}")
         if self.content_type:
             lines.append(f"    種別: {self.content_type}")
+        if self.redirects:
+            # **届いた先は頼んだ先ではない。** 黙ると 200 が成功に見える。
+            lines.append(f"    **転送されました**: {self.redirects} 回")
+        if self.request_headers:
+            lines.append("    ブラウザが送った要求ヘッダ (認証系は名前だけ -- 12.7):")
+            lines.extend(f"      {entry}" for entry in self.request_headers)
         # **要求を先に出す。** 応答は長い。呼ぶために要るのは要求の形なので、
         # 何百行のキー一覧の下に埋めない。
         lines.extend(self.request_lines())
@@ -313,6 +332,41 @@ def _path_label(url: str) -> str:
         and not looks_like_an_identifier(segment)
     ]
     return "/".join(segments[-2:])
+
+
+#: 値を出してよい要求ヘッダ。**認証に関わるものは1つも入っていない。**
+#:
+#: ここに無いヘッダは名前だけを出す。``cookie`` の値はセッションそのもので、
+#: ログに出れば誰でもこの運用者として媒体へ入れる (12.7)。
+SAFE_HEADER_VALUES: Final[frozenset[str]] = frozenset(
+    {
+        "accept",
+        "accept-language",
+        "content-type",
+        "origin",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+        "x-requested-with",
+    }
+)
+
+
+def describe_request_headers(headers: Mapping[str, str]) -> tuple[str, ...]:
+    """Header names, with values only for the safe ones. **Cookie は名前だけ。**
+
+    こちらの ``api.client`` が付けているのは ``Content-Type`` だけである。
+    ブラウザが何を付けているかが分かれば、差は引き算で出る。**足すものを
+    推測しない** (原則3) -- 観測してから足す。
+    """
+    out: list[str] = []
+    for name in sorted(headers):
+        lowered = str(name).lower()
+        if lowered in SAFE_HEADER_VALUES:
+            out.append(f"{lowered}: {headers[name]}")
+        else:
+            out.append(f"{lowered}: (値は伏せています)")
+    return tuple(out)
 
 
 def describe_response(body: str | None) -> tuple[tuple[KeyPath, ...], str, int]:

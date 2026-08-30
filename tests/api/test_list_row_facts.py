@@ -157,3 +157,28 @@ def test_the_shape_report_never_carries_a_value() -> None:
     """13.2。**キー名と件数と種別だけ。**"""
     row = {**ROW, "qualifications": [{"name": "秘密の資格名"}]}
     assert "秘密の資格名" not in "\n".join(describe_row_shapes(row))
+
+
+def test_an_undisclosed_age_is_not_reported_as_our_mistake() -> None:
+    """**``null`` は「読めない形」ではない** (実測41回目)。
+
+    実測41回目の報告は ``age: 読めない形です`` だった。だが ``null`` なら、
+    それは **この候補者が年齢を公開していない** という観測である。同じ言葉に
+    すると、こちらの形の外しと候補者の未記入が区別できない -- 直せないものを
+    直そうとすることになる (原則2)。
+    """
+    notes = "\n".join(describe_row_shapes({**ROW, "age": None}))
+    assert "age: null (この候補者が公開していません)" in notes
+
+
+def test_a_shape_we_really_got_wrong_still_says_so_with_the_type() -> None:
+    """**こちらの間違いは、こちらの間違いとして出す。** 型の名前だけ出す。"""
+    notes = "\n".join(describe_row_shapes({**ROW, "age": {"value": 27}}))
+    assert "age: 読めない形です (dict)" in notes
+    assert "27" not in notes
+
+
+def test_a_missing_age_key_is_its_own_answer() -> None:
+    """キーごと無いのは媒体が変わった合図であり、未記入とは違う。"""
+    row = {k: v for k, v in ROW.items() if k != "age"}
+    assert "age: キーがありません" in "\n".join(describe_row_shapes(row))
