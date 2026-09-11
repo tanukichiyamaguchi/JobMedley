@@ -31,6 +31,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jobmedley_scout.generation.scout_body import BodyViolationKind, validate_body
@@ -197,3 +199,50 @@ APPROVED_PARAGRAPHS: tuple[str, ...] = (
 def test_the_paragraphs_the_operator_approved_are_left_alone(paragraph: str) -> None:
     """**誤検知ゼロ。** 良い文を落とす検査は、生成そのものを止める。"""
     assert _kinds(paragraph) == set(), f"運用者が問題ないとした文を落としています: {paragraph[:30]}"
+
+
+# --------------------------------------------------------------------------
+# 通勤時間の扱い (プロンプト側の取り決め)
+# --------------------------------------------------------------------------
+
+_PROMPT = Path("config/prompts/scout_dental_hygienist.md").read_text(encoding="utf-8")
+
+
+def test_the_honesty_trigger_is_time_not_distance() -> None:
+    """負担に触れる条件は **時間** であること。
+
+    2026-09-11、運用者の指示:
+
+    > 距離ではなく、通勤時間が1時間以上ある場合には誠実に触れるようにして。
+    > 距離は問題ではないので。
+
+    もっともである。**距離は本文に書かないので、後から誰も確かめられない。**
+    時間は本文に書くので確かめられる。確かめられるほうを基準にするのが正しい。
+
+    以前は「20km以上」が引き金だった。km は運用者にも私にも見えないところで
+    モデルが内心で見積もる数であり、条件が発動したかどうかを検証する手立てが
+    無かった。
+    """
+    assert "所要時間が「1時間」に届く場合" in _PROMPT
+    assert "判断の基準は距離ではなく時間である" in _PROMPT
+    assert "20km以上と見積もった場合" not in _PROMPT, "距離が引き金のまま残っている"
+
+
+def test_the_self_check_list_asks_about_the_hour() -> None:
+    """自己点検リストにも入っていること。
+
+    手順に書くだけでは、書いたあとの見直しで拾われない。**このプロンプトは
+    手順と点検の両方に同じことを書く作りになっている。**
+    """
+    assert "所要時間が1時間に届くのに、負担に誠実に触れずに済ませていないか" in _PROMPT
+
+
+def test_the_time_table_still_drives_the_number() -> None:
+    """時間そのものは距離から見積もる手順を残すこと。
+
+    引き金を時間へ移したが、**時間を出す方法までは変えていない**。km の対応表は
+    モデルが時間を導くための内部の梯子であって、本文には出ない。ここを消すと
+    数値の出しようが無くなる。
+    """
+    assert "45分から1時間前後" in _PROMPT
+    assert "1時間前後、もしくはもう少し" in _PROMPT
