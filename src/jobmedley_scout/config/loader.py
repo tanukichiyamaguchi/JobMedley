@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ import yaml
 from pydantic import ValidationError
 
 from jobmedley_scout.config.coordinates import COORDINATES, COORDINATES_BY_KEY, CoordKind
+from jobmedley_scout.config.effective import apply_to_config
 from jobmedley_scout.config.placeholders import UNRESOLVED_TOKEN, Unresolved
 from jobmedley_scout.config.schema import Config
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
@@ -150,14 +152,27 @@ def _build_id_patterns(config: Config) -> tuple[IdPattern, ...]:
     return tuple(patterns)
 
 
-def load_all(config_path: Path, coordinates_path: Path) -> tuple[Config, SiteCoordinates]:
+def load_all(
+    config_path: Path,
+    coordinates_path: Path,
+    env: Mapping[str, str] | None = None,
+) -> tuple[Config, SiteCoordinates]:
     """Load both files and install process-wide derived settings.
 
     ID正規化パターンの適用はここで行う。pydantic のバリデータに載せることが
     「取り込み経路の書き忘れ」を構造的に排除する唯一の手段なので、その前提と
     なるパターン設定は起動時に一度だけ確定させる (9.3)。
+
+    **安全弁の環境変数もここで適用する** (12.6)。以前はしていなかった。
+    ``effective.py`` が ``SCOUT_DRY_RUN`` を正しく解釈し、``preflight`` が
+    実効値を印字していたのに、**コマンドは ``config.yaml`` の生値を読んでいた**。
+    印字と判定が別々の値を見ていたので、「本番送信が有効です」と印字しながら
+    「dry_run が有効です」で止まる、という食い違いが起きた (実測48回目)。
+
+    適用場所をここ一箇所にするのが要点である。コマンドごとに読み替える設計は、
+    **次に足すコマンドで書き忘れる**。現に書き忘れた。
     """
-    config = load_behavior_config(config_path)
+    config = apply_to_config(load_behavior_config(config_path), env)
     coordinates = load_site_coordinates(coordinates_path)
     configure_id_patterns(_build_id_patterns(config))
     return config, coordinates

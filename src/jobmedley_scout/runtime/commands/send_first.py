@@ -35,6 +35,7 @@ from jobmedley_scout.api.endpoints import SEND_PAID, Endpoint
 from jobmedley_scout.api.payloads import PLACEHOLDER_SEARCH_UUID
 from jobmedley_scout.api.send import send_message
 from jobmedley_scout.clock import Clock
+from jobmedley_scout.config.effective import SOURCE_CONFIG
 from jobmedley_scout.config.schema import IngestConfig, LlmConfig, SafetyConfig
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
 from jobmedley_scout.generation.llm_client import AnthropicLike
@@ -76,6 +77,8 @@ class FirstSendReport:
     """What actually happened. **送ったかどうかを曖昧にしない。**"""
 
     dry_run: bool = True
+    #: dry_run の値が **どこから来たか** (12.6)。値だけでは配線漏れが隠れる。
+    dry_run_source: str = ""
     acknowledged: bool = False
     rows_seen: int = 0
     message: GeneratedMessage | None = None
@@ -125,6 +128,16 @@ class FirstSendReport:
 
         if stage is FirstSendStage.DRY_RUN_ON:
             lines.append("  **送っていません。** dry_run が有効です。")
+            # **由来を必ず添える** (12.6)。実測48回目に、ワークフローは
+            # SCOUT_DRY_RUN=false を渡しているのにここで止まった。由来が出て
+            # いれば「config.yaml から来ている」= 環境変数が届いていない、が
+            # その場で分かった。**値だけの報告は、届いていない配線を隠す。**
+            lines.append(f"  dry_run の由来: {self.dry_run_source or '不明'}")
+            if self.dry_run_source == SOURCE_CONFIG:
+                lines.append(
+                    "  **環境変数が届いていません。** SCOUT_DRY_RUN を渡したのに"
+                    " config.yaml の値が使われています (12.6 の配線漏れ)。"
+                )
             lines.append("  送るには SCOUT_DRY_RUN=false を明示してください (13.6)。")
             return "\n".join(lines)
         if stage is FirstSendStage.NOT_ACKNOWLEDGED:
@@ -197,9 +210,14 @@ def send_first(
     acknowledged: bool,
     run_id: str,
     destination: Path,
+    dry_run_source: str = "",
 ) -> FirstSendReport:
     """Send exactly one message. **門を通らなければ何も起きない。**"""
-    report = FirstSendReport(dry_run=safety.dry_run, acknowledged=acknowledged)
+    report = FirstSendReport(
+        dry_run=safety.dry_run,
+        dry_run_source=dry_run_source,
+        acknowledged=acknowledged,
+    )
     if safety.dry_run or not acknowledged:
         return report
 
