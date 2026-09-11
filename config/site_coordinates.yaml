@@ -688,7 +688,20 @@ api.send.paid.url_pattern: "https://customers.job-medley.com/api/customers/graph
 # 段階4-3 の実送信では **3本すべての実測値を書き残すこと** --
 # 成功時のステータス、成功時に errorMessage が null であること、そして
 # 失敗時に何が入るか。
-api.send.paid.success_statuses: UNRESOLVED
+# **2026-09-11 実測50回目、1通送って確定した。**
+#
+#   HTTPステータス : 200
+#   errors 配列    : 無し
+#   errorMessage   : null (空)
+#
+# 3本すべてを通った応答である (api/success.py の is_success が3本とも見る)。
+# 暫定で 2xx を使った1回きりの実行がこれを教えた -- 送る前には分からない座標
+# だった (docs/ladder.md 4-3 の鶏と卵)。
+#
+# **失敗時に errorMessage へ何が入るかは、まだ分からない。** 実際に失敗するまで
+# 分からず、分かっても **文言はここへ書かない** -- 候補者名が混ざりうるため
+# (13.2)。判定は「欄が埋まっているか」だけを見ており、文言には依存していない。
+api.send.paid.success_statuses: [200]
 
 # 有料枠のpayload形状。
 #
