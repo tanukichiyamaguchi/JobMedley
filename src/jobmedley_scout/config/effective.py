@@ -156,3 +156,44 @@ def effective_cap(settings: SafetySettings, slot: str) -> int:
     # 9.7: 枠ごとに上限を持つ。未知の枠に既定の上限を与えると、
     # 「不明枠」が無制限に送れてしまう。
     raise ConfigError(f"送信枠 {slot!r} の上限が定義されていません")
+
+
+def apply_to_config(config: Config, env: Mapping[str, str] | None = None) -> Config:
+    """Return ``config`` with the environment's safety overrides **actually applied**.
+
+    **ここが 12.6 の本体である。** 参照実装の事故はこう書かれている:
+
+    > 状態消失ガードが実行基盤の環境変数に渡っておらず、ドキュメントには手順が
+    > あるのにCIでは常に無効だった。
+    > **「安全弁を作った」と「安全弁が効いている」は別物です。**
+
+    このモジュールは最初、``preflight`` が **印字するため** だけに使われていた。
+    値を解釈する部品はあり、実効値も正しく出ていたのに、**コマンド側は
+    ``config.yaml`` の生値を読んでいた**。つまり ``SCOUT_DRY_RUN`` はどの
+    コマンドにも届いていなかった。2026-09-11 の1通目の送信で発覚した
+    (``SCOUT_DRY_RUN=false`` が渡っているのに「dry_run が有効です」で止まった)。
+
+    今回は安全な向きに外れたが、**同じ穴は危険な向きにも開いている**。
+    ``config.yaml`` に ``dry_run: false`` と書かれていれば、``SCOUT_DRY_RUN=true``
+    で止めようとしても止まらなかった。
+
+    だから **各コマンドで読み替えるのではなく、設定の入口で一度だけ適用する**。
+    コマンドごとに書くと、次に足すコマンドで書き忘れる -- それが今回である。
+    """
+    settings = resolve_safety_settings(config, env)
+    return config.model_copy(
+        update={
+            "safety": config.safety.model_copy(
+                update={
+                    "dry_run": effective_dry_run(settings),
+                    "state_loss_guard": effective_state_loss_guard(settings),
+                }
+            ),
+            "send": config.send.model_copy(
+                update={
+                    "per_run_cap_paid": effective_cap(settings, "paid"),
+                    "per_run_cap_free": effective_cap(settings, "free"),
+                }
+            ),
+        }
+    )

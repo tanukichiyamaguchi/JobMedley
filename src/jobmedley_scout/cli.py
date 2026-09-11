@@ -311,6 +311,7 @@ def _dispatch_send_first(
     from jobmedley_scout.browser.context import browser_context
     from jobmedley_scout.browser.navigation import goto
     from jobmedley_scout.clock import SystemClock
+    from jobmedley_scout.config.effective import resolve_safety_settings
     from jobmedley_scout.config.placeholders import require
     from jobmedley_scout.config.secrets import load_secrets
     from jobmedley_scout.generation.clinic import load_clinic_facts
@@ -319,6 +320,13 @@ def _dispatch_send_first(
 
     secrets = load_secrets()
     api_key = secrets.require_anthropic_key()
+
+    # 12.6: **送る前に、安全弁の実効値と由来を必ず出す。** 実測48回目に、
+    # ワークフローが SCOUT_DRY_RUN=false を渡しているのにコマンドが dry_run を
+    # 有効と判断して止まった。値だけを報告していたので、どちらが嘘なのかが
+    # ログから分からなかった。**由来まで出していれば1回で分かった。**
+    settings = resolve_safety_settings(config)
+    print(settings.render())
 
     _restore_session_from_secrets(config)
     session = session_store.session_path(config.paths.credentials_dir)
@@ -356,6 +364,7 @@ def _dispatch_send_first(
             acknowledged=bool(getattr(args, "acknowledged", False)),
             run_id=f"send-first-{clock.now().isoformat()}",
             destination=destination,
+            dry_run_source=settings.dry_run.source,
         )
     print(report.render())
     # **送れなかったことを成功で終えない** (原則2)。
