@@ -14,12 +14,19 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Final
 
 from jobmedley_scout.config.placeholders import is_resolved
 from jobmedley_scout.config.site_coordinates import SiteCoordinates
-from jobmedley_scout.models.candidate import Candidate, Education, ResumeFacts
+from jobmedley_scout.models.candidate import (
+    Candidate,
+    Education,
+    ResumeFacts,
+    ScoutHistoryEntry,
+    ScoutHistorySummary,
+)
 from jobmedley_scout.recon.masked import unmask, unmask_all
 
 #: 一覧の応答で候補者の並びが入っているキー。実測 (2026-08-22)。
@@ -480,6 +487,9 @@ def _as_text(value: object) -> str | None:
 #: 必ず在る写像 (``null`` を取らない座標)。
 REQUIRED_RESUME_FIELDS: tuple[str, ...] = (
     "age",
+    # **ここへ足さないと、座標を登録しても resume_keypaths が引かない。**
+    # 登録済みだが永久に読まれない欄が現に6本ある (language_text 等)。
+    "scout_histories",
     "experienced_occupations",
     "desired_occupations",
     "educations",
@@ -531,3 +541,104 @@ __all__ = [
     "search_uuid_in",
     "value_at",
 ]
+
+
+#: 送信payloadの中で自社求人を指す欄。**ここが唯一の出どころである。**
+JOB_OFFER_ID_KEY: Final = "jobOfferId"
+
+
+def our_job_offer_id(coordinates: SiteCoordinates) -> str | None:
+    """Which job offer is ours, read from the send payload. ``None`` if unknown.
+
+    **定数で持たない。** 求人IDは送信payloadの雛形に既に入っている
+    (``api.send.paid.payload_template`` の ``variables.input.jobOfferId``)。
+    別の場所へ書き写すと、求人を切り替えたときに片方だけ古くなり、**他社の履歴を
+    自社の履歴と読み違える**。読み違えれば「度々のご連絡」が嘘になる。
+
+    比較のために **文字列へ寄せて返す。** 送信payloadでは数値 (811220) だが、
+    応答側の ``jobOffer.id`` の型は観測していない。素朴な ``==`` は
+    ``811220 != "811220"`` で静かに外れるので、両側を文字列にしてから比べる。
+    """
+    template = coordinates.json_path("api.send.paid.payload_template")
+    if not isinstance(template, str):
+        return None
+    try:
+        parsed = json.loads(template)
+    except json.JSONDecodeError:
+        return None
+    node = parsed
+    for step in ("variables", "input", JOB_OFFER_ID_KEY):
+        if not isinstance(node, Mapping):
+            return None
+        node = node.get(step)
+    if node is None or isinstance(node, bool):
+        return None
+    if isinstance(node, str):
+        return node.strip() or None
+    if isinstance(node, int):
+        return str(node)
+    return None
+
+
+def scout_history_from_response(
+    response: object,
+    *,
+    keypath: str | None,
+    our_offer_id: str | None,
+) -> ScoutHistorySummary | None:
+    """The platform's scout history for **our** job offer. ``None`` = not observed.
+
+    **三値を返す。** ``None`` は「観測していない」であって「履歴が無い」では
+    ない。空の :class:`ScoutHistorySummary` が「観測して履歴が無い」である。
+    この区別が消えると、3回送った相手に初回として書くことになる。
+
+    ``None`` を返す場合:
+
+    * 座標が未確定 (``keypath is None``)
+    * 応答にそのキーが無い / ``null`` -- **「履歴なし」と読み替えない。**
+      履歴が空のときにこの媒体が ``[]`` を返すのか ``null`` を返すのかキーごと
+      落とすのかを **観測していない**。分からないものを「無い」にするのが
+      原則3 が禁じていることである
+    * 自社求人IDが分からない (``our_offer_id is None``) -- 他社の履歴を自社の
+      ものとして数えるより、観測していないことにするほうが安全である
+
+    値が配列で返り、**自社分が0件だった** ときだけ空の要約を返す。これが
+    「観測して、この求人からは送っていない」である。
+    """
+    if keypath is None or our_offer_id is None:
+        return None
+    node = value_at(response, keypath)
+    if not isinstance(node, Sequence) or isinstance(node, str | bytes):
+        return None
+
+    entries: list[ScoutHistoryEntry] = []
+    for item in node:
+        if not isinstance(item, Mapping):
+            continue
+        offer = item.get("jobOffer")
+        offer_id = offer.get("id") if isinstance(offer, Mapping) else None
+        if _as_id(offer_id) != our_offer_id:
+            # **他社の求人。** 数えると「度々のご連絡」が嘘になる。
+            continue
+        entries.append(
+            ScoutHistoryEntry(
+                job_offer_id=our_offer_id,
+                latest_sent_at=_as_text(item.get("latestSentAt")),
+                sent_count=item.get("sentCount")
+                if isinstance(item.get("sentCount"), int)
+                else None,
+                latest_refused_at=_as_text(item.get("latestRefusedAt")),
+            )
+        )
+    return ScoutHistorySummary(entries=tuple(entries))
+
+
+def _as_id(value: object) -> str | None:
+    """An id, as a string. **型を観測していないので両側を寄せる。**"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, int):
+        return str(value)
+    return None

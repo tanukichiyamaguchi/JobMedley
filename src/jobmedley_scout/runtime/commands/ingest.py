@@ -27,9 +27,11 @@ from typing import Any
 from jobmedley_scout.api.candidates import (
     candidate_from_row,
     describe_row_shapes,
+    our_job_offer_id,
     resume_from_response,
     resume_keypaths,
     rows_in,
+    scout_history_from_response,
     search_uuid_in,
     unresolved_resume_fields,
 )
@@ -104,6 +106,10 @@ class IngestReport:
     #: レジュメを取りに行った件数と、取れた件数。
     resumes_requested: int = 0
     resumes_read: int = 0
+    #: 媒体のスカウト履歴を **観測できた** 人数 (履歴の有無は問わない)。
+    scout_history_observed: int = 0
+    #: 観測できて、**過去に送っていた** 人数。
+    scout_history_contacted: int = 0
     #: 上限で打ち切ったか。**黙って切らない。**
     capped_by: str = ""
     #: 未確定のままだったレジュメの軸。空でないなら、その項目は永久に「非公開」。
@@ -186,6 +192,23 @@ class IngestReport:
             # **読めなかった理由を必ず言う。** 「0件」だけでは次の手が決まらない。
             for reason, count in sorted(self.resume_failures.items()):
                 lines.append(f"    **読めなかった**: {reason} ({count} 件)")
+            # **履歴を観測できた人数を必ず出す** (原則2)。ここが 0 のまま
+            # 送信も 0 件になると、「対象が居なかった」のか「履歴が読めず
+            # 全員 判定不能で外れた」のかが報告から区別できない。
+            lines.append(
+                f"    媒体のスカウト履歴: {self.scout_history_observed}"
+                f" / {self.resumes_read} 件 観測できました"
+            )
+            if self.scout_history_observed:
+                lines.append(
+                    f"      うち過去に送信済み: {self.scout_history_contacted} 件"
+                    " (この求人からの送信のみ)"
+                )
+            elif self.resumes_read:
+                lines.append(
+                    "      **1件も観測できていません。** 座標 resume.fields.scout_histories"
+                    " か、応答の形を確認してください (履歴が無いときの表現が未観測)。"
+                )
         else:
             lines.append("  レジュメ: 取りに行っていません (ingest.fetch_resumes)")
         if self.capped_by:
@@ -314,6 +337,9 @@ def _with_resumes(
         used_by="runtime.commands.ingest._with_resumes",
     )
     keypaths = resume_keypaths(coordinates)
+    # **自社求人はどれか。** 送信payloadの雛形が唯一の出どころである
+    # (別の場所へ書き写すと、求人を切り替えたとき片方だけ古くなる)。
+    our_offer_id = our_job_offer_id(coordinates)
 
     enriched: list[Candidate] = []
     for candidate in candidates:
@@ -327,9 +353,24 @@ def _with_resumes(
             enriched.append(candidate)
             continue
         report.resumes_read += 1
+        # **履歴とレジュメを同時に載せる。** 別々の model_copy にすると、
+        # 片方だけ更新された Candidate が中間状態として存在することになる。
+        history = scout_history_from_response(
+            payload, keypath=keypaths.get("scout_histories"), our_offer_id=our_offer_id
+        )
+        if history is not None:
+            report.scout_history_observed += 1
+            if history.contacted_before():
+                report.scout_history_contacted += 1
         enriched.append(
             candidate.model_copy(
-                update={"resume": resume_from_response(payload, keypaths=keypaths)}
+                update={
+                    "resume": resume_from_response(payload, keypaths=keypaths),
+                    # **失敗枝では触らない。** 上の `continue` はここを通らないので、
+                    # レジュメが読めなかった候補者の scout_history は None のまま
+                    # 残る -- それが「観測していない」である (三値)。
+                    "scout_history": history,
+                }
             )
         )
     return enriched

@@ -364,6 +364,7 @@ def _dispatch_send_first(
             acknowledged=bool(getattr(args, "acknowledged", False)),
             run_id=f"send-first-{clock.now().isoformat()}",
             destination=destination,
+            skip_if_scouted_within_days=config.send.skip_if_scouted_within_days,
             dry_run_source=settings.dry_run.source,
         )
     print(report.render())

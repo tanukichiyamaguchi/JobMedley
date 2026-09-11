@@ -115,6 +115,45 @@ class GeneratedMessage:
         return self.outcome is GenerationOutcome.GENERATED and bool(self.body)
 
 
+#: 履歴を **観測して、送っていなかった** ときの表現。
+#:
+#: 「非公開」(UNDISCLOSED) と **必ず別の文字列にする。** 同じにすると、
+#: 「観測して初回だと分かった」と「観測できていない」がモデルから区別できず、
+#: プロンプト STEP3 (3) の分岐が「初回」へ丸め込まれる。3回送った相手に
+#: 初回として書くのが、この区別を作った理由である。
+FIRST_CONTACT: Final[str] = "今回が初回（媒体の送付履歴を確認済み）"
+
+#: 履歴を **観測して、送っていた** ときの表現の作り方。
+CONTACTED_BEFORE: Final[str] = "過去に送付済み（媒体の送付履歴を確認済み）"
+
+
+def describe_scout_history(candidate: Candidate) -> tuple[str, str, str]:
+    """``(SCOUT_HISTORY, LAST_SENT_AT, LAST_RESPONSE)`` as the prompt sees them.
+
+    **三値をここで文字列へ落とす。** 落とし方が要点である。
+
+    * ``scout_history is None``    -- 観測していない  -> すべて「非公開」
+    * 履歴が空                      -- 観測して初回   -> :data:`FIRST_CONTACT`
+    * 履歴あり                      -- 観測して再送   -> :data:`CONTACTED_BEFORE`
+
+    ``LAST_SENT_AT`` には **日付そのものを渡さない。** 渡すとモデルが本文へ
+    書き写しうるし、書式を1件も観測していない以上、書き写された日付が正しい
+    保証が無い。渡すのは「いつ頃か」ではなく **送ったという事実と回数** である。
+
+    ``LAST_RESPONSE`` は **常に「非公開」** である。媒体の履歴に返信の有無は
+    載っておらず、こちらの返信検知もまだ動いていない (``inbox.*`` は未確定)。
+    埋める材料が無いものを埋めない (原則3)。
+    """
+    history = candidate.scout_history
+    if history is None:
+        return UNDISCLOSED, UNDISCLOSED, UNDISCLOSED
+    if not history.contacted_before():
+        return FIRST_CONTACT, UNDISCLOSED, UNDISCLOSED
+    total = history.total_sent()
+    sent_at = CONTACTED_BEFORE if total is None else f"{CONTACTED_BEFORE}・通算 {total} 回"
+    return CONTACTED_BEFORE, sent_at, UNDISCLOSED
+
+
 def candidate_slots(
     candidate: Candidate,
     *,
@@ -200,13 +239,23 @@ def build_prompt(
     差し込み漏れは :func:`generation.clinic.fill` が止める -- 残った ``{{...}}``
     をモデルは記法として読まず、**知っている風に書く**。
     """
+    # **既定は候補者から導く。** 以前はこの3欄だけ呼び出し側が渡す設計で、
+    # 呼び出し側 (preview / send_first) がどちらも渡していなかったため、
+    # **全候補者で常に「非公開」** だった。プロンプト STEP3 (3) は
+    # 「過去に送付済みの場合のみ触れる」と書いてあるので、非公開は初回へ
+    # 丸め込まれ、3回送った相手にも初回として書かれていた。
+    #
+    # 引数は残してある (試験と、将来こちらの送信記録を混ぜる場合のため) が、
+    # **渡されなければ候補者の観測値が使われる** -- 渡し忘れが既定の嘘に
+    # ならないようにするためである。
+    derived_history, derived_sent_at, derived_response = describe_scout_history(candidate)
     slots = {
         **dict(clinic),
         **candidate_slots(
             candidate,
-            scout_history=scout_history,
-            last_sent_at=last_sent_at,
-            last_response=last_response,
+            scout_history=scout_history or derived_history,
+            last_sent_at=last_sent_at or derived_sent_at,
+            last_response=last_response or derived_response,
         ),
     }
     return fill(template, slots, used_by="generation.scout_message.build_prompt")

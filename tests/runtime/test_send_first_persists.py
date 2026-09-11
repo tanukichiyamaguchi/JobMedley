@@ -36,7 +36,10 @@ from jobmedley_scout.api.transport import HttpResponse
 from jobmedley_scout.clock import FixedClock
 from jobmedley_scout.config.schema import IngestConfig, LlmConfig, SafetyConfig
 from jobmedley_scout.generation.scout_message import GeneratedMessage, GenerationOutcome
-from jobmedley_scout.models.candidate import Candidate
+from jobmedley_scout.models.candidate import (
+    Candidate,
+    ScoutHistorySummary,
+)
 from jobmedley_scout.models.send_record import SendSlot
 from jobmedley_scout.runtime.commands import send_first as send_first_module
 from jobmedley_scout.runtime.commands.ingest import IngestReport
@@ -50,6 +53,9 @@ from jobmedley_scout.state.db import connect, migrate
 START = datetime(2026, 9, 11, 9, 0, tzinfo=UTC)
 CANDIDATE_ID = "3323741"
 SEARCH_UUID = "uuid-from-the-list-response"
+
+#: 観測できて、履歴が空だった状態。**未観測 (None) とは別物である。**
+_OBSERVED_NONE = ScoutHistorySummary()
 
 #: 実測した送信 payload の形。記法はすべて差し込みで埋まる。
 #:
@@ -104,12 +110,20 @@ class _Client:
         )
 
 
-def _candidate() -> Candidate:
+def _candidate(history: ScoutHistorySummary | None = _OBSERVED_NONE) -> Candidate:
+    """A candidate. **既定は「観測して履歴なし」** -- 新規候補者の通常形である。
+
+    既定を ``None`` (未観測) にしてはいけない。未観測は安全側に倒れて除外される
+    ので、この検査ファイルの主題である「送信まで到達する」が永久に成立しなく
+    なる。実際、直近送信の関門を入れた直後にこの7件が全部落ちた -- 関門が
+    効いている証拠であり、検査側を実態へ合わせるのが正しい。
+    """
     return Candidate(
         candidate_id=CANDIDATE_ID,
         raw_id_observed=CANDIDATE_ID,
         member_code="00831678",
         residence="東京都渋谷区",
+        scout_history=history,
     )
 
 
@@ -197,6 +211,7 @@ def run(
             acknowledged=True,
             run_id="test-run",
             destination=tmp_path / "sent.md",
+            skip_if_scouted_within_days=3,
         )
 
     _go.client = client  # type: ignore[attr-defined]

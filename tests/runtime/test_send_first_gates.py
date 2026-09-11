@@ -60,6 +60,7 @@ def _call(*, dry_run: bool, acknowledged: bool) -> FirstSendReport:
         acknowledged=acknowledged,
         run_id="test",
         destination=Path("/tmp/never-written.md"),
+        skip_if_scouted_within_days=3,
     )
 
 
@@ -134,7 +135,14 @@ def test_a_missing_search_uuid_stops_the_send() -> None:
         candidate_id="1", outcome=GenerationOutcome.GENERATED, body="本文" * 300
     )
     report = FirstSendReport(
-        dry_run=False, acknowledged=True, rows_seen=1, message=message, search_uuid=None
+        dry_run=False,
+        acknowledged=True,
+        rows_seen=1,
+        # **選んでいない相手の文面は存在しえない。** 単調性の検査がこれを
+        # 見張っており、chosen を立て忘れたこの検査自身が捕まった。
+        chosen=True,
+        message=message,
+        search_uuid=None,
     )
     assert report.reached() is FirstSendStage.NO_SEARCH_UUID
     assert "検索識別子" in report.render()

@@ -421,14 +421,29 @@ api.resume.payload_template: |
 #    辞退された相手へ送り続けるのは最悪の失敗なので、送信前判定に必ず入れる。
 #    ただし **null 以外の値をまだ見ていない** ので、形も意味も推測しない (原則3)。
 #
-#    **辞退はもう1箇所にも在る。** 問い合わせ文の求人側にこれがある::
+#    **辞退はもう1箇所にも在る。** ただし **在る場所をここは書き間違えていた。**
+#    2026-09-11 に問い合わせ文を機械で数え直した結果:
 #
-#      jobOffer.refuseScoutMemberIds
+#      refuseScoutMemberIds の出現は **1回だけ** で、その場所は
+#      fragment CommonFavoriteJobOfferOnMemberProfileOfPC on FavoriteJobOffer
+#      の中、つまり **favoriteJobOffers[].jobOffer 配下** である。
+#      **scoutHistories[].jobOffer の下には無い。**
 #
-#    「この求人へのスカウトを辞退した会員ID」の列である。scoutHistories が
-#    候補者側から見た辞退で、こちらは求人側から見た辞退である。**同じ事実を
-#    2方向から持っているのか、別の事実なのかは確認していない。**
-#    突き合わせるまでどちらか一方を根拠にしない (原則3)。
+#    以前ここには「問い合わせ文の求人側にこれがある」と書いてあった。自社求人に
+#    ついて常に取れるかのように読めるが、そうではない -- **候補者が自社求人を
+#    「気になる」していない限り返ってこない。** したがって「2方向を突き合わせる
+#    まで根拠にしない」という以前の方針をそのまま守ると、大半の候補者で突き合わせ
+#    が構造的に不可能なため、辞退判定が永久に実装できないことになる。
+#
+#    当面は scoutHistories[].latestRefusedAt を **真偽としてのみ** 使う
+#    (埋まっていれば辞退)。書式を1件も見ていないので日時としては解釈しない。
+#
+#    **もう1つ、記録されていなかった信号がある。** 同じ問い合わせ文は
+#    ``scoutedJobOffers`` を2回要求している (fragment
+#    DesiredConditionOnMemberProfileOfPC の AppliedMember / UnAppliedMember の
+#    両枝)。型も中身も未観測で、この座標ファイルにも docs にも一度も現れて
+#    いなかった。scoutHistories[] と一覧の members[].scouted* に加わる
+#    **第三のスカウト履歴信号** である。次の observe-resume で形を見ること。
 #
 # 2. **こだわり条件が id 付きで取れる**::
 #
@@ -688,7 +703,20 @@ api.send.paid.url_pattern: "https://customers.job-medley.com/api/customers/graph
 # 段階4-3 の実送信では **3本すべての実測値を書き残すこと** --
 # 成功時のステータス、成功時に errorMessage が null であること、そして
 # 失敗時に何が入るか。
-api.send.paid.success_statuses: UNRESOLVED
+# **2026-09-11 実測50回目、1通送って確定した。**
+#
+#   HTTPステータス : 200
+#   errors 配列    : 無し
+#   errorMessage   : null (空)
+#
+# 3本すべてを通った応答である (api/success.py の is_success が3本とも見る)。
+# 暫定で 2xx を使った1回きりの実行がこれを教えた -- 送る前には分からない座標
+# だった (docs/ladder.md 4-3 の鶏と卵)。
+#
+# **失敗時に errorMessage へ何が入るかは、まだ分からない。** 実際に失敗するまで
+# 分からず、分かっても **文言はここへ書かない** -- 候補者名が混ざりうるため
+# (13.2)。判定は「欄が埋まっているか」だけを見ており、文言には依存していない。
+api.send.paid.success_statuses: [200]
 
 # 有料枠のpayload形状。
 #
@@ -1022,6 +1050,18 @@ resume.fields.language_text: null
 
 # 年齢のキーパス。
 # 年齢。数値で来る (一覧側の members[].age は文字列だった)。
+# **媒体が持っているスカウト履歴。** 2026-09-11 実測51回目に繋いだ。
+#
+# 問い合わせ文は 2026-08-22 の時点で既に CommonScoutHistoryOnMember を要求して
+# おり、応答に載ることも観測済みだった (上の注記)。**にもかかわらず解析側は
+# 1本も読んでいなかった** -- 要求のコストだけ払って捨てていた。
+#
+# キーパスは問い合わせ文から導ける。memberGet { member { ...ScoutHistoriesOnMember } }
+# で、fragment は on Member の中で scoutHistories を展開しているので、GraphQL の
+# 平坦化により応答は data.memberGet.member.scoutHistories になる。**推測ではなく
+# 問い合わせ文の構造そのものである。**
+resume.fields.scout_histories: "data.memberGet.member.scoutHistories"
+
 resume.fields.age: "data.memberGet.member.personalInformation.age"
 
 # 会員ステータスのキーパス。
