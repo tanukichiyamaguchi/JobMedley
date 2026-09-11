@@ -312,6 +312,18 @@ COORDINATES: tuple[CoordinateSpec, ...] = (
     ),
     CoordinateSpec("resume.fields.age", _S3, CoordKind.JSON_PATH, "年齢のキーパス。"),
     CoordinateSpec(
+        "resume.fields.scout_histories",
+        _S3,
+        CoordKind.JSON_PATH,
+        "**媒体が持っているスカウト履歴**のキーパス (scoutHistories[])。"
+        "問い合わせ文は 2026-08-22 の時点で既にこれを要求しており、"
+        "latestSentAt / sentCount / latestRefusedAt / jobOffer.id が載ることを"
+        "観測済みである。**要求だけして捨てていた** のを繋ぐための座標。"
+        "これが未確定だと履歴は「観測していない」になり、直近送信の判定が"
+        "全員 判定不能へ倒れる (送らない側)。無ければ null。",
+        nullable=True,
+    ),
+    CoordinateSpec(
         "resume.fields.membership_status",
         _S3,
         CoordKind.JSON_PATH,

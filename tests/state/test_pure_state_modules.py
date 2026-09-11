@@ -20,6 +20,7 @@ PACKAGE = Path(__file__).resolve().parents[2] / "src" / "jobmedley_scout" / "sta
 
 #: 判定側 (純粋) のモジュール。永続化側 (db, *_repo, migrations) は対象外。
 PURE_MODULES = (
+    "recency.py",
     "idempotency.py",
     "dedupe.py",
     "rotation.py",

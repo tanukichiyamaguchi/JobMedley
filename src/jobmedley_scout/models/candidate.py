@@ -148,6 +148,83 @@ class ResumeFacts(BaseModel):
         return tuple(known)
 
 
+class ScoutHistoryEntry(BaseModel):
+    """One row of the platform's own scout history for this candidate.
+
+    **媒体が持っている履歴であって、こちらの送信記録ではない。** 自動化を始める
+    前に人手で送った分は ``send_records`` に無く、ここにしか無い。両者を混ぜない。
+
+    日時は **文字列のまま持つ。** 2026-08-22 の観測でこの欄は ``<string>`` と
+    しか分かっておらず、書式を見ていない (値を出さない観測だったため)。
+    ``datetime`` にして持つと、書式の推測がモデルの定義そのものに焼き付く。
+    解釈は :mod:`reply.recency` が行い、**読めなければ読めないと言う**。
+    """
+
+    model_config = _STRICT
+
+    #: どの求人へのスカウトか。**自社分だけを数えるために要る。**
+    #: 型は観測していない (数値とも文字列とも記録が無い) ので文字列で持ち、
+    #: 比較は両側を文字列へ寄せてから行う。
+    job_offer_id: str | None = None
+    #: 最後に送った日時。**書式未観測。**
+    latest_sent_at: str | None = None
+    #: 送った回数。
+    sent_count: int | None = None
+    #: 辞退された日時。**null 以外の値をまだ1件も見ていない** (座標ファイルの注記)。
+    #: 書式が分からないので、**真偽としてしか使わない** -- 「埋まっていれば辞退」。
+    latest_refused_at: str | None = None
+
+
+class ScoutHistorySummary(BaseModel):
+    """The platform's scout history, **narrowed to our own job offer**.
+
+    **``None`` と「空の要約」は別物である。** ここが三値の置き場所になる。
+
+    * :class:`Candidate` の ``scout_history`` が ``None``  -- **観測していない**
+      (レジュメが読めなかった / ``fetch_resumes`` が false / 座標が未確定)
+    * ``entries`` が空の要約      -- **観測した。履歴は無い** (初回である)
+    * ``entries`` が1件以上        -- **観測した。過去に送っている**
+
+    この3つを1つの型で潰さないことが要点である。``ResumeFacts`` 側へ置くと
+    潰れる -- 取り込みが ``model_copy(update={"resume": ...})`` で ``resume`` を
+    丸ごと差し替えるので、レジュメが読めなかった候補者には既定の空
+    :class:`ResumeFacts` が残り、「読めなかった」と「読めたが履歴なし」が
+    同じ空になる。``residence`` を :class:`Candidate` 側に置いたのと同じ理由で
+    ある。
+    """
+
+    model_config = _STRICT
+
+    entries: tuple[ScoutHistoryEntry, ...] = ()
+
+    def contacted_before(self) -> bool:
+        """Whether we have sent to this candidate before. **観測済み前提。**
+
+        この要約自体が ``None`` でないことが「観測した」を意味するので、ここでは
+        件数だけを見てよい。
+        """
+        return bool(self.entries)
+
+    def total_sent(self) -> int | None:
+        """How many scouts were sent in total. ``None`` if the platform did not say.
+
+        **0 と「言っていない」を分ける。** ``sentCount`` が欠けている履歴行しか
+        無いのに 0 を返すと、「1度も送っていない」と読めてしまう。
+        """
+        counts = [e.sent_count for e in self.entries if e.sent_count is not None]
+        if not counts:
+            return None
+        return sum(counts)
+
+    def refused(self) -> bool:
+        """Whether any entry carries a refusal timestamp.
+
+        **真偽としてしか使わない。** 書式を1件も見ていないので、日時としては
+        解釈しない (原則3)。
+        """
+        return any((e.latest_refused_at or "").strip() for e in self.entries)
+
+
 class Candidate(BaseModel):
     """A candidate as ingested from the platform."""
 
@@ -210,6 +287,18 @@ class Candidate(BaseModel):
     #: STEP1 は「都道府県レベルまでしか分からない場合」の書き方に落ちる。
     #: 空欄を勝手に埋めない。
     residence: str | None = None
+    #: 媒体が持っているスカウト履歴 (**自社求人の分だけ**)。
+    #:
+    #: **``None`` は「観測していない」であって「履歴が無い」ではない。**
+    #: 空の :class:`ScoutHistorySummary` が「観測して履歴が無い」である。
+    #: この区別が消えると、観測できなかった相手に「初めてご連絡します」と
+    #: 書くことになる -- 3回送った相手にそれを書くのが、この欄を足した理由で
+    #: ある。
+    #:
+    #: :attr:`resume` の中ではなくここに置く理由は
+    #: :class:`ScoutHistorySummary` の docstring にある (取り込みが ``resume`` を
+    #: 丸ごと差し替えるため、あちらでは三値が潰れる)。
+    scout_history: ScoutHistorySummary | None = None
     #: レジュメAPI由来の事実。読めなければ空のまま。
     resume: ResumeFacts = Field(default_factory=ResumeFacts)
     #: **一覧の行由来の事実。** レジュメが読めなくても必ずこちらは在る。

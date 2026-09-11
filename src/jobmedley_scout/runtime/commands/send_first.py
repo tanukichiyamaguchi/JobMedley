@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -49,6 +49,8 @@ from jobmedley_scout.models.message import AssembledMessage
 from jobmedley_scout.models.send_record import MessageKind, SendResult, SendSlot
 from jobmedley_scout.runtime.commands.ingest import SOURCE, collect_candidates
 from jobmedley_scout.state import candidate_repo, send_repo
+from jobmedley_scout.state.recency import scouted_within, should_skip
+from jobmedley_scout.targeting.determination import Determination, RuleOutcome
 
 #: **1件。設定では変えられない。** 1通目は1通である。
 FIRST_SEND_CAP = 1
@@ -66,6 +68,7 @@ class FirstSendStage(StrEnum):
     DRY_RUN_ON = "dry_run_on"
     NOT_ACKNOWLEDGED = "not_acknowledged"
     NO_CANDIDATE = "no_candidate"
+    ALL_SKIPPED = "all_skipped"
     NO_MESSAGE = "no_message"
     NO_SEARCH_UUID = "no_search_uuid"
     FAILED = "failed"
@@ -84,6 +87,10 @@ class FirstSendReport:
     message: GeneratedMessage | None = None
     search_uuid: str | None = None
     result: SendResult | None = None
+    #: 直近送信で外した候補者の判定。**人数ではなく理由ごと積む** (原則2)。
+    skipped: list[RuleOutcome] = field(default_factory=list)
+    #: 外されずに残った相手が居たか。**0件の理由を分けるために要る。**
+    chosen: bool = False
     #: 送る相手を状態DBへ保存したか。**予約の前提である** (外部キー)。
     stored: bool = False
     #: 予約した冪等キーの有無。**送信の直前に必ずディスクへ載る** (9.2)。
@@ -108,6 +115,7 @@ class FirstSendReport:
         # 含まれていなければならない。
         chain: tuple[tuple[FirstSendStage, bool], ...] = (
             (FirstSendStage.NO_CANDIDATE, self.rows_seen > 0),
+            (FirstSendStage.ALL_SKIPPED, self.chosen),
             (FirstSendStage.NO_MESSAGE, self.message is not None and self.message.sendable),
             (FirstSendStage.NO_SEARCH_UUID, bool(self.search_uuid)),
             (FirstSendStage.FAILED, self.result is not None and self.result.succeeded),
@@ -150,6 +158,15 @@ class FirstSendReport:
             lines.append("  **送っていません。** 送る相手が取れませんでした。")
             lines.append("  取り込みの報告を見てください (0件なのか、届いていないのか)。")
             return "\n".join(lines)
+        if stage is FirstSendStage.ALL_SKIPPED:
+            # **静かなゼロ件にしない** (原則2)。「対象が居なかった」のか
+            # 「全員が判定不能で外れた」のかは、運用上まったく別の事態である。
+            lines.append(
+                f"  **送っていません。** 取れた {self.rows_seen} 名が全員"
+                " 直近送信の判定で外れました。"
+            )
+            lines.extend(self._skip_lines())
+            return "\n".join(lines)
         if stage is FirstSendStage.NO_MESSAGE:
             lines.append("  **送っていません。** 送れる文面ができませんでした。")
             if self.message is not None:
@@ -162,6 +179,7 @@ class FirstSendReport:
             return "\n".join(lines)
 
         assert self.result is not None  # noqa: S101 -- reached() が保証している
+        lines.extend(self._skip_lines())
         lines.append(f"  送る相手の保存: {'しました' if self.stored else '**していません**'}")
         lines.append(f"  冪等キー: {'予約しました' if self.reserved else '**予約できていません**'}")
         lines.append(f"  HTTPステータス: {self.result.http_status}")
@@ -177,6 +195,35 @@ class FirstSendReport:
         lines.append("  **件名は媒体へ届いていません。** 送信payloadに件名の欄がありません。")
         lines.append("  保存した件名は手元の札で、返信突合が成立するかは未確認です (10.2)。")
         return "\n".join(lines)
+
+    def _skip_lines(self) -> list[str]:
+        """Why candidates were left alone. **人数だけでなく理由の内訳を出す。**
+
+        判定不能で外れたのか、本当に直近で送っていたのかは別物である。前者が
+        積み上がっているなら、それは履歴が読めていない合図であって「対象が
+        居ない」ではない。
+        """
+        if not self.skipped:
+            return []
+        by_reason: dict[str, int] = {}
+        for outcome in self.skipped:
+            key = (
+                "直近に送信済み"
+                if outcome.determination is Determination.MATCH
+                else "**判定できず送らない側へ倒した**"
+            )
+            by_reason[key] = by_reason.get(key, 0) + 1
+        lines = [f"  直近送信の判定で外した候補者: {len(self.skipped)} 名"]
+        for reason, count in sorted(by_reason.items()):
+            lines.append(f"    {reason}: {count} 名")
+        # **根拠の文言も1種類ずつ出す。** 件数だけでは次の手が決まらない。
+        seen: set[str] = set()
+        for outcome in self.skipped:
+            if outcome.evidence in seen:
+                continue
+            seen.add(outcome.evidence)
+            lines.append(f"      理由: {outcome.evidence}")
+        return lines
 
     def _coordinate_lines(self) -> list[str]:
         """What this one send taught us. **1通目の目的の半分はこれである。**"""
@@ -213,6 +260,7 @@ def send_first(
     acknowledged: bool,
     run_id: str,
     destination: Path,
+    skip_if_scouted_within_days: int,
     dry_run_source: str = "",
 ) -> FirstSendReport:
     """Send exactly one message. **門を通らなければ何も起きない。**"""
@@ -232,7 +280,30 @@ def send_first(
     if not candidates:
         return report
 
-    candidate = candidates[0]
+    # **直近に送った相手を外す。** ここが唯一の関門である。
+    #
+    # 見るのは **媒体側の履歴** であってこちらの送信記録ではない。自動化を
+    # 始める前に人手で送った分は send_records に無く、媒体側にしか無い
+    # (実測51回目)。自分の記録だけを見ていると、既に3回送った相手へ4回目を
+    # 送ることになる。
+    #
+    # 判定不能は **送らない側へ倒す**。ただし黙って倒さない -- 外した理由は
+    # 全部 report に積み、送信0件になったときに「対象が居なかった」のか
+    # 「全員判定不能で外れた」のかが区別できるようにする (原則2)。
+    candidate: Candidate | None = None
+    for row in candidates:
+        outcome = scouted_within(
+            row.scout_history, now=clock.now(), days=skip_if_scouted_within_days
+        )
+        if should_skip(outcome):
+            report.skipped.append(outcome)
+            continue
+        candidate = row
+        break
+    if candidate is None:
+        return report
+    report.chosen = True
+
     report.message = generate_scout_body(
         llm,
         config=llm_config,
