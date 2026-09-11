@@ -47,8 +47,8 @@ from jobmedley_scout.generation.scout_message import (
 from jobmedley_scout.models.candidate import Candidate
 from jobmedley_scout.models.message import AssembledMessage
 from jobmedley_scout.models.send_record import MessageKind, SendResult, SendSlot
-from jobmedley_scout.runtime.commands.ingest import collect_candidates
-from jobmedley_scout.state import send_repo
+from jobmedley_scout.runtime.commands.ingest import SOURCE, collect_candidates
+from jobmedley_scout.state import candidate_repo, send_repo
 
 #: **1件。設定では変えられない。** 1通目は1通である。
 FIRST_SEND_CAP = 1
@@ -84,6 +84,8 @@ class FirstSendReport:
     message: GeneratedMessage | None = None
     search_uuid: str | None = None
     result: SendResult | None = None
+    #: 送る相手を状態DBへ保存したか。**予約の前提である** (外部キー)。
+    stored: bool = False
     #: 予約した冪等キーの有無。**送信の直前に必ずディスクへ載る** (9.2)。
     reserved: bool = False
 
@@ -160,6 +162,7 @@ class FirstSendReport:
             return "\n".join(lines)
 
         assert self.result is not None  # noqa: S101 -- reached() が保証している
+        lines.append(f"  送る相手の保存: {'しました' if self.stored else '**していません**'}")
         lines.append(f"  冪等キー: {'予約しました' if self.reserved else '**予約できていません**'}")
         lines.append(f"  HTTPステータス: {self.result.http_status}")
         if stage is FirstSendStage.FAILED:
@@ -240,11 +243,26 @@ def send_first(
     )
     if not report.message.sendable:
         return report
-    _write_body(destination, report.message.body, candidate)
+    _write_body(destination, report.message.body, candidate, BEFORE_SEND)
     if not report.search_uuid:
         # **記法が残ったまま送らない。** assert_fully_filled も止めるが、
         # そこまで行く前に理由を名前で報告する (原則2)。
         return report
+
+    # **送る相手を先に保存する。** ``send_records.candidate_id`` は
+    # ``candidates(candidate_id)`` への外部キーなので、保存していない相手には
+    # 冪等キーを予約できない。
+    #
+    # ここは :func:`collect_candidates` を下見と共用している。下見は **保存しない
+    # ことが要点** で (送っていないのに「取り込み済み」になるため)、その関数を
+    # そのまま送信路で使ったので保存が抜けた。2026-09-11、実送信の1通目が
+    # ``FOREIGN KEY constraint failed`` で落ちて分かった。
+    #
+    # **送信路では保存しないという選択肢が無い。** 誰に送ったか分からない送信は
+    # 9.4 が禁じている (送信枠は後から復元できない) し、次回の重複判定もここを
+    # 見る (9.3)。下見と送信で保存の要否が正反対である、というのが要点だった。
+    candidate_repo.upsert_candidate(connection, candidate, source=SOURCE, clock=clock)
+    report.stored = True
 
     subject = _local_subject(candidate, clock)
     reserved = send_repo.reserve_send(
@@ -280,6 +298,15 @@ def send_first(
         extra={PLACEHOLDER_SEARCH_UUID: report.search_uuid},
     )
     report.result = result
+
+    # **見出しを結果で書き直す。** 送る前に書いたものは「送ろうとしている」と
+    # 題してある。ここまで来たので、届いたかどうかが確定した。
+    _write_body(
+        destination,
+        report.message.body,
+        candidate,
+        AFTER_SENT if result.succeeded else AFTER_FAILED,
+    )
 
     if result.succeeded:
         send_repo.mark_sent(connection, reserved, result, clock)
@@ -322,14 +349,44 @@ def _local_subject(candidate: Candidate, clock: Clock) -> str:
     return f"{SUBJECT_PREFIX} {who} {clock.now().date().isoformat()}"
 
 
-def _write_body(destination: Path, body: str, candidate: Candidate) -> None:
-    """Keep a copy of what was sent. **送ったものは取り消せない。残す。**"""
+#: 送信の前に書く見出し。**まだ送っていない。**
+#:
+#: 送信の途中で実行が落ちると、ファイルはこの見出しのまま残る。だから
+#: 「送っていません」と言い切らず、**届いたかどうかは分からない** と書く。
+#: 落ちた場合に残る文面が、そのまま嘘にならないようにするためである。
+BEFORE_SEND = (
+    "# 1通目に送ろうとしている文面 (**この時点ではまだ送っていません**)\n"
+    "\n"
+    "> このファイルがこの見出しのままなら、**送信の結果が書かれる前に実行が"
+    "落ちています。**\n"
+    "> その場合、届いたかどうかは **このファイルからは分かりません**。"
+    "ログの報告と媒体の送信履歴を見てください。"
+)
+
+#: 送信が成功したあとに書き直す見出し。
+AFTER_SENT = "# 1通目に **送った** 文面 (送信は成功しました)"
+
+#: 送信が確定失敗したあとに書き直す見出し。
+AFTER_FAILED = "# 1通目に送ろうとした文面 (**送信は失敗しました。届いていません**)"
+
+
+def _write_body(destination: Path, body: str, candidate: Candidate, heading: str) -> None:
+    """Keep a copy of the message. **送ったものは取り消せない。残す。**
+
+    **見出しは呼び出し側が渡す。** 以前は「1通目に送った文面」で決め打ちだった
+    が、この関数は **送信の前に** 呼ばれる。つまり送る前から「送った」と書いて
+    いた。``searchUuid`` が取れずに引き返した場合、送っていないのに「送った文面」
+    と題されたファイルだけが成果物に残る。
+
+    **送る前に書くこと自体は正しい。** 送信の途中で落ちても文面が残るのは、
+    取り消せない操作の記録として要る。直すべきは見出しのほうである。
+    """
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(
             "\n".join(
                 (
-                    "# 1通目に送った文面",
+                    heading,
                     "",
                     f"- 候補者の会員番号: {candidate.member_code}",
                     f"- 長さ: {len(body)} 字 (改行込み)",
