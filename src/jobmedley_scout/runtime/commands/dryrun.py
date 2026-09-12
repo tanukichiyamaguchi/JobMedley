@@ -41,6 +41,7 @@ from jobmedley_scout.generation.llm_client import AnthropicLike
 from jobmedley_scout.generation.scout_message import (
     GeneratedMessage,
     build_prompt,
+    candidate_slots,
     generate_scout_body,
 )
 from jobmedley_scout.models.candidate import Candidate
@@ -473,6 +474,22 @@ def _write(destination: Path, candidates: Sequence[Candidate], report: DryRunRep
             blocks.append("")
             continue
         blocks.append(f"- 書き直し: {message.attempts} 回 / 長さ: {len(message.body)} 字")
+        # **モデルへ渡した材料を、本文の隣に置く。**
+        #
+        # これが無いと **合格条件1「生成文面に虚偽がないか」を人が判定できない。**
+        # 本文に「11年のご経験」と書いてあっても、それが本当に渡っていた値なのか
+        # モデルが作った数字なのかを、成果物だけでは誰も確かめられなかった
+        # (実測55回目の検査で指摘された)。合格条件を持つ成果物が、その合格条件を
+        # 検証できない形をしていた。
+        #
+        # 13.2 との関係: この成果物には既に会員番号と本文が載っている。材料を
+        # 足しても出口は同じ (短い保持日数の artifact) で、ログには出ない。
+        blocks.append("")
+        blocks.append("**モデルへ渡した材料** (本文がこの範囲に収まっているかを見る):")
+        blocks.append("")
+        for name, value in candidate_slots(candidate).items():
+            blocks.append(f"  - {name}: {value}")
+        blocks.append("")
         if message.violations:
             blocks.append("- 残った違反:")
             blocks.extend(f"  - {v.kind.value}: {v.evidence}" for v in message.violations)
