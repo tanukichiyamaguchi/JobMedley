@@ -56,6 +56,24 @@ _DATE_ONLY_FORMATS: Final[tuple[str, ...]] = (
     "%Y年%m月%d日",
 )
 
+#: 日時の書式。**``fromisoformat`` が読めない形だけを並べる。**
+#:
+#: 2026-09-12 実測54回目、段階5 の通しで **5名全員が「読めない書式 (長さ 19)」**
+#: で外れた。長さ19 の ISO 形 (``2025-05-28T10:00:00`` / ``2025-05-28 10:00:00``)
+#: は ``fromisoformat`` が読むので、実際の書式はそのどちらでもない。画面には
+#: ``送信日:2025/05/28`` と出ているので、**スラッシュ区切りが有力** である。
+#:
+#: **並べたのは仮説であって観測ではない。** 当たったかどうかは次の実行で分かる
+#: -- 外れていれば :func:`describe_format` が書式そのものを (値抜きで) 出す。
+_DATETIME_FORMATS: Final[tuple[str, ...]] = (
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%dT%H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y.%m.%d %H:%M:%S",
+    "%Y年%m月%d日 %H:%M:%S",
+    "%Y年%m月%d日 %H:%M",
+)
+
 
 def parse_sent_at(raw: str | None) -> datetime | None:
     """Read ``latestSentAt`` leniently. ``None`` when it cannot be read.
@@ -83,7 +101,7 @@ def parse_sent_at(raw: str | None) -> datetime | None:
     if parsed is not None:
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
-    for fmt in _DATE_ONLY_FORMATS:
+    for fmt in (*_DATETIME_FORMATS, *_DATE_ONLY_FORMATS):
         try:
             return datetime.strptime(text, fmt).replace(tzinfo=UTC)
         except ValueError:
@@ -91,24 +109,55 @@ def parse_sent_at(raw: str | None) -> datetime | None:
     return None
 
 
+#: 書式を写すときに **そのまま残す** 文字。構造を表すだけで、値を持たない。
+_STRUCTURAL: Final[frozenset[str]] = frozenset("TZ")
+
+
+def shape_of(text: str) -> str:
+    """The timestamp's shape, with **every value character masked**.
+
+    数字を ``N``、``T``/``Z`` 以外の英字を ``A`` に置き換え、区切りはそのまま残す。
+    ``2025/05/28 10:00:00`` は ``NNNN/NN/NN NN:NN:NN`` になる。
+
+    **これは値ではない。** どの日付かは一切分からず、分かるのは並びだけである。
+    13.2 が守りたいのは候補者を特定しうる情報であって、区切り記号の並びではない。
+
+    長さだけでは足りないことが実測54回目で分かった。「読めない書式 (長さ 19)」
+    では候補が複数残り、**どれなのかを当てるしかなくなる**。当てるくらいなら
+    形を出せばよい -- 値を出さずに形を出す方法はある。
+    """
+    out: list[str] = []
+    for char in text:
+        if char.isdigit():
+            out.append("N")
+        elif char in _STRUCTURAL:
+            out.append(char)
+        elif char.isalpha():
+            out.append("A")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
 def describe_format(raw: str | None) -> str:
     """What shape the timestamp had. **値そのものは返さない** (13.2)。
 
-    1回走らせれば本当の書式が分かるようにするための報告用。日付は個人データでは
-    ないが、**候補者を特定しうる粒度の情報を報告へ積む必要が無い** ので、ここでも
-    種別だけを返す。
+    1回走らせれば本当の書式が分かるようにするための報告用。返すのは
+    :func:`shape_of` が作る **値を伏せた並び** と、読めたかどうかである。
     """
     if raw is None:
         return "欄が無い"
     text = raw.strip()
     if not text:
         return "空文字"
+    shape = shape_of(text)
     parsed = parse_sent_at(text)
     if parsed is None:
-        return f"読めない書式 (長さ {len(text)})"
+        # **形を出す。** これが無いと、次の実行でも当て推量が続く。
+        return f"読めない書式: {shape}"
     if parsed.hour or parsed.minute or parsed.second:
-        return "日時 (時刻あり)"
-    return "日付のみ (時刻なし)"
+        return f"日時 (時刻あり): {shape}"
+    return f"日付のみ (時刻なし): {shape}"
 
 
 def latest_sent(summary: ScoutHistorySummary) -> tuple[datetime | None, int, int]:
@@ -227,6 +276,7 @@ def should_skip(outcome: RuleOutcome) -> bool:
 __all__ = [
     "RULE_RECENTLY_SCOUTED",
     "describe_format",
+    "shape_of",
     "latest_sent",
     "parse_sent_at",
     "scouted_within",

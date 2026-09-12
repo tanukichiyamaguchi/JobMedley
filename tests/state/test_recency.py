@@ -193,3 +193,71 @@ def test_a_negative_window_is_refused() -> None:
     """負の日数は設定の打鍵ミスである。**黙って通さない。**"""
     with pytest.raises(ValueError, match="0 以上"):
         scouted_within(ScoutHistorySummary(), now=NOW, days=-1)
+
+
+# --------------------------------------------------------------------------
+# 書式を、値を出さずに写す
+# --------------------------------------------------------------------------
+
+
+def test_the_shape_masks_every_digit() -> None:
+    """**値ではなく並びを出す。**
+
+    2026-09-12 実測54回目、段階5 の通しで5名全員が外れた。報告に出ていたのは
+    「読めない書式 (長さ 19)」だけで、**長さ19 の候補は複数あった**。ISO の2形は
+    既に読めていたので、残りを当てるしかなくなった。
+
+    当てるくらいなら形を出せばよい。**値を出さずに形を出す方法はある。**
+    """
+    from jobmedley_scout.state.recency import shape_of
+
+    assert shape_of("2025/05/28 10:00:00") == "NNNN/NN/NN NN:NN:NN"
+    assert shape_of("2025-05-28T10:00:00+09:00") == "NNNN-NN-NNTNN:NN:NN+NN:NN"
+
+
+def test_the_shape_never_carries_a_digit_or_a_word() -> None:
+    """13.2: 並びに値が混ざらないこと。
+
+    数字は ``N``、``T``/``Z`` 以外の英字は ``A`` になる。日本語も英字として
+    扱われるので、文言がそのまま出ることはない。
+    """
+    from jobmedley_scout.state.recency import shape_of
+
+    for raw in ("2025/05/28 10:00:00", "2025年5月28日", "28 May 2025", "令和7年5月28日"):
+        shape = shape_of(raw)
+        assert not any(char.isdigit() for char in shape), shape
+        assert all(char in "NA" or not char.isalpha() for char in shape), shape
+
+
+def test_the_description_shows_the_shape_not_just_the_length() -> None:
+    """「長さ 19」では次の手が決まらない。**並びまで出す。**"""
+    said = describe_format("2025/05/28 10:00:00")
+    assert "NNNN/NN/NN NN:NN:NN" in said
+    assert "2025" not in said
+
+
+# --------------------------------------------------------------------------
+# 実測54回目の書式
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2025/05/28 10:00:00",
+        "2025/05/28T10:00:00",
+        "2025/05/28 10:00",
+        "2025.05.28 10:00:00",
+    ],
+)
+def test_slash_separated_datetimes_are_read(raw: str) -> None:
+    """スラッシュ区切りの日時を読めること。
+
+    **これは仮説である。** 段階5 の通しで5名全員が「読めない書式 (長さ 19)」で
+    外れ、長さ19 の ISO 形は既に読めていた。画面には ``送信日:2025/05/28`` と
+    出ているのでスラッシュ区切りが有力だが、**観測したわけではない**。
+
+    外れていても静かには失敗しない -- :func:`describe_format` が並びを出すので、
+    次の実行で正体が分かる。
+    """
+    assert parse_sent_at(raw) is not None
