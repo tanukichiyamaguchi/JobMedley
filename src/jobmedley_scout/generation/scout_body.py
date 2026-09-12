@@ -132,6 +132,57 @@ MIN_CHARS: Final[int] = 500
 MAX_CHARS: Final[int] = 850
 
 
+#: **前回の反応に触れた形。** 実測55回目、段階5 の通しで5通中2通に出た::
+#:
+#:     前回はお返事をいただけませんでしたが、改めてプロフィールを拝見し…
+#:     前回はお返事をいただけておりませんでしたが、プロフィールを改めて拝見し…
+#:
+#: **返事があったかどうかを、こちらは一切知らない。** ``LAST_RESPONSE`` は常に
+#: 「非公開」で、受信箱の座標 (``inbox.*``) は全て未確定、媒体の送付履歴にも
+#: 返信の欄が無い。事実の創作であるうえ、「あなたは返事をしなかった」と相手を
+#: 責める含みがある -- 実際には返事をしていた場合、決定的に失礼になる。
+#:
+#: **過去形・否定形だけを捕まえる。** 「お返事をいただけましたら」のような
+#: これからのお願いは正しい文なので、通さなければならない。
+#:
+#: **過検出は見逃しと同じだけ害がある。** 最初に書いた形は近さだけで捕まえて
+#: いて (「前回」から20字以内に「ご検討」があれば落とす)、次のような真っ当な文を
+#: 3つ落としていた::
+#:
+#:     ご返信いただく必要はなく、お気軽にご覧いただければ幸いです。
+#:     前回の求人からは体制を変えており、ご検討いただく価値はあると思っています。
+#:     以前から予防に力を入れており、ご返信は急ぎません。
+#:
+#: 「前回」「以前」は **時を指すふつうの副詞** でもあり、「なく」は「必要はなく」
+#: のように打ち消し以外にも付く。落とされた本文は作り直しになり、モデルは通る
+#: 言い回しを探して創作へ戻る -- 止めたかったものが戻ってくる。
+#:
+#: そこで近さではなく **係り受けで捕まえる**。反応の語に否定・過去が直接付いた
+#: 形だけを見る。
+UNOBSERVED_RESPONSE: Final[tuple[re.Pattern[str], ...]] = (
+    # 返事/返信/ご連絡/反応 + 「いただけない」の過去形。
+    # 「いただけましたら」は未来の依頼なので入らない。
+    re.compile(
+        r"(返事|返信|ご連絡|反応)を?"
+        r"(いただけ(ず|ませんでした|ておりま|なかった)|いただいておりません)"
+    ),
+    # 反応そのものが「無かった」と言い切る形。助詞を直接要求するので、
+    # 「必要はなく」のような別の語に付いた「なく」は入らない。
+    re.compile(
+        r"(お返事|ご返信|返事|返信|反応|音沙汰)[がはも]"
+        r"(なく|無く|ありませんでした|ございませんでした|なかった)"
+    ),
+    # 前回/先日/以前 に反応の語が **直に係った** 形。肯定形でも観測していない
+    # ので創作である (「前回ご検討いただいたかと思いますが」)。間に6字しか許さ
+    # ないので、時を指すだけの「以前から…」は入らない。
+    re.compile(
+        r"(前回|先日|以前)[はもの]?[^。]{0,6}(お返事|ご返信|反応|ご検討)(を|が|は|も|いただ)"
+    ),
+    # 既読・未読は媒体からも見えない
+    re.compile(r"(既読|未読)"),
+)
+
+
 class BodyViolationKind(StrEnum):
     """このプロンプトが定めた決まりの、破られ方。"""
 
@@ -161,6 +212,8 @@ class BodyViolationKind(StrEnum):
     GENERIC_PRAISE = "generic_praise"
     #: 本文にURLが出た。**このプロンプトはURLを求めていない。**
     URL_PRESENT = "url_present"
+    #: 前回の反応・返事の有無に触れた。**一切観測していない** (実測55回目)。
+    UNOBSERVED_RESPONSE = "unobserved_response"
 
 
 class BodyViolation(BaseModel):
@@ -262,6 +315,7 @@ def validate_body(
     violations.extend(_check_address(body, clinic_address))
     violations.extend(_check_forbidden(body))
     violations.extend(_check_grounding(body))
+    violations.extend(_check_unobserved_response(body))
     violations.extend(_check_urls(body))
     violations.extend(_check_formatting(body))
     violations.extend(_check_length(body))
@@ -437,6 +491,43 @@ def _check_grounding(body: str) -> list[BodyViolation]:
                     "誰にでも当てはまる文は、その人宛ではありません。"
                 ),
                 evidence=match.group(0),
+            )
+        )
+    return out
+
+
+def _check_unobserved_response(body: str) -> list[BodyViolation]:
+    """Claims about how the candidate reacted last time. **実測55回目。**
+
+    プロンプトは「重ねての連絡になる恐縮と、**それでもなお連絡したいと思った
+    理由** を一言で誠実に伝える」と命じていた。理由になる材料は渡していないので、
+    モデルは理由を作った。5通中2通が「前回はお返事をいただけませんでしたが」で
+    始まっていた。
+
+    **禁止は命令に勝てない** (実測40回目と同じ構造)。だから直したのは手順の
+    ほうで、再送への言及は「度々のご連絡失礼いたします」の一言に限った。
+    ここはその裏取りである。
+
+    運用者の指示 (2026-09-12):
+
+    > 前回はお返事をいただけておりませんでしたがとは送らない。
+    > 単純に、度々のご連絡失礼します。と伝える
+    """
+    out: list[BodyViolation] = []
+    for pattern in UNOBSERVED_RESPONSE:
+        found = pattern.search(body)
+        if found is None:
+            continue
+        out.append(
+            BodyViolation(
+                kind=BodyViolationKind.UNOBSERVED_RESPONSE,
+                detail=(
+                    "前回の反応・返事の有無に触れています。**こちらは一切観測して"
+                    "いません** (受信箱を読む仕組みが無く、媒体の送付履歴にも返信の"
+                    "欄が無い)。再送への言及は「度々のご連絡失礼いたします」の一言に"
+                    "とどめてください。"
+                ),
+                evidence=found.group(0),
             )
         )
     return out
