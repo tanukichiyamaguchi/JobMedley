@@ -183,6 +183,43 @@ UNOBSERVED_RESPONSE: Final[tuple[re.Pattern[str], ...]] = (
 )
 
 
+#: **相手の腕前についての断定。** 実測55回目、5通すべてに出た::
+#:
+#:     これだけの年数を積み重ねてこられた方であれば、患者様お一人おひとりへの
+#:     向き合い方や、処置の丁寧さにも確かなものがあると感じております。
+#:
+#: **この人の処置を、こちらは一度も見ていない。** 年数はプロフィールに書いてあるが、
+#: 腕前は書いていない。年数から腕前を導けると仮定した推測である。
+#:
+#: 監査で ``_UNGROUNDED`` と ``_GENERIC_PRAISE`` を5通すべてに当てたところ
+#: **ヒットは0件だった** -- この系統を見る検査が存在しなかった。
+#:
+#: **語彙を絞ってある。** 「技術の向上を支える勉強会」「処置の幅を広げていただける
+#: 環境」のような当院についての記述は通さなければならないので、腕前の断定に固有の
+#: 言い方だけを見る。根治はプロンプト側 (命令の向きを当院へ変えた) で、ここは裏取り。
+_CLAIMED_SKILL: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"(処置|技術|手技|施術)の(丁寧さ|確かさ|高さ|正確さ)"),
+    re.compile(
+        r"(余裕|自信|落ち着き)[^。]{0,8}(出てくる|出て来る|ついてくる|生まれる)(時期|頃|タイミング)"
+    ),
+    re.compile(r"まだ[^。]{0,10}経験を積(んでいる|む)途中"),
+    re.compile(r"(向き合い方|患者様への姿勢)[^。]{0,14}(確かな|確か|信頼|間違いない)"),
+)
+
+#: 時短勤務と産休・育休を一括りにして「実績」と述べた形。
+#:
+#: 医院情報は「時短勤務の相談可。産休・育休の取得実績あり」と **書き分けている**。
+#: 実績があるのは産休・育休だけである。実測55回目の4通目::
+#:
+#:     時短勤務や産休育休の実績もありますので、この先どんな状況になっても…
+#:
+#: 同じ材料から2通は正しく書き分けていた (「時短勤務のご相談や産休・育休の実績」)
+#: ので、その形は通す。
+_LUMPED_SHORT_HOURS: Final[re.Pattern[str]] = re.compile(
+    r"時短勤務(?![^。]{0,6}(相談|可))[^。]{0,8}(産休|育休)[^。]{0,8}実績"
+)
+
+
 class BodyViolationKind(StrEnum):
     """このプロンプトが定めた決まりの、破られ方。"""
 
@@ -214,6 +251,10 @@ class BodyViolationKind(StrEnum):
     URL_PRESENT = "url_present"
     #: 前回の反応・返事の有無に触れた。**一切観測していない** (実測55回目)。
     UNOBSERVED_RESPONSE = "unobserved_response"
+    #: 相手の腕前・習熟度を断定した。**処置を一度も見ていない** (実測55回目)。
+    CLAIMED_SKILL = "claimed_skill"
+    #: 医院情報に無い主張を書いた (スタッフ全員で応援・時短勤務の実績・45分の読み替え)。
+    UNBACKED_CLINIC_CLAIM = "unbacked_clinic_claim"
 
 
 class BodyViolation(BaseModel):
@@ -316,6 +357,8 @@ def validate_body(
     violations.extend(_check_forbidden(body))
     violations.extend(_check_grounding(body))
     violations.extend(_check_unobserved_response(body))
+    violations.extend(_check_claimed_skill(body))
+    violations.extend(_check_unbacked_clinic_claims(body))
     violations.extend(_check_urls(body))
     violations.extend(_check_formatting(body))
     violations.extend(_check_length(body))
@@ -526,6 +569,71 @@ def _check_unobserved_response(body: str) -> list[BodyViolation]:
                     "いません** (受信箱を読む仕組みが無く、媒体の送付履歴にも返信の"
                     "欄が無い)。再送への言及は「度々のご連絡失礼いたします」の一言に"
                     "とどめてください。"
+                ),
+                evidence=found.group(0),
+            )
+        )
+    return out
+
+
+def _check_claimed_skill(body: str) -> list[BodyViolation]:
+    """Claims about how good the candidate is. **実測55回目、5通すべてに出た。**
+
+    プロンプト STEP2 (3) は「その事実が **現場で** 何を意味するのかまで書く」と
+    命じていた。直後に内心の推測を禁じてもいたが、**腕前は内心ではない** ので
+    抜けていた。命令の向きを当院側へ変えたのが根治で、ここは裏取りである。
+
+    監査で既存の検査 (``_UNGROUNDED`` / ``_GENERIC_PRAISE``) を5通に当てたところ
+    **ヒット0件** で、この系統は誰も見ていなかった。
+    """
+    out: list[BodyViolation] = []
+    for pattern in _CLAIMED_SKILL:
+        found = pattern.search(body)
+        if found is None:
+            continue
+        out.append(
+            BodyViolation(
+                kind=BodyViolationKind.CLAIMED_SKILL,
+                detail=(
+                    "相手の腕前・習熟度を断定しています。**この人の処置を一度も見て"
+                    "いません。** 経験年数はプロフィールにありますが、技術の確かさは"
+                    "書かれていません。経験に触れるなら、当院のどの体制と噛み合うかを"
+                    "書いてください。"
+                ),
+                evidence=found.group(0),
+            )
+        )
+    return out
+
+
+def _check_unbacked_clinic_claims(body: str) -> list[BodyViolation]:
+    """Claims about the clinic that ``clinic.yaml`` does not carry.
+
+    **ここには1つしか無い。** 監査は3つ挙げたが、残り2つ (「スタッフ全員で応援」と
+    45分をクリーニング枠から診療全般へ広げること) は **運用者が是とした表現** なので
+    検査しない -- 実測40回目に運用者が「問題ない」と明言した段落
+    (:data:`APPROVED_PARAGRAPHS` の2つ目) に両方が入っており、プロンプト STEP3 (8)
+    も「全スタッフで応援する姿勢…を伝える」と命じていた。**運用者が2度是とした表現を、
+    監査の一存で落とさない。** ``clinic.yaml`` に裏が無いことは報告済みで、
+    求人票を足すのか表現をやめるのかは運用者の決めである。
+
+    残る1つは運用者の指示と衝突しない。``clinic.yaml`` が「時短勤務の相談可。
+    産休・育休の取得実績あり」と **自分で書き分けている** のを一括りにした形で、
+    同じ材料から5通のうち2通は正しく書き分けていた::
+
+        時短勤務や産休育休の実績もありますので…          (4通目。実績は産休・育休だけ)
+        時短勤務のご相談や産休・育休の実績もあります      (2通目。正しい)
+    """
+    out: list[BodyViolation] = []
+    found = _LUMPED_SHORT_HOURS.search(body)
+    if found is not None:
+        out.append(
+            BodyViolation(
+                kind=BodyViolationKind.UNBACKED_CLINIC_CLAIM,
+                detail=(
+                    "時短勤務と産休・育休を一括りにして「実績」と述べています。"
+                    "医院情報は「時短勤務の相談可。産休・育休の取得実績あり」と"
+                    "書き分けており、**実績があるのは産休・育休だけ** です。"
                 ),
                 evidence=found.group(0),
             )
