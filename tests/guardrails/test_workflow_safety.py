@@ -23,6 +23,22 @@ import yaml
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 SCOUT = WORKFLOWS / "scout.yml"
 RECON = WORKFLOWS / "recon.yml"
+FIRST_SEND = WORKFLOWS / "first-send.yml"
+DRYRUN = WORKFLOWS / "dryrun.yml"
+
+#: **媒体へ触れるワークフロー。** ここに並んでいないものは検査を受けない。
+#:
+#: 以前は ``SCOUT`` と ``RECON`` の2本を手で並べていた。その結果、
+#: **唯一送信する first-send.yml がどの検査にも掛かっていなかった。** 作った
+#: ときに並べ忘れ、並べ忘れたことを誰も検知しなかった -- 手で並べる作りは、
+#: 足したものを黙って素通りさせる。
+#:
+#: :func:`test_every_workflow_is_covered_by_these_checks` が、ディレクトリの
+#: 実体とこの並びの一致を見張る。**次に足す1本は、足した瞬間に赤くなる。**
+TOUCHES_THE_PLATFORM = (SCOUT, RECON, FIRST_SEND, DRYRUN)
+
+#: 媒体へ触れないもの (CI 等)。ここに入れるのは明示的な判断である。
+NOT_OUR_CONCERN = frozenset({"ci.yml"})
 
 
 def _text(path: Path) -> str:
@@ -68,7 +84,7 @@ def test_preflight_is_not_allowed_to_fail() -> None:
     assert "continue-on-error" not in preflight[0]
 
 
-@pytest.mark.parametrize("path", [SCOUT, RECON])
+@pytest.mark.parametrize("path", TOUCHES_THE_PLATFORM, ids=lambda p: p.name)
 def test_credentials_are_never_cached(path: Path) -> None:
     """12.7: 既定ブランチのキャッシュは他ブランチからも復元できる。
 
@@ -168,7 +184,7 @@ def test_every_recon_step_belongs_to_an_offered_command() -> None:
         ), f"選択肢に無い command を条件にしたステップがある: {step.get('name')} ({condition})"
 
 
-@pytest.mark.parametrize("path", [SCOUT, RECON])
+@pytest.mark.parametrize("path", TOUCHES_THE_PLATFORM, ids=lambda p: p.name)
 def test_every_setup_step_has_its_own_time_limit(path: Path) -> None:
     """**詰まった段取りに、ジョブの持ち時間を全部食わせない。**
 
@@ -194,3 +210,66 @@ def test_every_setup_step_has_its_own_time_limit(path: Path) -> None:
         if not step.get("timeout-minutes")
     ]
     assert not missing, f"時間の上限が無い段取り: {missing}"
+
+
+def test_every_workflow_is_covered_by_these_checks() -> None:
+    """**足した1本が黙って素通りしないこと。**
+
+    ここが今回の要点である。以前は検査するファイルを手で2本並べており、
+    ``first-send.yml`` -- **唯一実際に送信するワークフロー** -- がどの検査にも
+    掛かっていなかった。作ったときに並べ忘れ、並べ忘れたことを誰も検知しなかった。
+
+    実測48・49・51回目と同じ形である: **部品ごとには正しく、部品のあいだが
+    繋がっていない。** 手で並べる作りは、その穴を構造的に作り続ける。
+    """
+    on_disk = {path.name for path in WORKFLOWS.glob("*.yml")}
+    covered = {path.name for path in TOUCHES_THE_PLATFORM}
+    uncovered = sorted(on_disk - covered - NOT_OUR_CONCERN)
+    assert not uncovered, (
+        f"検査の対象に入っていないワークフローがあります: {', '.join(uncovered)}。"
+        " TOUCHES_THE_PLATFORM へ足すか、媒体へ触れないなら NOT_OUR_CONCERN へ"
+        " 明示的に入れてください (既定で素通りさせない)。"
+    )
+    missing = sorted(name for name in covered if name not in on_disk)
+    assert not missing, f"並びにあるのに実体が無いワークフロー: {', '.join(missing)}"
+
+
+@pytest.mark.parametrize("path", TOUCHES_THE_PLATFORM, ids=lambda p: p.name)
+def test_every_workflow_passes_the_safety_valves_explicitly(path: Path) -> None:
+    """12.6: **渡し忘れを既定値で救わない。**
+
+    「安全弁を作った」と「安全弁が効いている」は別物である。実測48回目で、
+    環境変数が届いていないままコマンドが既定値を読んでいた事故を踏んでいる。
+    """
+    text = _text(path)
+    assert "SCOUT_DRY_RUN:" in text, "安全弁を環境へ渡していない"
+    assert "SCOUT_STATE_LOSS_GUARD:" in text, "状態消失ガードを環境へ渡していない"
+
+
+@pytest.mark.parametrize("path", TOUCHES_THE_PLATFORM, ids=lambda p: p.name)
+def test_no_workflow_cancels_a_running_execution(path: Path) -> None:
+    """12.1: 送信後・状態保存前で落とすと送信記録が巻き戻る。56件消えた形。"""
+    concurrency = _parsed(path).get("concurrency")
+    if concurrency is None:
+        return
+    assert (
+        concurrency.get("cancel-in-progress") is not True
+    ), f"{path.name} が走行中の実行をキャンセルします"
+
+
+def test_only_one_workflow_can_actually_send() -> None:
+    """**送信できるワークフローを1本に保つ。**
+
+    ``scout.yml`` は段階5を通過するまで schedule をコメントアウトしてあるので、
+    手で起動しない限り走らない。実際に1通を送る口は ``first-send.yml`` だけで
+    ある。増えていないことをここで見張る。
+    """
+    senders = [
+        path.name
+        for path in TOUCHES_THE_PLATFORM
+        if "scout send" in _text(path) or "scout send-first" in _text(path)
+    ]
+    assert set(senders) <= {
+        "scout.yml",
+        "first-send.yml",
+    }, f"送信コマンドを持つワークフローが増えています: {senders}"

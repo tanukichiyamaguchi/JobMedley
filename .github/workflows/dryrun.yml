@@ -1,0 +1,87 @@
+name: Dry run (manual, no send)
+
+# 段階5: **取り込みから生成まで通し、送信直前で止める。**
+#
+# **なぜ Recon (manual) に置かないのか。** 偵察のワークフローには
+# `scout dryrun` を置いてはいけない、と検査が明示している
+# (tests/guardrails/test_workflow_safety.py の test_the_recon_workflow_never_sends)。
+# 一度そこへ置こうとして止められた。理由はこうである:
+#
+#   偵察と送信を同じワークフローに同居させない。同居させると、偵察のつもりで
+#   送信ステップを踏む事故が起きる。
+#
+# `dryrun` は1通も送らないが、**送信payloadとURLを組み立てる**。組み立てる
+# コマンドは偵察の側ではない。だから別のワークフローにしてある。
+#
+# **このワークフローは送信しません。** `scout dryrun` は送信エンドポイントを
+# クライアントに渡さないので、安全弁の値によらず構造的に送れない。組み立てた
+# payload はその場で捨てる。
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "通す人数 (1-10)。1人ごとにLLMを呼びます"
+        type: string
+        required: false
+        default: "5"
+
+concurrency:
+  group: scout-dryrun
+  # 送信しないのでキャンセルしても状態は壊れない。とはいえ待たせるほどの
+  # 実行時間でもないので、走行中は素直に待たせる。
+  cancel-in-progress: false
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    # 1人ごとにLLMを呼ぶ。上限10名なので、取り込みと生成で最大10往復。
+    timeout-minutes: 30
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      JOBMEDLEY_STORAGE_STATE_B64: ${{ secrets.JOBMEDLEY_STORAGE_STATE_B64 }}
+      JOBMEDLEY_SESSION_CURL: ${{ secrets.JOBMEDLEY_SESSION_CURL }}
+      JOBMEDLEY_EMAIL: ${{ secrets.JOBMEDLEY_EMAIL }}
+      JOBMEDLEY_PASSWORD: ${{ secrets.JOBMEDLEY_PASSWORD }}
+      # 13.6: 送らないコマンドでも安全弁は明示的に渡す。**渡し忘れを既定値で
+      # 救わない。** ここを "true" 固定にしてあるのは、このワークフローに
+      # 解除する手段を置かないためである -- 解除する口があること自体が事故の
+      # 入口になる (12.6)。
+      SCOUT_DRY_RUN: "true"
+      SCOUT_STATE_LOSS_GUARD: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 段取りにも時間の上限を置く (経緯は Recon (manual) 側の同じ箇所)。
+      - name: Install
+        timeout-minutes: 6
+        run: pip install -e '.'
+
+      # --with-deps を付けない理由は Recon (manual) 側の同じ箇所にある。
+      - name: Install browser
+        timeout-minutes: 8
+        run: python -m playwright install chromium
+
+      # **状態のキャッシュを置かない。** dryrun は状態DBへ何も書かないので、
+      # 持ち帰るものが無い。置くと「書いていないのに保存された」ように見える。
+      #
+      # **ログに本文も会員番号も出ない。** 出るのは数と種別だけで、通った人と
+      # 外された人の内訳、外した理由、送信日時の書式、組み立ての成否が出る。
+      - name: Dry run up to the send (no send)
+        run: scout dryrun --limit "${{ inputs.limit || '5' }}"
+
+      # 13.2: 本文は個人データを含むので、偵察ダンプと同じ短い保持日数にする。
+      - name: Upload the generated messages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-dryrun
+          path: artifacts/recon/dryrun/
+          retention-days: 3
+          if-no-files-found: warn
