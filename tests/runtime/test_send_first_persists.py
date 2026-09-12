@@ -23,6 +23,7 @@ failed`` で落ちた。``send_records.candidate_id`` は ``candidates(candidate
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,19 +32,20 @@ from typing import Any
 import pytest
 
 from jobmedley_scout.api.client import ApiOutcome
-from jobmedley_scout.api.endpoints import SEND_PAID, Endpoint
+from jobmedley_scout.api.endpoints import QUOTA, SEND_PAID, Endpoint
 from jobmedley_scout.api.transport import HttpResponse
 from jobmedley_scout.clock import FixedClock
 from jobmedley_scout.config.schema import IngestConfig, LlmConfig, SafetyConfig
 from jobmedley_scout.generation.scout_message import GeneratedMessage, GenerationOutcome
 from jobmedley_scout.models.candidate import (
     Candidate,
+    ScoutHistoryEntry,
     ScoutHistorySummary,
 )
 from jobmedley_scout.models.send_record import SendSlot
 from jobmedley_scout.runtime.commands import send_first as send_first_module
 from jobmedley_scout.runtime.commands.ingest import IngestReport
-from jobmedley_scout.runtime.commands.send_first import (
+from jobmedley_scout.runtime.commands.send_first import (  # noqa: F401
     FirstSendReport,
     FirstSendStage,
     send_first,
@@ -317,3 +319,243 @@ def test_a_copy_survives_even_when_the_send_never_happens(
     written = (tmp_path / "sent.md").read_text(encoding="utf-8")
     assert "まだ送っていません" in written
     assert "送った** 文面" not in written
+
+
+# --------------------------------------------------------------------------
+# 辞退した相手を外す -- **判定は書かれていたが、誰も呼んでいなかった**
+# --------------------------------------------------------------------------
+
+
+def test_a_candidate_who_refused_a_scout_is_never_sent_to(
+    monkeypatch: pytest.MonkeyPatch, run: Any
+) -> None:
+    """**断った相手には送らない。**
+
+    2026-09-12、本番の送信が ``HTTP 200`` かつ ``errorMessage`` 有りで失敗した。
+    原因を追う途中で ``ScoutHistorySummary.refused()`` の呼び出し元が **0件**
+    であることが分かった。媒体から ``latestRefusedAt`` を取り込み、モデルに
+    ``refused()`` を書き、そこで止まっていた。
+
+    **部品ごとには正しく、部品のあいだが繋がっていない** -- 実測48・49・55回目と
+    同じ形である。だから検査も同じ形にする: **関門の先まで、本物のコードで通す。**
+
+    ``refused()`` が真になる候補者を1人だけ返し、**送信要求が1件も飛ばない**
+    ことを見る。単体で ``refused_scout()`` を呼ぶ検査では、今回の欠陥
+    (誰も呼んでいない) は捕まらない。
+
+    **送信日時を古い実日時で埋めてあるのが要点である。** 最初に書いたときは
+    ``latest_sent_at`` を空にしていて、候補者は確かに外れたが **外したのは直近
+    送信の関門だった** (日時が読めない → 判定不能 → 外す)。辞退の関門を消しても
+    この検査は緑になってしまう。**別の理由で緑になる検査は、何も守っていない。**
+    そこで直近送信の関門は素通りさせ、辞退だけで外れる形にしてある。
+    """
+    refused = ScoutHistorySummary(
+        entries=(
+            ScoutHistoryEntry(
+                # 1年以上前。直近送信の関門は NO_MATCH を返して通す。
+                latest_sent_at="2025/05/28 10:00:00",
+                sent_count=1,
+                latest_refused_at="2025/06/01 10:00:00",
+            ),
+        )
+    )
+
+    def _collect(*_args: Any, **_kwargs: Any) -> tuple[IngestReport, list[Candidate]]:
+        report = IngestReport()
+        report.search_uuid = SEARCH_UUID
+        return report, [_candidate(refused)]
+
+    monkeypatch.setattr(send_first_module, "collect_candidates", _collect)
+
+    report = run()
+
+    assert run.client.calls == [], "辞退した相手へ送信要求が飛んでいる"
+    assert report.chosen is False
+    assert report.stored is False
+    assert report.skipped, "外した理由が報告に残っていない (原則2)"
+    assert any("辞退" in outcome.evidence for outcome in report.skipped)
+
+
+def test_a_candidate_who_did_not_refuse_still_gets_the_message(run: Any) -> None:
+    """**倒しすぎないこと。** 断っていない相手は通ること。
+
+    安全側へ倒す関門は、倒しすぎれば「静かなゼロ件」になる (原則2)。既定の
+    候補者 (観測済み・履歴なし・辞退なし) は送信まで到達しなければならない。
+    """
+    report = run()
+    assert report.chosen is True
+    assert len(run.client.calls) == 1
+
+
+# --------------------------------------------------------------------------
+# 送信枠の残数 -- **座標は満たしていたが、コードは読んでいなかった**
+# --------------------------------------------------------------------------
+
+
+def _with_quota(body: dict[str, object]) -> Any:
+    """A client that answers the quota query, then the send."""
+
+    class _QuotaClient(_Client):
+        def call(
+            self,
+            endpoint: Endpoint,
+            *,
+            url: str,
+            json_body: Any = None,
+            idempotency_key: str | None = None,
+        ) -> ApiOutcome:
+            if endpoint.id == QUOTA:
+                return ApiOutcome(
+                    endpoint_id=endpoint.id,
+                    status=200,
+                    succeeded=True,
+                    response=HttpResponse(
+                        status=200,
+                        body_text=json.dumps(body),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                )
+            return super().call(
+                endpoint, url=url, json_body=json_body, idempotency_key=idempotency_key
+            )
+
+    return _QuotaClient()
+
+
+_QUOTA_ENDPOINT = Endpoint(
+    id=QUOTA,
+    method="GET",
+    url_pattern="https://example.invalid/api/customers/messages/scout_count/",
+    success_statuses=frozenset(range(200, 300)),
+    slot=SendSlot.UNKNOWN,
+    side_effectful=False,
+)
+
+
+def _run_with(
+    client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    db: sqlite3.Connection,
+    clock: FixedClock,
+    tmp_path: Path,
+    candidate: Candidate | None = None,
+) -> FirstSendReport:
+    """送信路を、渡した client で通す。**残数照会の endpoint を組んである。**
+
+    :func:`run` フィクスチャは ``SEND_PAID`` だけを渡すので、残数照会は
+    「endpointが組まれていません」で読めないまま通る。それでは今回足した配線を
+    一度も踏まないので、こちらを使う。
+    """
+    row = candidate if candidate is not None else _candidate()
+
+    def _collect(*_args: Any, **_kwargs: Any) -> tuple[IngestReport, list[Candidate]]:
+        report = IngestReport()
+        report.search_uuid = SEARCH_UUID
+        return report, [row]
+
+    monkeypatch.setattr(send_first_module, "collect_candidates", _collect)
+    monkeypatch.setattr(send_first_module, "generate_scout_body", lambda *a, **k: _message())
+
+    return send_first(
+        client,
+        {
+            SEND_PAID: Endpoint(
+                id=SEND_PAID,
+                method="POST",
+                url_pattern="https://example.invalid/graphql/SendSingleScout",
+                success_statuses=None,
+                slot=SendSlot.PAID,
+                side_effectful=True,
+            ),
+            QUOTA: _QUOTA_ENDPOINT,
+        },
+        _Coordinates(),  # type: ignore[arg-type]
+        IngestConfig(search_condition_id="1", page_size=25, max_pages=1, fetch_resumes=True),
+        SafetyConfig(
+            dry_run=False,
+            state_loss_guard=True,
+            kill_switch_path=tmp_path / "kill",
+            ingest_cap=200,
+            max_llm_requests_per_message=6,
+        ),
+        db,
+        clock,
+        llm=object(),  # type: ignore[arg-type]
+        llm_config=LlmConfig(
+            model="claude-sonnet-5",
+            max_tokens=16000,
+            thinking_enabled=True,
+            effort="medium",
+            max_retries=3,
+        ),
+        prompt_template="",
+        clinic={},
+        clinic_address="",
+        max_requests=6,
+        acknowledged=True,
+        run_id="test-run",
+        destination=tmp_path / "sent.md",
+        skip_if_scouted_within_days=3,
+    )
+
+
+def test_a_used_up_quota_stops_before_the_send(
+    monkeypatch: pytest.MonkeyPatch,
+    db: sqlite3.Connection,
+    clock: FixedClock,
+    tmp_path: Path,
+) -> None:
+    """**枠を使い切っていたら送らない。**
+
+    2026-09-12 まで ``api.quota.url_pattern`` は **一度も呼ばれていなかった。**
+    座標は 2026-08-21 に観測済みで、注記には「これは8章の『残数は毎回読む』を
+    満たす」と書いてあった。満たしていたのは座標だけである。
+
+    読まないあいだ、枠切れは **理由の分からない失敗** として現れる -- 媒体の
+    エラー文言は 13.2 のため記録していないので、画面を見るまで誰にも分からない。
+    """
+    client = _with_quota({"remaining_count": 0, "total_count": 62})
+    report = _run_with(client, monkeypatch, db, clock, tmp_path)
+
+    assert report.reached() is FirstSendStage.QUOTA_EXHAUSTED
+    assert report.quota is not None
+    assert report.quota.remaining == 0
+    # 送信要求が飛んでいないこと。照会 (GET) は飛んでよい。
+    assert [c for c in client.calls if c[0].id != QUOTA] == []
+    assert "送っていません" in report.render()
+    assert "使い切って" in report.render()
+
+
+def test_room_in_the_quota_lets_the_send_through(
+    monkeypatch: pytest.MonkeyPatch,
+    db: sqlite3.Connection,
+    clock: FixedClock,
+    tmp_path: Path,
+) -> None:
+    """**倒しすぎないこと。** 枠が在れば送る。残数は報告に出る (8章)。"""
+    client = _with_quota({"remaining_count": 51, "total_count": 62})
+    report = _run_with(client, monkeypatch, db, clock, tmp_path)
+
+    assert report.reached() is FirstSendStage.SENT
+    assert "51" in report.render()
+
+
+def test_an_unreadable_quota_does_not_stop_the_send(
+    monkeypatch: pytest.MonkeyPatch,
+    db: sqlite3.Connection,
+    clock: FixedClock,
+    tmp_path: Path,
+) -> None:
+    """**読めないことを「枠切れ」に倒さない。**
+
+    倒すと、応答の形が変わった日に送信が全部止まる -- 「静かなゼロ件」の別の顔
+    である。読めないことは報告に出し、送信自体は他の関門に委ねる。枠が本当に
+    無ければ媒体が断るので、取り消せない事故にはならない。
+    """
+    client = _with_quota({"remaining": 51})
+    report = _run_with(client, monkeypatch, db, clock, tmp_path)
+
+    assert report.reached() is FirstSendStage.SENT
+    assert report.quota is not None
+    assert report.quota.readable() is False
+    assert "読めません" in report.render()
