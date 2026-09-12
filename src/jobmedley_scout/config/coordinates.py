@@ -550,10 +550,29 @@ REQUIRED_BY_COMMAND: dict[str, frozenset[str]] = {
     # 確かめることもできない。**送信せずには埋められない座標を、送信しない
     # コマンドの前提にしていた** -- このモジュール自身の docstring が戒めている
     # 「鶏と卵」そのものである。
+    #
+    # **2026-09-12、実装したときに集合が実態と合っていないことが分かった。**
+    # 上の理屈は正しいのに、集合のほうが取り込みを1つも要求していなかった。
+    # ``dryrun`` は一覧を引いてレジュメを読んで生成まで通すので、``ingest`` の
+    # 座標がすべて要る。名前だけあって中身が無いあいだは誰も気付けなかった --
+    # **実装されていないコマンドの前提は、検査されないまま腐る。**
+    #
+    # 送信先URLと payload の雛形は **残す。** 一度も呼ばないが、**組み立てる**。
+    # 一度これを外そうとして、検査
+    # (``test_dryrun_still_requires_what_it_needs_to_build_a_send``) に止められた。
+    # 検査の言い分が正しい -- 組み立てられない状態で「空振り成功」と報告すれば、
+    # それは原則2 の静かなゼロ件を手順書の側で作ることになる。段階5 が通って
+    # 段階6 が組み立てで落ちるなら、予行演習が予行になっていない。
     "dryrun": frozenset(
         {
             "auth.success_marker_selector",
             "api.base_url",
+            "nav.candidate_list_url",
+            "nav.list_ready_selector",
+            "api.candidate_list.url_pattern",
+            "api.candidate_list.payload_template",
+            "api.resume.url_pattern",
+            "api.resume.payload_template",
             "api.send.paid.url_pattern",
             "api.send.paid.payload_template",
         }

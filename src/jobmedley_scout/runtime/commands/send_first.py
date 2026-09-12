@@ -335,7 +335,7 @@ def send_first(
     candidate_repo.upsert_candidate(connection, candidate, source=SOURCE, clock=clock)
     report.stored = True
 
-    subject = _local_subject(candidate, clock)
+    subject = local_subject(candidate, clock)
     reserved = send_repo.reserve_send(
         connection,
         candidate_id=candidate.candidate_id,
@@ -410,7 +410,7 @@ def _with_provisional_success(endpoint: Endpoint) -> Endpoint:
     )
 
 
-def _local_subject(candidate: Candidate, clock: Clock) -> str:
+def local_subject(candidate: Candidate, clock: Clock) -> str:
     """A label for our own records. **媒体へは届かない。**
 
     送信payloadに件名の欄が無いので、これは手元の記録と返信突合のための札である。
@@ -474,4 +474,10 @@ def _write_body(destination: Path, body: str, candidate: Candidate, heading: str
         return
 
 
-__all__ = ["FIRST_SEND_CAP", "FirstSendReport", "FirstSendStage", "send_first"]
+__all__ = [
+    "FIRST_SEND_CAP",
+    "FirstSendReport",
+    "FirstSendStage",
+    "local_subject",
+    "send_first",
+]

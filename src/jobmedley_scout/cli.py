@@ -202,9 +202,6 @@ def _dispatch(args: argparse.Namespace) -> int:
         "followup": "followup",
         "sync-replies": "sync-replies",
         "analytics": "analytics",
-        # **``send`` に写像しない。** 一通も送らないコマンドが、送信の応答を
-        # 解釈するための座標を要求すると、梯子が閉じる (coordinates.py の注記)。
-        "dryrun": "dryrun",
     }.get(args.command)
 
     if args.command == "ingest":
@@ -214,6 +211,11 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "send-first":
         assert_ready_for(coordinates, "send-first")
         return _dispatch_send_first(args, config, coordinates)
+
+    if args.command == "dryrun":
+        # **送信の座標は要求しない** (url_pattern は一度も呼ばない)。
+        assert_ready_for(coordinates, "dryrun")
+        return _dispatch_dryrun(args, config, coordinates)
 
     if args.command == "preview":
         # **送信の座標は要求しない。** 一通も送らないコマンドが送信の応答を
@@ -292,6 +294,70 @@ def _dispatch_preview(config: Config, coordinates: SiteCoordinates) -> int:
         )
     print(report.render())
     return int(ExitCode.OK)
+
+
+def _dispatch_dryrun(args: argparse.Namespace, config: Config, coordinates: SiteCoordinates) -> int:
+    """段階5: 取り込みから生成まで通し、**送信直前で止める。**
+
+    **送信路を渡していない。** 安全弁の値に依存せず、配線そのもので送れない形に
+    してある (``preview`` と同じ)。``SCOUT_DRY_RUN`` が false でも1通も送らない。
+
+    **状態DBへ書かない。** 送っていないのに「取り込み済み」になると、後から見て
+    送信対象だったのかが分からなくなる。
+    """
+    from anthropic import Anthropic
+
+    from jobmedley_scout.api.endpoints import build_endpoints
+    from jobmedley_scout.browser import session_store
+    from jobmedley_scout.browser.context import browser_context
+    from jobmedley_scout.browser.navigation import goto
+    from jobmedley_scout.clock import SystemClock
+    from jobmedley_scout.config.placeholders import require
+    from jobmedley_scout.config.secrets import load_secrets
+    from jobmedley_scout.generation.clinic import load_clinic_facts
+    from jobmedley_scout.runtime.commands.dryrun import DryRunStage, dryrun
+
+    secrets = load_secrets()
+    api_key = secrets.require_anthropic_key()
+
+    _restore_session_from_secrets(config)
+    session = session_store.session_path(config.paths.credentials_dir)
+    if not session.exists():
+        print("保存セッションがありません。段階1からやり直してください。", file=sys.stderr)
+        return int(ExitCode.AUTH_EXPIRED)
+
+    clinic = load_clinic_facts(Path("config/clinic.yaml"))
+    prompt_template = Path("config/prompts/scout_dental_hygienist.md").read_text(encoding="utf-8")
+    destination = config.paths.recon_dump_dir / "dryrun" / "scout-dryrun.md"
+
+    with browser_context(config.browser, storage_state=session) as (context, page):
+        goto(
+            page,
+            require(coordinates.url("nav.candidate_list_url"), used_by="cli.dryrun"),
+            config.browser,
+        )
+        client, csrf_note = _api_client_with_csrf(context, page, coordinates, used_by="cli.dryrun")
+        print(f"CSRFトークン: {csrf_note}")
+        report = dryrun(
+            client,
+            build_endpoints(coordinates),
+            coordinates,
+            config.ingest,
+            config.safety,
+            SystemClock(),
+            llm=Anthropic(api_key=api_key),
+            llm_config=config.llm,
+            prompt_template=prompt_template,
+            clinic=clinic,
+            clinic_address=clinic["CLINIC_ADDRESS"],
+            max_requests=config.safety.max_llm_requests_per_message,
+            limit=int(getattr(args, "limit", 5)),
+            skip_if_scouted_within_days=config.send.skip_if_scouted_within_days,
+            destination=destination,
+        )
+    print(report.render())
+    # **通し切れなかったことを成功で終えない** (原則2)。
+    return int(ExitCode.OK if report.reached() is DryRunStage.READY else ExitCode.UNKNOWN)
 
 
 def _dispatch_send_first(
