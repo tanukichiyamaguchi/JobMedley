@@ -33,6 +33,8 @@ from pathlib import Path
 from jobmedley_scout.api.client import JobMedleyApiClient
 from jobmedley_scout.api.endpoints import SEND_PAID, Endpoint
 from jobmedley_scout.api.payloads import PLACEHOLDER_SEARCH_UUID
+from jobmedley_scout.api.quota import QuotaReading, read_quota
+from jobmedley_scout.api.quota import should_stop as quota_should_stop
 from jobmedley_scout.api.send import send_message
 from jobmedley_scout.clock import Clock
 from jobmedley_scout.config.effective import SOURCE_CONFIG
@@ -51,6 +53,8 @@ from jobmedley_scout.runtime.commands.ingest import SOURCE, collect_candidates
 from jobmedley_scout.state import candidate_repo, send_repo
 from jobmedley_scout.state.recency import scouted_within, should_skip
 from jobmedley_scout.targeting.determination import Determination, RuleOutcome
+from jobmedley_scout.targeting.scout_history import refused_scout
+from jobmedley_scout.targeting.scout_history import should_skip as should_skip_refused
 
 #: **1件。設定では変えられない。** 1通目は1通である。
 FIRST_SEND_CAP = 1
@@ -67,6 +71,8 @@ class FirstSendStage(StrEnum):
 
     DRY_RUN_ON = "dry_run_on"
     NOT_ACKNOWLEDGED = "not_acknowledged"
+    #: 媒体の送信枠を使い切っている。**門であって、進んだ証拠ではない。**
+    QUOTA_EXHAUSTED = "quota_exhausted"
     NO_CANDIDATE = "no_candidate"
     ALL_SKIPPED = "all_skipped"
     NO_MESSAGE = "no_message"
@@ -83,6 +89,8 @@ class FirstSendReport:
     #: dry_run の値が **どこから来たか** (12.6)。値だけでは配線漏れが隠れる。
     dry_run_source: str = ""
     acknowledged: bool = False
+    #: 媒体に聞いた送信枠の残数。**毎回読む** (8章)。``None`` は照会していない。
+    quota: QuotaReading | None = None
     rows_seen: int = 0
     message: GeneratedMessage | None = None
     search_uuid: str | None = None
@@ -110,6 +118,10 @@ class FirstSendReport:
             return FirstSendStage.DRY_RUN_ON
         if not self.acknowledged:
             return FirstSendStage.NOT_ACKNOWLEDGED
+        # **残数も門である。** 読めた上で0以下のときだけ止まる。読めなかったときに
+        # 止めると、応答の形が変わった日に送信が全部止まる (原則2 の別の顔)。
+        if self.quota is not None and self.quota.exhausted():
+            return FirstSendStage.QUOTA_EXHAUSTED
 
         # ここから先は **進んだ証拠** の連鎖である。後の段の条件は前の段に
         # 含まれていなければならない。
@@ -136,6 +148,12 @@ class FirstSendReport:
         stage = self.reached()
         lines = ["段階4-3: 1通目の送信", ""]
 
+        # **残数は毎回報告に出す** (8章)。値は個人データではないので伏せない。
+        # 出していなかったあいだ、枠切れは「理由の分からない失敗」として現れた。
+        if self.quota is not None:
+            lines.append(f"  {self.quota.describe()}")
+            lines.append("")
+
         if stage is FirstSendStage.DRY_RUN_ON:
             lines.append("  **送っていません。** dry_run が有効です。")
             # **由来を必ず添える** (12.6)。実測48回目に、ワークフローは
@@ -153,6 +171,10 @@ class FirstSendReport:
         if stage is FirstSendStage.NOT_ACKNOWLEDGED:
             lines.append("  **送っていません。** 取り消せないことの確認がありません。")
             lines.append("  --i-understand-sends-are-irreversible を付けてください。")
+            return "\n".join(lines)
+        if stage is FirstSendStage.QUOTA_EXHAUSTED:
+            lines.append("  **送っていません。** 媒体の送信枠を使い切っています。")
+            lines.append("  月次でリセットされます。枠が戻ってから実行してください。")
             return "\n".join(lines)
         if stage is FirstSendStage.NO_CANDIDATE:
             lines.append("  **送っていません。** 送る相手が取れませんでした。")
@@ -272,6 +294,20 @@ def send_first(
     if safety.dry_run or not acknowledged:
         return report
 
+    # **残数を毎回読む** (8章)。引き算で持つと必ずずれる -- 媒体側で人が送るし、
+    # 月次でリセットされる。
+    #
+    # 2026-09-12 まで、この照会は **一度も呼ばれていなかった。** 座標は
+    # 2026-08-21 に観測済みで、注記には「これは8章の『残数は毎回読む』を満たす」と
+    # 書いてあった。満たしていたのは座標だけである (api/quota.py の冒頭)。
+    #
+    # 読めないことは送信を止める理由にしない。止めるのは **読めた上で0以下** の
+    # ときだけである -- 応答の形が変わった日に送信が全部止まると、それは
+    # 「静かなゼロ件」の別の顔になる。
+    report.quota = read_quota(client, endpoints)
+    if quota_should_stop(report.quota):
+        return report
+
     ingest_report, candidates = collect_candidates(
         client, endpoints, coordinates, ingest_config, safety, cap=FIRST_SEND_CAP
     )
@@ -280,7 +316,7 @@ def send_first(
     if not candidates:
         return report
 
-    # **直近に送った相手を外す。** ここが唯一の関門である。
+    # **直近に送った相手と、辞退した相手を外す。**
     #
     # 見るのは **媒体側の履歴** であってこちらの送信記録ではない。自動化を
     # 始める前に人手で送った分は send_records に無く、媒体側にしか無い
@@ -297,6 +333,13 @@ def send_first(
         )
         if should_skip(outcome):
             report.skipped.append(outcome)
+            continue
+        # **辞退した相手を外す。** 2026-09-12 まで、この判定は書かれていたのに
+        # 誰からも呼ばれていなかった (targeting/scout_history.py の冒頭)。
+        # 断った相手へもう一度送るのは、送信が失敗するより害が大きい。
+        refusal = refused_scout(row.scout_history)
+        if should_skip_refused(refusal):
+            report.skipped.append(refusal)
             continue
         candidate = row
         break
